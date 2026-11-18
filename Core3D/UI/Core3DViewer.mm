@@ -4,6 +4,7 @@
 #include <gp_Pnt2d.hxx>
 #include "../OCCTKit/NativeMeshVertexMove.hxx"
 #include "../OCCTKit/NativeMeshRegionExtrude.hxx"
+#include "../OCCTKit/CommittedFaceCheckedBits.h"
 //
 //  Core3DViewer.m
 //  Core3D
@@ -6613,6 +6614,9 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
                                  : NativeHistoryOutcome::HistoryFailed;
         if (changed && myDoc == document && document->Document() == nativeDocument) {
             const HistoryRedrawCheckedBits keepCheckedBits(nativeDocument);
+            // Selecting the parts again meshes them for picking; keep their saved bits
+            // (taken after the history step, so they are the restored parts' own).
+            const core3d::CommittedFaceCheckedBits keepFaceBits(nativeDocument);
             result.documentRedrawn = redrawDocument();
             if (result.documentRedrawn) restoreHistorySelection();
         }

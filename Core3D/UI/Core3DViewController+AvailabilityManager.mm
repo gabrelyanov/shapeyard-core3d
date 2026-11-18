@@ -335,9 +335,10 @@ Core3DModelCapability DocumentExportCapabilities(
             if (!sweep.label.IsNull() || !loft.label.IsNull()) {
                 // Translation/local-transform copies stage an exact recipe on
                 // every destination; Mirror still lacks a reflection-frame policy.
+                // Union/Subtract stay: the plain route bakes the recipe (BakedBooleanAdmits).
                 definitionCapabilities=static_cast<Core3DModelCapability>(definitionCapabilities
                     & ~(Core3DModelCapabilitySubshapeSelection|Core3DModelCapabilityNonuniformScale
-                        |Core3DModelCapabilityMirror|Core3DModelCapabilityBoolean
+                        |Core3DModelCapabilityMirror
                         |Core3DModelCapabilityChamfer|Core3DModelCapabilityExtrusion|Core3DModelCapabilityShell
                         ));
             }

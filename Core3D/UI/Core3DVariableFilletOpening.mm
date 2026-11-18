@@ -53,6 +53,7 @@
 NSErrorDomain const Core3DVariableFilletErrorDomain = @"Core3DVariableFilletErrorDomain";
 NSString *const Core3DVariableFilletRefusalReasonKey = @"b3.refusal";
 NSString *const Core3DVariableFilletRefusalRawValueKey = @"b3.refusalRaw";
+NSString *const Core3DVariableFilletRadiusLimitMMKey = @"b3.radiusLimitMM";
 
 namespace {
 
@@ -276,6 +277,26 @@ bool RestoreRetainedAnchor(const vro::Capture& capture,
     } catch (...) { issued = {}; return false; }
 }
 
+// K19: a build refusal that names what to change. A clearance refusal carries
+// the radius the issued edge can take, read from the same source bytes and
+// anchor the build used; every other refusal is the plain typed refusal.
+NSError *VRBuildRefusal(Core3DVariableFilletError code, vrf::Refusal refusal,
+                        const IssuedAnchor& issued, double metersPerUnit) {
+    NSError *plain = VRRefusal(code, refusal);
+    if (refusal != vrf::Refusal::Clearance) return plain;
+    try {
+        TopoDS_Shape source; double limitLocal = 0;
+        if (!vrf::detail::readShape(issued.sourceBytes, source)
+            || !vrf::RadiusLimitLocal(source, issued.anchor, metersPerUnit, limitLocal))
+            return plain;
+        const double limitMM = limitLocal * metersPerUnit * 1000.0;
+        if (!std::isfinite(limitMM) || limitMM <= 0) return plain;
+        NSMutableDictionary *info = [plain.userInfo mutableCopy];
+        info[Core3DVariableFilletRadiusLimitMMKey] = @(limitMM);
+        return [NSError errorWithDomain:plain.domain code:plain.code userInfo:info];
+    } catch (...) { return plain; }
+}
+
 // ----- Independent section observation of the emitted detached candidate ---
 
 struct SectionObservationValue final {
@@ -326,31 +347,33 @@ bool ObserveSections(const std::vector<std::uint8_t>& candidateBytes,
         // original edge line, both independent of the built fillet face.
         TopTools_IndexedMapOfShape faces;
         TopExp::MapShapes(candidate, TopAbs_FACE, faces);
-        TopoDS_Face supportA, supportB;
+        // K19: a support plane may arrive as several coplanar faces (a
+        // Push-pull joins its new side to the old one without merging them).
+        // Every face on the support plane is that support; the plane itself
+        // stays unique, so the measurements below are unchanged. One face per
+        // plane behaves exactly as before.
         gp_Pln planeA, planeB;
         unsigned countA = 0, countB = 0;
+        TopTools_IndexedMapOfShape supportEdgesA, supportEdgesB;
         for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
             const TopoDS_Face face = TopoDS::Face(faces.FindKey(index));
             gp_Pln plane;
             if (PlaneForSupport(face, anchor.normalA, plane)
                 && plane.Distance(startPoint) <= planeTolerance
                 && plane.Distance(endPoint) <= planeTolerance) {
-                ++countA; supportA = face; planeA = plane;
+                if (countA++ == 0) planeA = plane;
+                TopExp::MapShapes(face, TopAbs_EDGE, supportEdgesA);
             }
             if (PlaneForSupport(face, anchor.normalB, plane)
                 && plane.Distance(startPoint) <= planeTolerance
                 && plane.Distance(endPoint) <= planeTolerance) {
-                ++countB; supportB = face; planeB = plane;
+                if (countB++ == 0) planeB = plane;
+                TopExp::MapShapes(face, TopAbs_EDGE, supportEdgesB);
             }
         }
-        if (countA != 1 || countB != 1) {
+        if (countA == 0 || countB == 0) {
             failure = "support faces not uniquely identified"; return false;
         }
-        TopTools_IndexedDataMapOfShapeListOfShape adjacency;
-        TopExp::MapShapesAndAncestors(candidate, TopAbs_EDGE, TopAbs_FACE, adjacency);
-        TopTools_IndexedMapOfShape supportEdgesA, supportEdgesB;
-        TopExp::MapShapes(supportA, TopAbs_EDGE, supportEdgesA);
-        TopExp::MapShapes(supportB, TopAbs_EDGE, supportEdgesB);
         TopoDS_Face fillet; unsigned filletCount = 0;
         for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
             const TopoDS_Face face = TopoDS::Face(faces.FindKey(index));
@@ -1150,7 +1173,7 @@ Core3DVariableFilletOwnerValuesForDocument(
                 build.refusal == vrf::Refusal::Cancelled ? Core3DVariableFilletErrorCancelled
                 : build.refusal == vrf::Refusal::Budget ? Core3DVariableFilletErrorBudget
                 : Core3DVariableFilletErrorBuildRefused;
-            *error = VRRefusal(code, build.refusal);
+            *error = VRBuildRefusal(code, build.refusal, _issued, self.metersPerUnit);
         }
         return nil;
     }
@@ -1194,7 +1217,7 @@ Core3DVariableFilletOwnerValuesForDocument(
                 build.refusal == vrf::Refusal::Cancelled ? Core3DVariableFilletErrorCancelled
                 : build.refusal == vrf::Refusal::Budget ? Core3DVariableFilletErrorBudget
                 : Core3DVariableFilletErrorBuildRefused;
-            *error = VRRefusal(code, build.refusal);
+            *error = VRBuildRefusal(code, build.refusal, _issued, self.metersPerUnit);
         }
         return nil;
     }
