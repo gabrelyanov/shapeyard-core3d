@@ -4733,8 +4733,31 @@ public:
             } catch (...) { raw = "?"; }
         }
 #endif
+        // The bundled BinMNaming_NamedShapeDriver reads the stored version and then
+        // overwrites it with the evolution enum, so a reopened part saved different
+        // bytes (version 1 -> 0). The record always starts count, version, evolution:
+        // read the version first and put it back after the read. No writer change.
+        Standard_Integer storedVersion = -1;
+        if constexpr (std::is_same_v<Driver, BinMNaming_NamedShapeDriver>) {
+            try {
+                const Standard_Integer start = theSource.Position();
+                Standard_Integer count = -1, version = -1;
+                theSource.GetInteger(count);
+                theSource.GetInteger(version);
+                theSource.SetPosition(start);
+                if (count >= 0 && version >= 0) storedVersion = version;
+            } catch (...) { storedVersion = -1; }
+        }
         const Standard_Boolean succeeded = Driver::Paste(
             theSource, theTarget, theRelocationTable);
+        if constexpr (std::is_same_v<Driver, BinMNaming_NamedShapeDriver>) {
+            if (succeeded && storedVersion >= 0) {
+                const Handle(TNaming_NamedShape) named =
+                    Handle(TNaming_NamedShape)::DownCast(theTarget);
+                if (!named.IsNull() && named->Version() != storedVersion)
+                    named->SetVersion(storedVersion);
+            }
+        }
 #if DEBUG
         if constexpr (std::is_same_v<Driver, BinMNaming_NamedShapeDriver>) {
             try {
