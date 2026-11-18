@@ -35,7 +35,6 @@
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Defeaturing.hxx>
-#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepClass_FaceClassifier.hxx>
@@ -815,23 +814,10 @@ inline Standard_Boolean ShellAroundSmallRounds(
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID || rounds.empty())
             return Standard_False;
         Message_ProgressScope scope(progress, "Shell", 1);
-        // Remove Features marks the shapes it reads (the "checked" flag) and the part's
-        // shapes are the saved document's: it reads a deep copy, so Undo of this Shell
-        // gives back the same saved bytes.
-        BRepBuilderAPI_Copy copier(source, Standard_True, Standard_False);
-        if (!copier.IsDone() || copier.Shape().IsNull()) return Standard_False;
-        const auto copied = [&copier](const TopoDS_Face& face) -> TopoDS_Shape {
-            const TopTools_ListOfShape& now = copier.Modified(face);
-            return now.Extent() == 1 ? now.First() : TopoDS_Shape();
-        };
         BRepAlgoAPI_Defeaturing remove;
-        remove.SetShape(copier.Shape());
+        remove.SetShape(source);
         TopTools_ListOfShape unwanted;
-        for (const TopoDS_Face& face : rounds) {
-            const TopoDS_Shape copy = copied(face);
-            if (copy.IsNull()) return Standard_False;
-            unwanted.Append(copy);
-        }
+        for (const TopoDS_Face& face : rounds) unwanted.Append(face);
         remove.AddFacesToRemove(unwanted);
         remove.Build();
         if (!remove.IsDone() || remove.HasErrors()) return Standard_False;
@@ -843,9 +829,8 @@ inline Standard_Boolean ShellAroundSmallRounds(
         TopTools_IndexedMapOfShape sharpFaces;
         TopExp::MapShapes(sharp, TopAbs_FACE, sharpFaces);
         std::vector<TopoDS_Face> sharpOpenings;
-        for (const TopoDS_Face& given : openings) {
-            const TopoDS_Shape opening = copied(given);
-            if (opening.IsNull() || remove.IsDeleted(opening)) return Standard_False;
+        for (const TopoDS_Face& opening : openings) {
+            if (remove.IsDeleted(opening)) return Standard_False;
             const TopTools_ListOfShape& changed = remove.Modified(opening);
             if (changed.Extent() > 1) return Standard_False;
             const TopoDS_Shape now = changed.IsEmpty() ? TopoDS_Shape(opening) : changed.First();
@@ -917,9 +902,6 @@ inline Standard_Boolean ShellAroundSmallRounds(
         finished.SetArguments(objects);
         finished.SetTools(tools);
         finished.SetFuzzyValue(tolerance);
-        // The part's shapes are the saved document's: the fuzzy cut must not mark or
-        // widen them in place, or Undo of this Shell would not give back the same bytes.
-        finished.SetNonDestructive(Standard_True);
         finished.Build();
         if (!finished.IsDone() || finished.HasErrors()) return Standard_False;
         return ShellOneOpenedSolid(finished.Shape(), made);
@@ -936,11 +918,6 @@ inline Standard_Boolean ShellAroundSmallRounds(
 //! handed back in `made` (the builder then holds nothing) and the caller
 //! validates it like any other result.
 //! Returns false only when the guard held the shell back and nothing was made.
-inline Standard_Boolean MakeInwardShellOnCopy(
-    BRepOffsetAPI_MakeThickSolid& builder, const TopoDS_Shape& source,
-    const std::vector<TopoDS_Face>& faces, Standard_Real thickness, Standard_Real tolerance,
-    const Message_ProgressRange& progress, Standard_Integer* normalizationStatus, TopoDS_Shape* made);
-
 inline Standard_Boolean MakeInwardShell(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
@@ -954,29 +931,6 @@ inline Standard_Boolean MakeInwardShell(
         return MakeInwardShellPlain(builder, source, faces, thickness, tolerance, progress,
                                     normalizationStatus, Standard_False, nullptr, nullptr, nullptr);
     made->Nullify();
-    // DIAGNOSTIC (18 Nov 01:08, push-pull): every route reads a deep copy of the part, to learn
-    // whether a step in here marks the part's own shapes (Undo bytes of the lamp-shade Shell).
-    BRepBuilderAPI_Copy partCopier(source, Standard_True, Standard_False);
-    if (!partCopier.IsDone() || partCopier.Shape().IsNull()) return Standard_False;
-    std::vector<TopoDS_Face> copiedFaces;
-    for (const TopoDS_Face& face : faces) {
-        const TopTools_ListOfShape& now = partCopier.Modified(face);
-        if (now.Extent() != 1) return Standard_False;
-        copiedFaces.push_back(TopoDS::Face(now.First()));
-    }
-    return MakeInwardShellOnCopy(builder, partCopier.Shape(), copiedFaces, thickness, tolerance,
-                                 progress, normalizationStatus, made);
-}
-
-inline Standard_Boolean MakeInwardShellOnCopy(
-    BRepOffsetAPI_MakeThickSolid& builder,
-    const TopoDS_Shape& source,
-    const std::vector<TopoDS_Face>& faces,
-    Standard_Real thickness, Standard_Real tolerance,
-    const Message_ProgressRange& progress,
-    Standard_Integer* normalizationStatus,
-    TopoDS_Shape* made)
-{
     ShellRoundedEdges rounded;
     const Standard_Boolean known = ShellRoundedEdgesOf(source, faces, thickness, tolerance, rounded);
     Message_ProgressScope scope(progress, "Shell", 2);
