@@ -2929,6 +2929,7 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
 #include <map>
 #include <set>
 #include <deque>
+#include <type_traits>
 #include <locale>
 #include <sstream>
 #include <TDF_AttributeIterator.hxx>
@@ -4678,6 +4679,25 @@ std::string AuthoredTextureIdentifier(const Standard_Byte* theBytes,
     return stream.str();
 }
 
+#if DEBUG
+// Byte-drift diagnostic (lamp bytes / Delete cold reopen): the last NamedShape
+// records read, as "count,int@4,char@4,int-after-char -> Version() after Paste".
+static std::deque<std::string> gDebugNamedShapeReads;
+#endif
+std::string DebugNamedShapeReadSummaryImpl() noexcept {
+#if DEBUG
+    try {
+        // Newest first: the failing message is truncated by the run log.
+        std::string out;
+        for (auto row = gDebugNamedShapeReads.rbegin(); row != gDebugNamedShapeReads.rend(); ++row) {
+            out += *row; out += ' ';
+        }
+        return out;
+    } catch (...) {}
+#endif
+    return {};
+}
+
 template <typename Driver>
 class Core3DFailClosedDriver final : public Driver
 {
@@ -4693,8 +4713,42 @@ public:
         const Handle(TDF_Attribute)& theTarget,
         BinObjMgt_RRelocationTable& theRelocationTable) const override
     {
+#if DEBUG
+        std::string raw;
+        if constexpr (std::is_same_v<Driver, BinMNaming_NamedShapeDriver>) {
+            try {
+                const Standard_Integer start = theSource.Position();
+                Standard_Integer count = -1, at4 = -1, afterChar = -1;
+                Standard_Character evolution = 0;
+                theSource.GetInteger(count);
+                theSource.GetInteger(at4);
+                theSource.SetPosition(start);
+                theSource.GetInteger(count);
+                theSource.GetCharacter(evolution);
+                theSource.GetInteger(afterChar);
+                theSource.SetPosition(start);
+                raw = std::to_string(count) + "," + std::to_string(at4) + ","
+                    + std::to_string(static_cast<int>(evolution)) + "," + std::to_string(afterChar);
+            } catch (...) { raw = "?"; }
+        }
+#endif
         const Standard_Boolean succeeded = Driver::Paste(
             theSource, theTarget, theRelocationTable);
+#if DEBUG
+        if constexpr (std::is_same_v<Driver, BinMNaming_NamedShapeDriver>) {
+            try {
+                const Handle(TNaming_NamedShape) named = Handle(TNaming_NamedShape)::DownCast(theTarget);
+                TCollection_AsciiString entry;
+                if (!theTarget.IsNull() && !theTarget->Label().IsNull())
+                    TDF_Tool::Entry(theTarget->Label(), entry);
+                // Part roots only (0:1:1:N): the drifting records.
+                if (theTarget->Label().Depth() == 3)
+                    gDebugNamedShapeReads.push_back(std::string(entry.ToCString()) + ":" + raw + "->v"
+                        + (named.IsNull() ? std::string("null") : std::to_string(named->Version())));
+                while (gDebugNamedShapeReads.size() > 24) gDebugNamedShapeReads.pop_front();
+            } catch (...) {}
+        }
+#endif
         if (!succeeded) {
             RejectSafeBinaryRead();
         }
@@ -26472,65 +26526,79 @@ Standard_Boolean OcctDocument::HasUnroutedRetainedDependent(
     } catch (...) { return Standard_True; }
 }
 
+namespace {
+// DEBUG readout for K27: which clause of the Pattern-original Delete refused
+// (0 = none / plain removal). Release builds keep the value but never read it.
+int gDebugPatternDetachStage = 0;
+Standard_Boolean PatternDetachRefuse(int stage) noexcept {
+    gDebugPatternDetachStage = stage;
+    return Standard_False;
+}
+}
+int OcctDebugPatternDetachStage() noexcept { return gDebugPatternDetachStage; }
+
 Standard_Boolean OcctDocument::RemoveShapePreservingPatternMembers(
     const TDF_Label& label) noexcept {
     try {
         OCC_CATCH_SIGNALS
         if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
             || label.IsNull() || label.Data() != myOcafDoc->GetData())
-            return Standard_False;
-        if (!HasUnroutedRetainedDependent(label)) return RemoveShape(label);
+            return PatternDetachRefuse(1);
+        if (!HasUnroutedRetainedDependent(label)) { gDebugPatternDetachStage = 0; return RemoveShape(label); }
 
         // D2 members are already independent native shapes. Detach changes
         // only the validated association, never their geometry or recipes.
         // Ambiguous/multiple records, foreign families and malformed members
         // refuse; the caller aborts the complete Delete command on any failure.
         std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot> captured;
-        if (!CapturePatternLabelsForScope(EntityIdentifierForLabel(label), captured, true)
-            || !captured || captured->recordLabel.IsNull()
-            || !captured->source.visibility.object.object.label.IsEqual(label))
-            return Standard_False;
+        if (!CapturePatternLabelsForScope(EntityIdentifierForLabel(label), captured, true))
+            return PatternDetachRefuse(2);
+        if (!captured || captured->recordLabel.IsNull()) return PatternDetachRefuse(16);
+        if (!captured->source.visibility.object.object.label.IsEqual(label))
+            return PatternDetachRefuse(17);
         core3d::pattern::Definition definition;
         if (!core3d::pattern::Decode(captured->canonicalRecordBytes, definition)
             || core3d::retained_solid::UUIDText(definition.source.entity)
-                != EntityIdentifierForLabel(label)) return Standard_False;
+                != EntityIdentifierForLabel(label)) return PatternDetachRefuse(3);
 
         core3d::dependent_replay::Limits limits;
         std::vector<R179Dependent> dependencies;
         std::vector<std::string> authorized;
         R179DependentRefusal refusal = R179DependentRefusal::CorruptTable;
         if (!R179DiscoverDependentClosure(myOcafDoc, definition.source.entity,
-                limits, dependencies, authorized, refusal)
-            || dependencies.size() != 1
-            || dependencies.front().family != R179DependentFamily::PatternD2
-            || dependencies.front().feature != definition.feature
-            || !dependencies.front().recordLabel.IsEqual(captured->recordLabel)
-            || dependencies.front().canonicalRecordBytes != captured->canonicalRecordBytes)
-            return Standard_False;
+                limits, dependencies, authorized, refusal))
+            return PatternDetachRefuse(40 + static_cast<int>(refusal));
+        if (dependencies.size() != 1) return PatternDetachRefuse(11);
+        if (dependencies.front().family != R179DependentFamily::PatternD2) return PatternDetachRefuse(12);
+        if (dependencies.front().feature != definition.feature) return PatternDetachRefuse(13);
+        if (!dependencies.front().recordLabel.IsEqual(captured->recordLabel)) return PatternDetachRefuse(14);
+        if (dependencies.front().canonicalRecordBytes != captured->canonicalRecordBytes)
+            return PatternDetachRefuse(15);
 
         // Forget the envelope only. An unexpected sibling attribute stays
         // live and makes the strict record reader refuse below, causing Abort.
         captured->recordLabel.ForgetAttribute(TDataStd_ByteArray::GetID());
         std::vector<core3d::pattern::Record> remaining;
         if (!core3d::pattern::ReadAll(myOcafDoc, remaining)
-            || HasUnroutedRetainedDependent(label)) return Standard_False;
+            || HasUnroutedRetainedDependent(label)) return PatternDetachRefuse(5);
         for (const auto& record : remaining)
-            if (record.definition.feature == definition.feature) return Standard_False;
+            if (record.definition.feature == definition.feature) return PatternDetachRefuse(6);
         for (const auto& member : captured->members) {
             OcctExactLabelReceipt current;
             core3d::pattern_recipe_clone::Source currentRecipe;
-            if (!ReadExactFreeLabel(member.receipt, current)
-                || !core3d::pattern_recipe_clone::Capture(myOcafDoc,
-                    member.receipt.visibility.object.object.label, currentRecipe)
-                || !core3d::pattern_recipe_clone::IsEqual(member.recipe, currentRecipe)
-                || HasUnroutedRetainedDependent(
-                    member.receipt.visibility.object.object.label))
-                return Standard_False;
+            if (!ReadExactFreeLabel(member.receipt, current)) return PatternDetachRefuse(18);
+            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc,
+                    member.receipt.visibility.object.object.label, currentRecipe))
+                return PatternDetachRefuse(19);
+            if (!core3d::pattern_recipe_clone::IsEqual(member.recipe, currentRecipe))
+                return PatternDetachRefuse(20);
+            if (HasUnroutedRetainedDependent(member.receipt.visibility.object.object.label))
+                return PatternDetachRefuse(7);
         }
         // Keep generic removal's dependency/material rules, then independently
         // prove every survivor before the caller may commit. Abort restores
         // both the association and source if any post-removal read disagrees.
-        if (!RemoveShape(label)) return Standard_False;
+        if (!RemoveShape(label)) return PatternDetachRefuse(8);
         for (const auto& member : captured->members) {
             if (member.receipt.visibility.object.object.label.IsEqual(label)) continue;
             OcctExactLabelReceipt current;
@@ -26539,10 +26607,11 @@ Standard_Boolean OcctDocument::RemoveShapePreservingPatternMembers(
                 || !core3d::pattern_recipe_clone::Capture(myOcafDoc,
                     member.receipt.visibility.object.object.label, currentRecipe)
                 || !core3d::pattern_recipe_clone::IsEqual(member.recipe, currentRecipe))
-                return Standard_False;
+                return PatternDetachRefuse(9);
         }
+        gDebugPatternDetachStage = 0;
         return Standard_True;
-    } catch (...) { return Standard_False; }
+    } catch (...) { return PatternDetachRefuse(10); }
 }
 
 core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(
@@ -45516,3 +45585,6 @@ std::map<std::string, std::string> OcctDebugPartDigests(const OcctDocument& owne
     return result;
 }
 #endif
+
+// File-scope export of the byte-drift diagnostic (the reader lives in an unnamed namespace).
+std::string OcctDebugNamedShapeReadSummary() noexcept { return DebugNamedShapeReadSummaryImpl(); }

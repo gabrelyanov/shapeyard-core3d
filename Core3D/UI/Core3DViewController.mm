@@ -15399,6 +15399,16 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         || !GLController.viewer->getObjectInteractor()) return -1;
     return GLController.viewer->getObjectInteractor()->_debugDeleteStagedRootCount;
 }
+- (NSInteger)debugNativeDeleteRefusalStage {
+    if (![NSThread isMainThread] || GLController == nil || !GLController.viewer
+        || !GLController.viewer->getObjectInteractor()) return -1;
+    // Delete guard * 100 + Pattern-original detach clause (K27 diagnostic).
+    return GLController.viewer->getObjectInteractor()->_debugDeleteRefusal * 100
+        + OcctDebugPatternDetachStage();
+}
++ (NSString *)debugNamedShapeReadSummary {
+    return [NSString stringWithUTF8String:OcctDebugNamedShapeReadSummary().c_str()] ?: @"";
+}
 
 - (PrimitiveGizmoType)debugNativeGizmoType {
     return GLController == nil

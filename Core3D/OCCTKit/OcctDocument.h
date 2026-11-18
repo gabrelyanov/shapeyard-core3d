@@ -96,6 +96,10 @@ class XCAFDoc_VisMaterial;
 class OcctDocument;
 
 class Message_ProgressRange;
+//! DEBUG readout: which clause of RemoveShapePreservingPatternMembers last refused (0 = none).
+int OcctDebugPatternDetachStage() noexcept;
+//! DEBUG readout: the last NamedShape records read from a file (byte-drift diagnostic).
+std::string OcctDebugNamedShapeReadSummary() noexcept;
 namespace core3d { class OrdinaryEditController; class Core3DViewer; class BevelOperationController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
 namespace core3d::native_opening { class CommandLease; }
 namespace core3d::native_opening { class Context; }

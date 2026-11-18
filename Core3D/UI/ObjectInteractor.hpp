@@ -150,6 +150,7 @@ namespace core3d {
         void debugSetDeleteFailureMode(int mode) noexcept { _debugDeleteFailureMode = mode; _debugDeleteStagedRootCount = 0; }
         int _debugDeleteFailureMode = 0;
         int _debugDeleteStagedRootCount = 0;
+        int _debugDeleteRefusal = 0; // K27 readout: which Delete guard refused (0 = committed)
 #endif
         void duplicateSelected();
 		//! A Duplicate command or committed-result presentation repair still owns

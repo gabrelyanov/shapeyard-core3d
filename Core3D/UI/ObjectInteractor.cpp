@@ -1499,27 +1499,33 @@ Standard_Boolean DuplicateFaceFinishesMatch(
     }
 
     void ObjectInteractor::deleteSelected() {
-        if (hasUnresolvedEdit()) return;
-        if (_manipulator.IsNull() || !_manipulator->IsAttached()) return;
+#if DEBUG
+#define K27_DELETE_REFUSE(stage) do { _debugDeleteRefusal = (stage); return; } while (0)
+        _debugDeleteRefusal = 99; // 99 = left by an exception / reconcile path
+#else
+#define K27_DELETE_REFUSE(stage) return
+#endif
+        if (hasUnresolvedEdit()) K27_DELETE_REFUSE(1);
+        if (_manipulator.IsNull() || !_manipulator->IsAttached()) K27_DELETE_REFUSE(2);
         const auto doc = myDoc->ChangeDocument();
-        if (doc.IsNull() || doc->HasOpenCommand()) return;
+        if (doc.IsNull() || doc->HasOpenCommand()) K27_DELETE_REFUSE(3);
         try {
             auto pending = std::make_shared<PendingObjectDeletion>();
             std::vector<TDF_Label> roots;
             const auto objects = _manipulator->Objects();
             for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next()) {
                 const TDF_Label label = myDoc->ShapeLabel(it.Value());
-                if (label.IsNull() || !myDoc->IsPresentationEditable(it.Value())
-                    || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
-                    || myDoc->GeometryRepresentationForLabel(label) == OcctGeometryRepresentation::Invalid)
-                    return;
-                for (const auto& prior : roots) if (prior.IsEqual(label)) return;
+                if (label.IsNull() || !myDoc->IsPresentationEditable(it.Value())) K27_DELETE_REFUSE(4);
+                if (!myDoc->IsEditableFreeSimpleDefinitionLabel(label)) K27_DELETE_REFUSE(5);
+                if (myDoc->GeometryRepresentationForLabel(label) == OcctGeometryRepresentation::Invalid)
+                    K27_DELETE_REFUSE(6);
+                for (const auto& prior : roots) if (prior.IsEqual(label)) K27_DELETE_REFUSE(7);
                 roots.push_back(label);
                 pending->removals.push_back({it.Value(), label});
             }
-            if (roots.empty()) return;
+            if (roots.empty()) K27_DELETE_REFUSE(8);
             pending->naming = myDoc->PrepareOrdinaryRemovalNamingHistory(roots);
-            if (!pending->naming) return;
+            if (!pending->naming) K27_DELETE_REFUSE(9);
 #if DEBUG
             const int fault = std::exchange(_debugDeleteFailureMode, 0);
             if (fault == 2) pending->command.debugSetCommitMode(4); // throws after close
@@ -1538,18 +1544,28 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     && myDoc->SettleOrdinaryNamingHistory(pending->naming, Standard_False))
                     _pendingDeletion.reset();
                 else (void)reconcileDeletion();
-                return;
+                K27_DELETE_REFUSE(10);
             }
             bool staged = true;
             for (const auto& removal : pending->removals) {
                 // K27: deleting a Pattern's original keeps its copies as parts of their own.
-                if (!myDoc->RemoveShapePreservingPatternMembers(removal.second)) { staged = false; break; }
+                if (!myDoc->RemoveShapePreservingPatternMembers(removal.second)) {
+#if DEBUG
+                    _debugDeleteRefusal = 11;
+#endif
+                    staged = false; break;
+                }
 #if DEBUG
                 ++_debugDeleteStagedRootCount;
                 if (fault == 1) { staged = false; break; }
 #endif
             }
-            if (staged) staged = myDoc->CaptureOrdinaryNamingCandidate(pending->naming);
+            if (staged) {
+                staged = myDoc->CaptureOrdinaryNamingCandidate(pending->naming);
+#if DEBUG
+                _debugDeleteRefusal = staged ? 0 : 12;
+#endif
+            }
             if (staged) (void)pending->command.commitAndObserve();
             else (void)pending->command.abortAndObserve();
             (void)reconcileDeletion();
@@ -1558,6 +1574,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             // foreign/open/unreadable state remains fenced with its ledger.
             (void)reconcileDeletion();
         }
+#undef K27_DELETE_REFUSE
     }
 
 	ObjectInteractor::DuplicateDocumentState
