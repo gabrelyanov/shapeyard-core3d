@@ -13969,7 +13969,9 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
 // part's faces: a closed cylindrical wall with the material outside it and nothing inside.
 // Every hole a row makes is the same kind of plain hole, so Hole size and Holes work on each
 // of them again, and each command is one Undo step that stores only the new solid.
-// UNBUILT (Fable, read-and-reason). Diagnosis: N/MODEL-ROUNDS/01-desk-lamp-build6/FABLE/HOLES.md
+// Built and proved on the rented Mac (engine 6ec9ce7; checks testHoleSizeAndHolesWorkOnAPlainHole...,
+// testHolesRepeatsTheHoleOfAnOrdinaryCubeInARow..., testThreeHolesSideBySideInOneCubeAllDrill).
+// Diagnosis it follows: N/MODEL-ROUNDS/01-desk-lamp-build6/FABLE/HOLES.md
 #include <BRepAlgoAPI_Defeaturing.hxx>
 
 namespace {
