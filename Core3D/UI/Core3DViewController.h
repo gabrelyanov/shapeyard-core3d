@@ -1540,6 +1540,15 @@ __attribute__((objc_subclassing_restricted))
 //! unresolved edit, invalid unit, non-BRep or excessive topology with nil.
 - (nullable NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity
     NS_SWIFT_NAME(debugNativeSolidEvidence(_:));
+//! DEBUG probe (base lane, lamp Width Undo 10->14): remembers the face TShapes of every
+//! part now in the document; returns how many were remembered. Read-only on the model.
+- (NSInteger)debugRememberDocumentFaceShapes
+    NS_SWIFT_NAME(debugRememberDocumentFaceShapes());
+//! DEBUG probe: "remembered=<n> checked=<k> | document=<m> checked=<j>": the Checked bit
+//! of the faces remembered above (also when they are only held by history now) and of
+//! the faces in the document now. Read-only.
+- (NSString *)debugFaceCheckedBitsSummary
+    NS_SWIFT_NAME(debugFaceCheckedBitsSummary());
 //! B2-only values/observation seam. `expected` is an independently authored
 //! complete Profile value; the real entity is detached and observed separately.
 //! No accessibility attribute, witness, edit authority or matcher success is

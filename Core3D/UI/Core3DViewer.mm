@@ -3,6 +3,7 @@
 #include <Bnd_Box.hxx>
 #include <gp_Pnt2d.hxx>
 #include "../OCCTKit/NativeMeshVertexMove.hxx"
+#include "../OCCTKit/CommittedFaceCheckedBits.h"
 #include "../OCCTKit/NativeMeshRegionExtrude.hxx"
 //
 //  Core3DViewer.m
@@ -16231,6 +16232,10 @@ void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
         return;
     }
+    // A tap that selects a part meshes it for picking and highlighting; keep the
+    // saved face Checked bits as they were (same rule as selecting from the parts list).
+    const core3d::CommittedFaceCheckedBits keepFaceBits(
+        myDoc.IsNull() ? Handle(TDocStd_Document)() : myDoc->Document());
 	if (hasUnresolvedEdit()) {
 		return;
 	}

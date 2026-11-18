@@ -5,6 +5,7 @@
 #include <StdSelect_ViewerSelector3d.hxx>
 #endif
 #include "../OCCTKit/PlanarSweepTangentArc.hxx"
+#include "../OCCTKit/CommittedFaceCheckedBits.h"
 #include "../OCCTKit/PartBooleanOwner.hxx"
 #include "../OCCTKit/PartBooleanFamilyAdmission.hxx"
 #include "../OCCTKit/PartBooleanPersistence.hxx"
@@ -21819,6 +21820,14 @@ static bool Core3DPublishCommittedSpatialSweep(
         identity.documentGeneration = expected.revisions.documentGeneration;
         identity.modelRevision = expected.revisions.modelRevision;
         bool selectionWasTouched = false;
+        // Selecting a part meshes it for picking and highlighting, which sets the Checked bit
+        // of some of its faces; that bit is written into the saved file, so only selecting a
+        // part made the project save different bytes, and a later Undo gave those marked faces
+        // back (lamp shade Width, 18 Nov: 7 of 9 faces checked before selecting, 9 after).
+        // Keep every part's face bits as they were, through the selection refresh too.
+        const auto selectionDocument = GLController.viewer->getDocument();
+        const core3d::CommittedFaceCheckedBits keepFaceBits(
+            selectionDocument.IsNull() ? Handle(TDocStd_Document)() : selectionDocument->Document());
         const bool selected = GLController.viewer->selectObjectFromBrowser(
             identity, static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)), selectionWasTouched);
@@ -23248,6 +23257,61 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         for(const auto& interval:intervals)[result addObject:@[@(interval.first),@(interval.second)]];
         return result;
     }catch(...){return nil;}
+}
+
+// DEBUG probe (base lane, 18 Nov): which step sets the face Checked bit that the lamp
+// Width Undo check sees (flag byte 0x0a -> 0x0e). Holds TShape handles, changes nothing.
+static std::vector<Handle(TopoDS_TShape)>& Core3DDebugRememberedFaceShapes() {
+    static std::vector<Handle(TopoDS_TShape)> faces;
+    return faces;
+}
+static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Handle(TDocStd_Document)& document) {
+    std::vector<Handle(TopoDS_TShape)> result;
+    if (document.IsNull()) return result;
+    const Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    if (shapes.IsNull()) return result;
+    TDF_LabelSequence roots;
+    shapes->GetFreeShapes(roots);
+    std::unordered_set<const TopoDS_TShape*> seen;
+    for (int i = 1; i <= roots.Length(); ++i) {
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(roots.Value(i));
+        for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next()) {
+            const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+            if (tshape.IsNull() || !seen.insert(tshape.get()).second) continue;
+            result.push_back(tshape);
+        }
+    }
+    return result;
+}
+- (NSInteger)debugRememberDocumentFaceShapes {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer) return -1;
+    try {
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) return -1;
+        Core3DDebugRememberedFaceShapes() = Core3DDebugDocumentFaceShapes(document->Document());
+        return NSInteger(Core3DDebugRememberedFaceShapes().size());
+    } catch (...) { return -1; }
+}
+- (NSString *)debugFaceCheckedBitsSummary {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer) return @"unavailable";
+    try {
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) return @"no document";
+        auto count = [](const std::vector<Handle(TopoDS_TShape)>& faces) {
+            NSInteger checked = 0;
+            for (const auto& face : faces) if (!face.IsNull() && face->Checked()) ++checked;
+            return checked;
+        };
+        const auto& remembered = Core3DDebugRememberedFaceShapes();
+        const auto current = Core3DDebugDocumentFaceShapes(document->Document());
+        std::unordered_set<const TopoDS_TShape*> now;
+        for (const auto& face : current) now.insert(face.get());
+        NSInteger rememberedInDocument = 0;
+        for (const auto& face : remembered) if (now.count(face.get())) ++rememberedInDocument;
+        return [NSString stringWithFormat:@"remembered=%ld checked=%ld inDocument=%ld | document=%ld checked=%ld",
+            long(remembered.size()), long(count(remembered)), long(rememberedInDocument),
+            long(current.size()), long(count(current))];
+    } catch (...) { return @"failed"; }
 }
 
 // Bounded DEBUG read-only kernel evidence for the ACTUAL retained BRep of one
