@@ -15392,6 +15392,17 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return GLController.viewer->getObjectInteractor()->_debugDeleteRefusal * 100
         + OcctDebugPatternDetachStage();
 }
+#if DEBUG
+extern "C" int Core3DDebugMeshCopyRejectStage;
+#endif
+- (NSInteger)debugMeshCopyRejectStage {
+    // N04 diagnostic: the last Mesh copy guard reached (Core3DViewer / OrdinaryEditController).
+#if DEBUG
+    return Core3DDebugMeshCopyRejectStage;
+#else
+    return -1;
+#endif
+}
 + (NSString *)debugNamedShapeReadSummary {
     return [NSString stringWithUTF8String:OcctDebugNamedShapeReadSummary().c_str()] ?: @"";
 }

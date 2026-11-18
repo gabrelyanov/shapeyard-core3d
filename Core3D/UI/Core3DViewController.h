@@ -2683,6 +2683,8 @@ __attribute__((objc_subclassing_restricted))
 - (NSInteger)debugNativeDeleteStagedRootCount;
 //! K27 diagnostic: Delete guard * 100 + Pattern-original detach clause; 0 = committed.
 - (NSInteger)debugNativeDeleteRefusalStage;
+//! N04 diagnostic: the last Mesh copy guard reached (2-6 viewer, 10-19 source, 20+PreparationResult tessellation, 30 creation, 90 staged).
+- (NSInteger)debugMeshCopyRejectStage;
 //! Byte-drift diagnostic: the last NamedShape records read from a file.
 + (NSString *)debugNamedShapeReadSummary;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
