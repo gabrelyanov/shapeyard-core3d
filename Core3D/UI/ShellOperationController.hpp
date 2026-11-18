@@ -33,6 +33,18 @@
 #include <BRep_Tool.hxx>
 #include <GeomLib_IsPlanarSurface.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Defeaturing.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepLib.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepTools.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
+#include <gp_Vec.hxx>
 #include <GeomLProp_SLProps.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom_Surface.hxx>
@@ -435,29 +447,320 @@ inline Standard_Boolean ShellOffsetIsSafe(
     } catch (...) { return Standard_False; }
 }
 
-//! Runs the offset kernel for an inward shell, unless the guard above says the
-//! kernel cannot be trusted with it; then nothing is built and false is
-//! returned (the caller's ordinary failure).
-inline Standard_Boolean MakeInwardShell(
+//! The surface normal of a face at a place along one of its edges. Its sign is
+//! not used anywhere (see ShellOffsetIsSafe).
+inline Standard_Boolean ShellNormalOnEdge(
+    const TopoDS_Face& face, const TopoDS_Edge& edge,
+    const Standard_Real along, gp_Dir& normal) noexcept
+{
+    try {
+        Standard_Real first = 0.0, last = 0.0;
+        const Handle(Geom2d_Curve) onSurface = BRep_Tool::CurveOnSurface(edge, face, first, last);
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (onSurface.IsNull() || surface.IsNull() || !std::isfinite(first) || !std::isfinite(last)
+            || std::abs(first) > 1.0e100 || std::abs(last) > 1.0e100) return Standard_False;
+        const gp_Pnt2d uv = onSurface->Value(first + (last - first) * along);
+        GeomLProp_SLProps properties(surface, uv.X(), uv.Y(), 1, 1.0e-9);
+        if (!properties.IsNormalDefined()) return Standard_False;
+        normal = properties.Normal();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+//! How two faces of a solid meet along an edge they share: smoothly (a flat
+//! face running into a rounding; the guard's own eight degrees), squarely (a
+//! wall standing upright on the face), or at some other angle.
+enum class ShellEdgeJoin : std::uint8_t { Unknown = 0, Sharp, Square, Smooth };
+
+inline ShellEdgeJoin ShellJoinAlongEdge(
+    const TopoDS_Face& face, const TopoDS_Face& neighbour, const TopoDS_Edge& edge) noexcept
+{
+    Standard_Boolean smooth = Standard_True, square = Standard_True;
+    for (const Standard_Real along : {0.2, 0.5, 0.8}) {
+        gp_Dir onFace, onNeighbour;
+        if (!ShellNormalOnEdge(face, edge, along, onFace)
+            || !ShellNormalOnEdge(neighbour, edge, along, onNeighbour)) return ShellEdgeJoin::Unknown;
+        const Standard_Real dot = std::abs(onFace.Dot(onNeighbour));
+        if (dot < 0.990) smooth = Standard_False;
+        if (dot > 1.0e-6) square = Standard_False;
+    }
+    return smooth ? ShellEdgeJoin::Smooth : (square ? ShellEdgeJoin::Square : ShellEdgeJoin::Sharp);
+}
+
+//! The rounded faces of a part that an inward wall of this thickness would
+//! swallow. A rounded face is a curved face that runs smoothly into a neighbour
+//! along an edge (what Bevel and Round leave on an edge). The offset kernel
+//! moves every face inward by the wall; a face that bulges outward with a
+//! radius no larger than the wall has nowhere to go (its radius would be zero
+//! or negative), and the kernel then fails on the whole part. This is the
+//! reason "Shell 3" was refused on a part with a 0.8 mm Bevel.
+struct ShellRoundedEdges {
+    std::vector<TopoDS_Face> tooSmall;
+    //! The smallest rounding radius among them, in the part's own units; 0 when none.
+    Standard_Real smallestTooSmall = 0.0;
+};
+
+inline Standard_Boolean ShellRoundedEdgesOf(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    const Standard_Real thickness, const Standard_Real tolerance,
+    ShellRoundedEdges& rounded) noexcept
+{
+    rounded = ShellRoundedEdges();
+    try {
+        if (source.IsNull() || !(thickness > 0.0)) return Standard_False;
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+        TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+        // A rounding within two percent above the wall is counted too: the kernel
+        // would have to make a rounding of nearly no radius from it.
+        const Standard_Real reach = thickness + std::max(10.0 * tolerance, 0.02 * thickness);
+        TopTools_IndexedMapOfShape seen;
+        // The explorer gives each face the way round it sits in the solid.
+        for (TopExp_Explorer walk(source, TopAbs_FACE); walk.More(); walk.Next()) {
+            const TopoDS_Face face = TopoDS::Face(walk.Current());
+            if (seen.Contains(face)) continue;
+            seen.Add(face);
+            Standard_Boolean isOpening = Standard_False;
+            for (const TopoDS_Face& opening : openings)
+                if (opening.IsSame(face)) isOpening = Standard_True;
+            gp_Pln plane;
+            if (isOpening || ShellFacePlane(face, plane)) continue;
+            Standard_Boolean runsSmoothly = Standard_False;
+            for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More() && !runsSmoothly; edges.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+                if (BRep_Tool::Degenerated(edge) || !facesOfEdges.Contains(edge)) continue;
+                for (TopTools_ListOfShape::Iterator other(facesOfEdges.FindFromKey(edge));
+                     other.More(); other.Next()) {
+                    // A seam has the face itself on both sides: no neighbour.
+                    if (other.Value().IsSame(face)) continue;
+                    if (ShellJoinAlongEdge(face, TopoDS::Face(other.Value()), edge)
+                        == ShellEdgeJoin::Smooth) { runsSmoothly = Standard_True; break; }
+                }
+            }
+            if (!runsSmoothly) continue;
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (surface.IsNull()) return Standard_False;
+            Standard_Real u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+            BRepTools::UVBounds(face, u0, u1, v0, v1);
+            if (!std::isfinite(u0) || !std::isfinite(u1) || !std::isfinite(v0) || !std::isfinite(v1)
+                || std::abs(u0) > 1.0e100 || std::abs(u1) > 1.0e100
+                || std::abs(v0) > 1.0e100 || std::abs(v1) > 1.0e100) return Standard_False;
+            // Curvature is measured against the surface's own normal and is negative
+            // where the surface bends away from it (a ball seen from outside). The
+            // face's way round turns that normal into the solid's outward one.
+            const Standard_Real outward = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
+            Standard_Real bulge = 0.0;
+            for (const Standard_Real s : {0.25, 0.5, 0.75}) {
+                for (const Standard_Real t : {0.25, 0.5, 0.75}) {
+                    GeomLProp_SLProps at(surface, u0 + (u1 - u0) * s, v0 + (v1 - v0) * t, 2, 1.0e-9);
+                    if (!at.IsCurvatureDefined()) continue;
+                    bulge = std::max({bulge, -outward * at.MaxCurvature(), -outward * at.MinCurvature()});
+                }
+            }
+            if (!std::isfinite(bulge) || !(bulge > 0.0)) continue;
+            const Standard_Real radius = 1.0 / bulge;
+            if (radius > reach) continue;
+            rounded.tooSmall.push_back(face);
+            if (rounded.smallestTooSmall <= 0.0 || radius < rounded.smallestTooSmall)
+                rounded.smallestTooSmall = radius;
+        }
+        return Standard_True;
+    } catch (...) { rounded = ShellRoundedEdges(); return Standard_False; }
+}
+
+//! For the refusal sentence: the rounding radius the wall has to stay under,
+//! in the part's own units; 0 when no rounding stands in the way.
+inline Standard_Real ShellRoundedEdgeLimit(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    const Standard_Real thickness, const Standard_Real tolerance) noexcept
+{
+    ShellRoundedEdges rounded;
+    return ShellRoundedEdgesOf(source, openings, thickness, tolerance, rounded)
+        ? rounded.smallestTooSmall : 0.0;
+}
+
+//! One closed skin made into a solid with its matter inside.
+inline Standard_Boolean ShellSolidFromClosedSkin(const TopoDS_Shape& skin, TopoDS_Solid& solid) noexcept
+{
+    try {
+        TopTools_IndexedMapOfShape shells;
+        TopExp::MapShapes(skin, TopAbs_SHELL, shells);
+        if (shells.Extent() != 1 || !BRep_Tool::IsClosed(shells(1))) return Standard_False;
+        BRepBuilderAPI_MakeSolid maker(TopoDS::Shell(shells(1)));
+        if (!maker.IsDone()) return Standard_False;
+        solid = maker.Solid();
+        if (!BRepLib::OrientClosedSolid(solid)) return Standard_False;
+        GProp_GProps mass;
+        BRepGProp::VolumeProperties(solid, mass);
+        return std::isfinite(mass.Mass()) && mass.Mass() > 0.0;
+    } catch (...) { return Standard_False; }
+}
+
+//! The one solid of a cut whose hollow has been opened: one solid, one skin.
+inline Standard_Boolean ShellOneOpenedSolid(const TopoDS_Shape& shape, TopoDS_Shape& solid) noexcept
+{
+    try {
+        TopTools_IndexedMapOfShape solids, shells;
+        TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+        TopExp::MapShapes(shape, TopAbs_SHELL, shells);
+        if (solids.Extent() != 1 || shells.Extent() != 1) return Standard_False;
+        solid = solids(1);
+        return Standard_True;
+    } catch (...) { solid.Nullify(); return Standard_False; }
+}
+
+//! A flat face pulled straight out by a distance, as a solid with its matter inside.
+inline Standard_Boolean ShellColumnOn(const TopoDS_Face& face, const gp_Vec& pull, TopoDS_Solid& column) noexcept
+{
+    try {
+        BRepPrimAPI_MakePrism prism(face, pull);
+        if (!prism.IsDone()) return Standard_False;
+        TopTools_IndexedMapOfShape solids;
+        TopExp::MapShapes(prism.Shape(), TopAbs_SOLID, solids);
+        if (solids.Extent() != 1) return Standard_False;
+        column = TopoDS::Solid(solids(1));
+        return BRepLib::OrientClosedSolid(column);
+    } catch (...) { return Standard_False; }
+}
+
+//! Shell through an opening that runs smoothly into a rounding (K01: a cube
+//! with Bevel 3 on every edge, Shell 2 from its top). The thick-solid kernel
+//! cannot be given this (see ShellOffsetIsSafe: it closes the app), because it
+//! wants to stretch each neighbour's inner face up to the opening, and the
+//! inner face of a rounding never gets there. The shell itself exists whenever
+//! every rounding is larger than the wall, and is made here without that step:
+//!   1. the whole part moved inward by the wall, as a closed body of its own
+//!      (no opening is named, so the kernel never enters the code that failed);
+//!   2. that body taken out of the part: a part with a closed hollow;
+//!   3. for each opening, the flat face of the hollow lying under it, pulled
+//!      straight out through the opening and taken out too.
+//! Step 3 is exact only where the opening's neighbours run smoothly into it or
+//! stand upright on it (the hollow's face under the opening is then the
+//! opening itself, moved in and narrowed by the wall on the upright sides).
+//! Any other neighbour: nothing is made, and the caller refuses as before.
+inline Standard_Boolean ShellThroughSmoothOpening(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    const Standard_Real thickness, const Standard_Real tolerance,
+    const Message_ProgressRange& progress, TopoDS_Shape& made) noexcept
+{
+    made.Nullify();
+    try {
+        if (source.IsNull() || source.ShapeType() != TopAbs_SOLID || openings.empty())
+            return Standard_False;
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+        TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+        for (const TopoDS_Face& opening : openings) {
+            for (TopExp_Explorer walk(opening, TopAbs_EDGE); walk.More(); walk.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(walk.Current());
+                if (BRep_Tool::Degenerated(edge)) continue;
+                if (!facesOfEdges.Contains(edge)) return Standard_False;
+                Standard_Boolean hasNeighbour = Standard_False;
+                for (TopTools_ListOfShape::Iterator other(facesOfEdges.FindFromKey(edge));
+                     other.More(); other.Next()) {
+                    if (other.Value().IsSame(opening)) continue;
+                    hasNeighbour = Standard_True;
+                    const ShellEdgeJoin join =
+                        ShellJoinAlongEdge(opening, TopoDS::Face(other.Value()), edge);
+                    if (join != ShellEdgeJoin::Smooth && join != ShellEdgeJoin::Square)
+                        return Standard_False;
+                }
+                if (!hasNeighbour) return Standard_False;
+            }
+        }
+        BRepOffsetAPI_MakeOffsetShape offset;
+        offset.PerformByJoin(source, -thickness, tolerance, BRepOffset_Skin,
+            Standard_False, Standard_False, GeomAbs_Arc, Standard_False, progress);
+        if (!offset.IsDone()) return Standard_False;
+        TopoDS_Solid inner;
+        if (!ShellSolidFromClosedSkin(offset.Shape(), inner)) return Standard_False;
+        BRepAlgoAPI_Cut hollowed(source, inner);
+        if (!hollowed.IsDone() || hollowed.HasErrors()) return Standard_False;
+        TopoDS_Shape hollow = hollowed.Shape();
+        const Standard_Real slack = std::max(10.0 * tolerance, 1.0e-7);
+        // Past the opening's plane by a little, so that no face of the column lies on it.
+        const Standard_Real lift = std::max(0.05 * thickness, 2.0 * tolerance);
+        TopTools_IndexedMapOfShape innerFaces;
+        TopExp::MapShapes(inner, TopAbs_FACE, innerFaces);
+        for (const TopoDS_Face& opening : openings) {
+            gp_Pln plane;
+            if (!ShellFacePlane(opening, plane)) return Standard_False;
+            const gp_Vec normal(plane.Axis().Direction());
+            TopoDS_Face under;
+            gp_Vec out;
+            for (Standard_Integer i = 1; i <= innerFaces.Extent(); ++i) {
+                const TopoDS_Face face = TopoDS::Face(innerFaces(i));
+                gp_Pln other;
+                if (!ShellFacePlane(face, other)
+                    || !other.Axis().Direction().IsParallel(plane.Axis().Direction(), 1.0e-7)
+                    || std::abs(plane.Distance(other.Location()) - thickness) > slack) continue;
+                GProp_GProps area;
+                BRepGProp::SurfaceProperties(face, area);
+                const gp_Pnt centre = area.CentreOfMass();
+                // From the face's middle straight to the opening's plane; the foot must be on the opening.
+                const gp_Vec toPlane = normal * gp_Vec(centre, plane.Location()).Dot(normal);
+                BRepClass_FaceClassifier where(opening, centre.Translated(toPlane), slack);
+                if (where.State() != TopAbs_IN && where.State() != TopAbs_ON) continue;
+                if (!under.IsNull()) return Standard_False; // two candidates: not sure which
+                under = face;
+                out = toPlane;
+            }
+            if (under.IsNull() || out.Magnitude() <= slack) return Standard_False;
+            out.Normalize();
+            TopoDS_Solid column;
+            if (!ShellColumnOn(under, out * (thickness + lift), column)) return Standard_False;
+            BRepAlgoAPI_Cut opened;
+            TopTools_ListOfShape objects, tools;
+            objects.Append(hollow);
+            tools.Append(column);
+            opened.SetArguments(objects);
+            opened.SetTools(tools);
+            opened.SetFuzzyValue(tolerance);
+            opened.Build();
+            if (!opened.IsDone() || opened.HasErrors()) return Standard_False;
+            hollow = opened.Shape();
+        }
+        return ShellOneOpenedSolid(hollow, made);
+    } catch (...) { made.Nullify(); return Standard_False; }
+}
+
+//! The routes that need no change to the part: the exact primitive behind a
+//! resized one, the thick-solid kernel, the kernel again on merged flat faces,
+//! and (only when `made` is given and `smoothOpenings` is true) the route above
+//! for an opening the guard keeps from the kernel.
+//! Returns false when the guard held the shell back and nothing was made;
+//! `heldBack`, when given, is then set and the refusal is not counted here.
+//! `stock`, when given, receives the solid the result was cut from.
+inline Standard_Boolean MakeInwardShellPlain(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
     const std::vector<TopoDS_Face>& faces,
     Standard_Real thickness, Standard_Real tolerance,
-    const Message_ProgressRange& progress = Message_ProgressRange(),
-    Standard_Integer* normalizationStatus = nullptr)
+    const Message_ProgressRange& progress,
+    Standard_Integer* normalizationStatus,
+    const Standard_Boolean smoothOpenings,
+    TopoDS_Shape* made, TopoDS_Shape* stock, Standard_Boolean* heldBack)
 {
     if (normalizationStatus != nullptr) *normalizationStatus = 0;
+    if (made != nullptr) made->Nullify();
+    if (heldBack != nullptr) *heldBack = Standard_False;
     TopoDS_Shape analytic; std::vector<TopoDS_Face> analyticFaces;
     const Standard_Boolean rebuilt =
         AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
+    if (stock != nullptr) *stock = rebuilt ? analytic : source;
+    Message_ProgressScope scope(progress, "Shell", 2);
     if (!ShellOffsetGuardSkipped()
         && !ShellOffsetIsSafe(rebuilt ? analytic : source, rebuilt ? analyticFaces : faces)) {
-        NoteShellOffsetGuardRefusal();
+        if (smoothOpenings && made != nullptr
+            && ShellThroughSmoothOpening(rebuilt ? analytic : source,
+                                         rebuilt ? analyticFaces : faces,
+                                         thickness, tolerance, scope.Next(), *made))
+            return Standard_True;
+        if (made != nullptr) made->Nullify();
+        if (heldBack != nullptr) *heldBack = Standard_True;
+        else NoteShellOffsetGuardRefusal();
         return Standard_False;
     }
     TopTools_ListOfShape openings;
     for (const auto& face : rebuilt ? analyticFaces : faces) openings.Append(face);
-    Message_ProgressScope scope(progress, "Shell", 2);
     builder.MakeThickSolidByJoin(rebuilt ? analytic : source, openings, -thickness, tolerance,
         BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
         Standard_False, scope.Next());
@@ -473,15 +776,179 @@ inline Standard_Boolean MakeInwardShell(
     // Kernel history supplies the faces; exact boundary geometry proves that
     // the selected opening has not grown into a neighbouring coplanar patch.
     if (!ShellOffsetGuardSkipped() && !ShellOffsetIsSafe(unified, unifiedFaces)) {
-        NoteShellOffsetGuardRefusal();
+        if (heldBack != nullptr) *heldBack = Standard_True;
+        else NoteShellOffsetGuardRefusal();
         return Standard_False;
     }
+    if (stock != nullptr) *stock = unified;
     TopTools_ListOfShape unifiedOpenings;
     for (const auto& face : unifiedFaces) unifiedOpenings.Append(face);
     builder.MakeThickSolidByJoin(unified, unifiedOpenings, -thickness, tolerance,
         BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
         Standard_False, scope.Next());
     return Standard_True;
+}
+
+//! Shell on a part whose roundings are smaller than the wall (K02: the lamp
+//! shade, a cone cut flat with Bevel 0.8, Shell 2 or 3). The kernel cannot move
+//! a 0.8 mm rounding inward by 3 mm, yet the shell exists: inside the part, at a
+//! wall's distance from its skin, a rounding no larger than the wall leaves no
+//! trace (the hollow has a sharp corner there, exactly as if the edge had never
+//! been rounded). So the hollow is worked out on the part with those roundings
+//! taken off (the kernel's own Remove Features), and then taken out of the part
+//! AS IT IS. The part's history is not touched: the Bevel stays where it is in
+//! the model and on the outside of the result.
+//!   1. `rounds` (from ShellRoundedEdgesOf) are removed from a copy of the part;
+//!   2. that copy is shelled by the ordinary routes above;
+//!   3. the hollow (copy minus its shell) is lengthened a little out through each
+//!      opening, so that it crosses the opening instead of ending on it;
+//!   4. the hollow is taken out of the original part.
+inline Standard_Boolean ShellAroundSmallRounds(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    const std::vector<TopoDS_Face>& rounds,
+    const Standard_Real thickness, const Standard_Real tolerance,
+    const Message_ProgressRange& progress, TopoDS_Shape& made) noexcept
+{
+    made.Nullify();
+    try {
+        if (source.IsNull() || source.ShapeType() != TopAbs_SOLID || rounds.empty())
+            return Standard_False;
+        Message_ProgressScope scope(progress, "Shell", 1);
+        BRepAlgoAPI_Defeaturing remove;
+        remove.SetShape(source);
+        TopTools_ListOfShape unwanted;
+        for (const TopoDS_Face& face : rounds) unwanted.Append(face);
+        remove.AddFacesToRemove(unwanted);
+        remove.Build();
+        if (!remove.IsDone() || remove.HasErrors()) return Standard_False;
+        TopTools_IndexedMapOfShape sharpSolids;
+        TopExp::MapShapes(remove.Shape(), TopAbs_SOLID, sharpSolids);
+        if (sharpSolids.Extent() != 1) return Standard_False;
+        const TopoDS_Shape sharp = sharpSolids(1);
+        if (!BRepCheck_Analyzer(sharp, Standard_True).IsValid()) return Standard_False;
+        TopTools_IndexedMapOfShape sharpFaces;
+        TopExp::MapShapes(sharp, TopAbs_FACE, sharpFaces);
+        std::vector<TopoDS_Face> sharpOpenings;
+        for (const TopoDS_Face& opening : openings) {
+            if (remove.IsDeleted(opening)) return Standard_False;
+            const TopTools_ListOfShape& changed = remove.Modified(opening);
+            if (changed.Extent() > 1) return Standard_False;
+            const TopoDS_Shape now = changed.IsEmpty() ? TopoDS_Shape(opening) : changed.First();
+            const Standard_Integer index = sharpFaces.FindIndex(now);
+            if (index == 0) return Standard_False;
+            const TopoDS_Face face = TopoDS::Face(sharpFaces(index));
+            if (!ShellFaceIsSinglePlanarOpening(face)) return Standard_False;
+            sharpOpenings.push_back(face);
+        }
+        // The kernel leaves a feature it cannot remove in place and only warns:
+        // look again, and go on only when no such rounding is left.
+        ShellRoundedEdges left;
+        if (!ShellRoundedEdgesOf(sharp, sharpOpenings, thickness, tolerance, left)
+            || !left.tooSmall.empty()) return Standard_False;
+        BRepOffsetAPI_MakeThickSolid builder;
+        TopoDS_Shape shelled, stock;
+        Standard_Boolean heldBack = Standard_False;
+        if (!MakeInwardShellPlain(builder, sharp, sharpOpenings, thickness, tolerance,
+                                  scope.Next(), nullptr, Standard_True, &shelled, &stock, &heldBack))
+            return Standard_False;
+        if (shelled.IsNull()) {
+            if (!builder.IsDone() || builder.MakeOffset().Error() != BRepOffset_NoError)
+                return Standard_False;
+            shelled = builder.Shape();
+        }
+        if (stock.IsNull() || shelled.IsNull()
+            || !BRepCheck_Analyzer(shelled, Standard_True).IsValid()) return Standard_False;
+        BRepAlgoAPI_Cut emptied(stock, shelled);
+        if (!emptied.IsDone() || emptied.HasErrors()) return Standard_False;
+        TopTools_IndexedMapOfShape hollows;
+        TopExp::MapShapes(emptied.Shape(), TopAbs_SOLID, hollows);
+        if (hollows.Extent() != 1) return Standard_False;
+        TopoDS_Shape hollow = hollows(1);
+        GProp_GProps inside;
+        BRepGProp::VolumeProperties(hollow, inside);
+        if (!std::isfinite(inside.Mass()) || !(inside.Mass() > 0.0)) return Standard_False;
+        const gp_Pnt middle = inside.CentreOfMass();
+        const Standard_Real slack = std::max(10.0 * tolerance, 1.0e-7);
+        const Standard_Real lift = std::max(0.05 * thickness, 2.0 * tolerance);
+        for (const TopoDS_Face& opening : sharpOpenings) {
+            gp_Pln plane;
+            if (!ShellFacePlane(opening, plane)) return Standard_False;
+            gp_Vec out(plane.Axis().Direction());
+            if (gp_Vec(middle, plane.Location()).Dot(out) < 0.0) out.Reverse();
+            TopTools_IndexedMapOfShape hollowFaces;
+            TopExp::MapShapes(hollow, TopAbs_FACE, hollowFaces);
+            TopoDS_Shape grown = hollow;
+            Standard_Integer mouths = 0;
+            for (Standard_Integer i = 1; i <= hollowFaces.Extent(); ++i) {
+                const TopoDS_Face face = TopoDS::Face(hollowFaces(i));
+                gp_Pln other;
+                if (!ShellFacePlane(face, other)
+                    || !other.Axis().Direction().IsParallel(plane.Axis().Direction(), 1.0e-7)
+                    || plane.Distance(other.Location()) > slack) continue;
+                TopoDS_Solid column;
+                if (!ShellColumnOn(face, out * lift, column)) return Standard_False;
+                BRepAlgoAPI_Fuse joined(grown, column);
+                if (!joined.IsDone() || joined.HasErrors()) return Standard_False;
+                grown = joined.Shape();
+                ++mouths;
+            }
+            if (mouths == 0) return Standard_False;
+            hollow = grown;
+        }
+        BRepAlgoAPI_Cut finished;
+        TopTools_ListOfShape objects, tools;
+        objects.Append(source);
+        tools.Append(hollow);
+        finished.SetArguments(objects);
+        finished.SetTools(tools);
+        finished.SetFuzzyValue(tolerance);
+        finished.Build();
+        if (!finished.IsDone() || finished.HasErrors()) return Standard_False;
+        return ShellOneOpenedSolid(finished.Shape(), made);
+    } catch (...) { made.Nullify(); return Standard_False; }
+}
+
+//! Makes an inward shell.
+//! Without `made` (a saved profile's replay, a check of the kernel boundary):
+//! exactly the routes that existed before 17 Nov 2026, and the caller reads the
+//! builder.
+//! With `made` (the Shell tool): the same routes first, so every shell that was
+//! made before is made the same way, byte for byte. Only when they make nothing
+//! are the two routes for a bevelled or rounded part tried; a solid they make is
+//! handed back in `made` (the builder then holds nothing) and the caller
+//! validates it like any other result.
+//! Returns false only when the guard held the shell back and nothing was made.
+inline Standard_Boolean MakeInwardShell(
+    BRepOffsetAPI_MakeThickSolid& builder,
+    const TopoDS_Shape& source,
+    const std::vector<TopoDS_Face>& faces,
+    Standard_Real thickness, Standard_Real tolerance,
+    const Message_ProgressRange& progress = Message_ProgressRange(),
+    Standard_Integer* normalizationStatus = nullptr,
+    TopoDS_Shape* made = nullptr)
+{
+    if (made == nullptr)
+        return MakeInwardShellPlain(builder, source, faces, thickness, tolerance, progress,
+                                    normalizationStatus, Standard_False, nullptr, nullptr, nullptr);
+    made->Nullify();
+    ShellRoundedEdges rounded;
+    const Standard_Boolean known = ShellRoundedEdgesOf(source, faces, thickness, tolerance, rounded);
+    Message_ProgressScope scope(progress, "Shell", 2);
+    Standard_Boolean heldBack = Standard_False;
+    // The inner body of the smooth-opening route does not exist when a rounding
+    // is smaller than the wall: that route is tried only when none is.
+    const Standard_Boolean given = MakeInwardShellPlain(
+        builder, source, faces, thickness, tolerance, scope.Next(), normalizationStatus,
+        known && rounded.tooSmall.empty(), made, nullptr, &heldBack);
+    const Standard_Boolean finished = !made->IsNull() || !scope.More()
+        || (given && (builder.MakeOffset().Error() == BRepOffset_UserBreak
+                      || (builder.IsDone() && builder.MakeOffset().Error() == BRepOffset_NoError)));
+    if (!finished && known && !rounded.tooSmall.empty()
+        && ShellAroundSmallRounds(source, faces, rounded.tooSmall, thickness, tolerance,
+                                  scope.Next(), *made))
+        return Standard_True;
+    if (made->IsNull() && heldBack) NoteShellOffsetGuardRefusal();
+    return given;
 }
 
 enum class ShellApplyResult : std::uint8_t {
@@ -686,6 +1153,11 @@ public:
     Standard_Real defaultThickness() const noexcept;
     Standard_Real metersPerUnit() const noexcept;
     std::pair<Standard_Real, Standard_Real> thicknessRange() const noexcept;
+    //! When the current preview failed and a rounded edge smaller than the wall
+    //! stands in the way: that edge's radius in the part's own units (the wall
+    //! has to stay under it). 0 otherwise. Release behaviour: the refusal
+    //! sentence is built from it.
+    Standard_Real refusedRoundedEdgeRadius() const noexcept;
     Standard_Boolean canApply() const noexcept;
     Standard_Boolean hasActiveOperation() const noexcept;
     Standard_Boolean hasUnresolvedState() const noexcept;
@@ -788,6 +1260,8 @@ private:
     std::uint64_t myGeneration = 0;
     std::string myRequestedFingerprint;
     Standard_Boolean myCanApply = Standard_False;
+    Standard_Real myRefusedRoundedEdge = 0.0;
+    std::uint64_t myRefusedRoundedEdgeGeneration = 0;
     Standard_Boolean mySelectionFrozen = Standard_False;
     Standard_Boolean myStateValid = Standard_True;
     Standard_Boolean myOwnsDocumentCommand = Standard_False;

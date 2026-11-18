@@ -113,6 +113,8 @@ struct ShellPreviewWorkerResult {
     ShellPreviewWorkerOutcome outcome =
         ShellPreviewWorkerOutcome::Failed;
     TopoDS_Shape result;
+    //! A failed preview only: the rounded edge the wall has to stay under (0: none).
+    Standard_Real roundedEdgeLimit = 0.0;
     Standard_Boolean computeWasMainThread = Standard_False;
 #ifdef DEBUG
     Standard_Integer planarNormalizationStatus = 0;
@@ -1222,34 +1224,52 @@ private:
             aResult.failureStage = 2; // Offset construction, including exceptions.
 #endif
             Standard_Integer normalized = 0;
+            // A bevelled or rounded part is shelled without the builder (see
+            // MakeInwardShell); its solid comes back here and is validated
+            // below like any other result.
+            TopoDS_Shape aMade;
+            // A refusal names the rounded edge the wall has to stay under,
+            // when there is one, so that the sentence can say what to change.
+            const auto noteRefusal = [&]() {
+                if (!wasCancelled()) {
+                    aResult.roundedEdgeLimit = ShellRoundedEdgeLimit(
+                        theRequest.source, theRequest.openingFaces,
+                        theRequest.thickness, theRequest.tolerance);
+                }
+            };
             // Preserve the trunk's crash refusal and Base's planar fallback diagnostics.
             if (!MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
                                  theRequest.thickness, theRequest.tolerance,
-                                 aProgress->Start(), &normalized)) {
+                                 aProgress->Start(), &normalized, &aMade)) {
+                noteRefusal();
                 return aResult;
             }
+            const Standard_Boolean viaBuilder = aMade.IsNull();
 #ifdef DEBUG
             aResult.planarNormalizationStatus = normalized;
             aResult.usedPlanarNormalization = normalized > 0;
-            aResult.offsetDone = aBuilder.IsDone();
-            aResult.offsetError = static_cast<Standard_Integer>(aBuilder.MakeOffset().Error());
+            aResult.offsetDone = !viaBuilder || aBuilder.IsDone();
+            aResult.offsetError = viaBuilder
+                ? static_cast<Standard_Integer>(aBuilder.MakeOffset().Error()) : 0;
             aResult.failureStage = 3; // Offset completion/error gate.
 #endif
-            SHELL_DEBUG_PROBE(gShellDebugComputeStage, aBuilder.IsDone()
+            SHELL_DEBUG_PROBE(gShellDebugComputeStage, !viaBuilder ? 400 : aBuilder.IsDone()
                 ? 300 : 100 + static_cast<int>(aBuilder.MakeOffset().Error()));
             if (wasCancelled()
-                || (!aBuilder.IsDone()
+                || (viaBuilder && !aBuilder.IsDone()
                     && aBuilder.MakeOffset().Error()
                         == BRepOffset_UserBreak)) {
                 aResult.outcome = ShellPreviewWorkerOutcome::Cancelled;
                 return aResult;
             }
-            if (!aBuilder.IsDone()
-                || aBuilder.MakeOffset().Error()
-                    != BRepOffset_NoError) {
+            if (viaBuilder
+                && (!aBuilder.IsDone()
+                    || aBuilder.MakeOffset().Error()
+                        != BRepOffset_NoError)) {
+                noteRefusal();
                 return aResult;
             }
-            const TopoDS_Shape aCandidate = aBuilder.Shape();
+            const TopoDS_Shape aCandidate = viaBuilder ? aBuilder.Shape() : aMade;
             if (!IsValidInwardResult(
                     aCandidate,
                     theRequest.source,
@@ -1267,6 +1287,7 @@ private:
                     aResult.outcome =
                         ShellPreviewWorkerOutcome::Cancelled;
                 }
+                noteRefusal();
                 return aResult;
             }
             aResult.result = aCandidate;
@@ -1869,6 +1890,8 @@ void ShellOperationController::acceptWorkerResult(
     myDebugOffsetError = theResult.offsetError;
     myDebugOffsetDone = theResult.offsetDone;
 #endif
+    myRefusedRoundedEdge = installed ? 0.0 : theResult.roundedEdgeLimit;
+    myRefusedRoundedEdgeGeneration = theResult.generation;
     if (!installed) {
         myCanApply = Standard_False;
         myState = ShellPreviewState::Failed;
@@ -2017,6 +2040,14 @@ Standard_Real ShellOperationController::defaultThickness() const noexcept
 Standard_Real ShellOperationController::metersPerUnit() const noexcept
 {
     return mySource != nullptr ? mySource->metersPerUnit : 0.0;
+}
+
+Standard_Real ShellOperationController::refusedRoundedEdgeRadius() const noexcept
+{
+    // Only for the preview that failed last: any newer request has a newer generation.
+    return myState == ShellPreviewState::Failed
+        && myRefusedRoundedEdgeGeneration == myGeneration
+        ? myRefusedRoundedEdge : 0.0;
 }
 
 std::pair<Standard_Real, Standard_Real>

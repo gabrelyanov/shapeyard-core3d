@@ -295,6 +295,8 @@ namespace core3d {
         Standard_Real shellThickness() const noexcept;
         Standard_Real shellDefaultThickness() const noexcept;
         Standard_Real shellMetersPerUnit() const noexcept;
+        //! See ShellOperationController::refusedRoundedEdgeRadius.
+        Standard_Real shellRefusedRoundedEdgeRadius() const noexcept;
         std::pair<Standard_Real, Standard_Real>
             shellThicknessRange() const noexcept;
         Standard_Boolean captureShellPreview(
