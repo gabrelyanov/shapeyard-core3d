@@ -13360,6 +13360,9 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
             mesh.primitives = {{0,6,0,true}};
             mesh.topology = {1,0,0};
             mesh.localBounds = {{-10,0,0}, {10,10,0}, true};
+            // The fixture has one face and no edges: the source part's edge
+            // lines (and their drawing classes) do not belong to it.
+            mesh.edgeSegments.clear(); mesh.edgeDrawClasses.clear();
             auto& instance = result.instances.front();
             instance.meshIndex = 0; instance.selected = false;
             instance.primitiveBindings = {{0,1,true}};
