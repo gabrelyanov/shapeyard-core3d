@@ -246,6 +246,8 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include "XCAFPrs_DocumentExplorer.hxx"
 #include <AIS_ListIteratorOfListOfInteractive.hxx>
 #include <AIS_ListOfInteractive.hxx>
+#include <BRep_TFace.hxx>
+#include <Poly_Triangulation.hxx>
 #include <AIS_Shape.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -23312,6 +23314,35 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
             long(remembered.size()), long(count(remembered)), long(rememberedInDocument),
             long(current.size()), long(count(current))];
     } catch (...) { return @"failed"; }
+}
+- (NSDictionary<NSString *, NSNumber *> *)debugRedisplayAllPartsCountingRemeshedFaces {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer) return @{};
+    try {
+        const auto document = GLController.viewer->getDocument();
+        const auto context = GLController.viewer->AisContext();
+        if (document.IsNull() || context.IsNull()) return @{};
+        auto meshes = [&]() {
+            // Handles, not addresses: the old meshes stay alive, so a replaced mesh can
+            // never come back at the address of the one it replaced.
+            std::vector<Handle(Poly_Triangulation)> result;
+            for (const auto& face : Core3DDebugDocumentFaceShapes(document->Document())) {
+                const Handle(BRep_TFace) tface = Handle(BRep_TFace)::DownCast(face);
+                result.push_back(tface.IsNull() ? Handle(Poly_Triangulation)() : tface->ActiveTriangulation());
+            }
+            return result;
+        };
+        const auto before = meshes();
+        AIS_ListOfInteractive displayed;
+        context->DisplayedObjects(displayed);
+        for (AIS_ListOfInteractive::Iterator object(displayed); object.More(); object.Next())
+            context->Redisplay(object.Value(), Standard_False);
+        context->UpdateCurrentViewer();
+        const auto after = meshes();
+        if (after.size() != before.size()) return @{@"faces": @(after.size()), @"remeshed": @(-1), @"displayed": @(displayed.Size())};
+        NSInteger remeshed = 0;
+        for (std::size_t i = 0; i < after.size(); ++i) if (after[i].get() != before[i].get()) ++remeshed;
+        return @{@"faces": @(after.size()), @"remeshed": @(remeshed), @"displayed": @(displayed.Size())};
+    } catch (...) { return @{}; }
 }
 
 // Bounded DEBUG read-only kernel evidence for the ACTUAL retained BRep of one
