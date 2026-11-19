@@ -568,9 +568,31 @@ private:
 //! as refused for its size only when the same edges chamfered at a quarter
 //! of that distance build one valid solid: then a smaller value works and
 //! the person can be told so. Anything else stays an ordinary failure.
+//! K11 (build 7): the same quarter-size probe for a plain round, so a round
+//! that is too large for a short step says so instead of "Preview failed".
+BevelFailureKind ClassifyFailedPlainBevel(
+    const BevelPreviewWorkerSource& theSource,
+    const Standard_Real theDistance,
+    const Standard_Boolean theIsChamfer,
+    const std::shared_ptr<std::atomic_bool>& theCancellation,
+    const Standard_Size theMaximumNodes,
+    const Standard_Size theMaximumSolids) noexcept;
+
 BevelFailureKind ClassifyFailedPlainChamfer(
     const BevelPreviewWorkerSource& theSource,
     const Standard_Real theDistance,
+    const std::shared_ptr<std::atomic_bool>& theCancellation,
+    const Standard_Size theMaximumNodes,
+    const Standard_Size theMaximumSolids) noexcept
+{
+    return ClassifyFailedPlainBevel(theSource, theDistance, Standard_True,
+        theCancellation, theMaximumNodes, theMaximumSolids);
+}
+
+BevelFailureKind ClassifyFailedPlainBevel(
+    const BevelPreviewWorkerSource& theSource,
+    const Standard_Real theDistance,
+    const Standard_Boolean theIsChamfer,
     const std::shared_ptr<std::atomic_bool>& theCancellation,
     const Standard_Size theMaximumNodes,
     const Standard_Size theMaximumSolids) noexcept
@@ -586,16 +608,30 @@ BevelFailureKind ClassifyFailedPlainChamfer(
         }
         Handle(BevelCancellationIndicator) aProgress =
             new BevelCancellationIndicator(theCancellation);
-        BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
-        for (const TopoDS_Edge& anEdge : theSource.edges) {
-            aBuilder.Add(aProbe, anEdge);
+        TopoDS_Shape aProbeShape;
+        if (theIsChamfer) {
+            BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
+            for (const TopoDS_Edge& anEdge : theSource.edges) {
+                aBuilder.Add(aProbe, anEdge);
+            }
+            aBuilder.Build(aProgress->Start());
+            if (!aBuilder.IsDone()
+                || theCancellation->load(std::memory_order_relaxed)) {
+                return BevelFailureKind::Other;
+            }
+            aProbeShape = aBuilder.Shape();
+        } else {
+            BRepFilletAPI_MakeFillet aBuilder(theSource.shape);
+            for (const TopoDS_Edge& anEdge : theSource.edges) {
+                aBuilder.Add(aProbe, anEdge);
+            }
+            aBuilder.Build(aProgress->Start());
+            if (!aBuilder.IsDone()
+                || theCancellation->load(std::memory_order_relaxed)) {
+                return BevelFailureKind::Other;
+            }
+            aProbeShape = aBuilder.Shape();
         }
-        aBuilder.Build(aProgress->Start());
-        if (!aBuilder.IsDone()
-            || theCancellation->load(std::memory_order_relaxed)) {
-            return BevelFailureKind::Other;
-        }
-        const TopoDS_Shape aProbeShape = aBuilder.Shape();
         Standard_Size aNodes = 0;
         Standard_Size aSolids = 0;
         if (aProbeShape.IsNull() || aProbeShape.IsSame(theSource.shape)
@@ -918,7 +954,11 @@ private:
                         aResult.failureKind =
                             fillet_failure::IsClearanceRefusal(aBuilder)
                                 ? BevelFailureKind::RadiusRefused
-                                : BevelFailureKind::Other;
+                                : ClassifyFailedPlainBevel(
+                                    aSource, aDistance, Standard_False,
+                                    theRequest.cancellation,
+                                    theRequest.maximumResultTopologyNodes,
+                                    theRequest.maximumResultSolids);
                         return aResult;
                     }
                     aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
@@ -940,11 +980,12 @@ private:
                     // A plain chamfer may "build" a broken solid when the
                     // distance runs past a neighbouring edge (phone stand:
                     // Bevel 2 on a 2 mm Push-pull step).
-                    if (isChamfer && !aSource.retainedInput
+                    if (!aSource.retainedInput
                         && !aCandidate.IsNull()
                         && !aCandidate.IsSame(aSource.shape)) {
-                        aResult.failureKind = ClassifyFailedPlainChamfer(
-                            aSource, aDistance, theRequest.cancellation,
+                        aResult.failureKind = ClassifyFailedPlainBevel(
+                            aSource, aDistance, isChamfer,
+                            theRequest.cancellation,
                             theRequest.maximumResultTopologyNodes,
                             theRequest.maximumResultSolids);
                     }
