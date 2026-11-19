@@ -21,6 +21,18 @@
 #include "../UI/Core3DContext.hpp"
 #include <Prs3d_ShadingAspect.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <BRep_Tool.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
+#include <Poly_Triangulation.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <Precision.hxx>
+#include <StdPrs_ToolTriangulatedShape.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Edge.hxx>
 
 namespace {
 
@@ -149,6 +161,52 @@ Handle(Graphic3d_TextureSet) TextureSetReplacingBaseColor(
   return aResult;
 }
 
+// A face whose mesher could not reach the display accuracy keeps a mesh
+// coarser than asked (BRepMesh records the reached deflection). In a session
+// OCCT still reuses it, because the mesh carries the settings it was made
+// with (Poly_TriangulationParameters); a mesh read from a saved file carries
+// no settings, so the first display after opening re-meshes that face: its
+// Checked flag is cleared and its edge meshes are renumbered, which changes a
+// saved file just by opening it (lamp shade face 6, 19 Nov).
+// A face is kept only when its stored mesh was made by a display pass for
+// this face geometry with the asked deflection (CTO 19 Nov 03:25, option A):
+// every edge of the face carries a mesh polygon on that very triangulation
+// (new or changed geometry has none), and a face coarser than asked carries
+// edge polygons made with exactly the asked deflection (so the mesher already
+// tried this accuracy and stopped where it stopped). The angle is checked by
+// the caller. All other shapes are left to OCCT as before.
+bool ShapeMeshedForDisplayDeflection(const TopoDS_Shape& theShape,
+                                     const Standard_Real theDeflection)
+{
+  if (theShape.IsNull() || !(theDeflection > 0.0)) return false;
+  const Standard_Real aSlack = theDeflection * 1.0e-9 + 1.0e-12;
+  const Standard_Real aLimit = theDeflection + aSlack;
+  // Free edges and vertices are drawn from their own polygons: leave those to OCCT.
+  if (TopExp_Explorer(theShape, TopAbs_EDGE, TopAbs_FACE).More()) return false;
+  TopTools_IndexedMapOfShape aFaces;
+  TopExp::MapShapes(theShape, TopAbs_FACE, aFaces);
+  if (aFaces.IsEmpty()) return false;
+  for (Standard_Integer anIndex = 1; anIndex <= aFaces.Extent(); ++anIndex)
+  {
+    const TopoDS_Face& aFace = TopoDS::Face(aFaces(anIndex));
+    TopLoc_Location aLocation;
+    const Handle(Poly_Triangulation)& aMesh = BRep_Tool::Triangulation(aFace, aLocation);
+    if (aMesh.IsNull() || aMesh->NbTriangles() < 1) return false;
+    const bool isFineEnough = aMesh->Deflection() <= aLimit;
+    Standard_Integer anEdgeCount = 0;
+    for (TopExp_Explorer anEdge(aFace, TopAbs_EDGE); anEdge.More(); anEdge.Next())
+    {
+      ++anEdgeCount;
+      const Handle(Poly_PolygonOnTriangulation)& aPolygon =
+          BRep_Tool::PolygonOnTriangulation(TopoDS::Edge(anEdge.Current()), aMesh, aLocation);
+      if (aPolygon.IsNull()) return false;
+      if (!isFineEnough && !(Abs(aPolygon->Deflection() - theDeflection) <= aSlack)) return false;
+    }
+    if (!isFineEnough && anEdgeCount == 0) return false;
+  }
+  return true;
+}
+
 } // namespace
 
 IMPLEMENT_STANDARD_RTTIEXT(CafShapePrs, XCAFPrs_AISObject)
@@ -177,6 +235,53 @@ CafShapePrs::CafShapePrs(const TDF_Label&                theDefinitionLabel,
   myOccurrenceLabel(theOccurrenceLabel)
 {
   SetMaterial(theMaterial);
+}
+
+// =======================================================================
+// function : Compute
+// purpose  : Do not re-mesh a shape that is already meshed for display.
+// =======================================================================
+void CafShapePrs::Compute(const Handle(PrsMgr_PresentationManager)& thePrsMgr,
+                          const Handle(Prs3d_Presentation)&         thePrs,
+                          const Standard_Integer                    theMode)
+{
+  const Handle(Prs3d_Drawer)& aDrawer = Attributes();
+  TopoDS_Shape aShape;
+  if (!GetLabel().IsNull()) aShape = XCAFDoc_ShapeTool::GetShape(GetLabel());
+  if (aShape.IsNull()) aShape = Shape();
+  // Every display pass in the app meshes with OCCT's default angle; a drawer
+  // asking another angle, or whose own deflection settings just changed (OCCT
+  // then clears and re-meshes), always goes the normal way.
+  static const Standard_Real THE_DISPLAY_ANGLE = Handle(Prs3d_Drawer)(new Prs3d_Drawer())->DeviationAngle();
+  bool keepMesh = false;
+  if (!aDrawer.IsNull() && aDrawer->IsAutoTriangulation() && !aShape.IsNull()
+      && Abs(aDrawer->DeviationAngle() - THE_DISPLAY_ANGLE) <= Precision::Angular()
+      && (!aDrawer->HasOwnDeviationAngle()
+          || Abs(aDrawer->DeviationAngle() - aDrawer->PreviousDeviationAngle()) <= Precision::Angular())
+      && (!aDrawer->HasOwnDeviationCoefficient()
+          || Abs(aDrawer->DeviationCoefficient() - aDrawer->PreviousDeviationCoefficient()) <= Precision::Confusion())
+      && !StdPrs_ToolTriangulatedShape::IsTessellated(aShape, aDrawer))
+  {
+    keepMesh = ShapeMeshedForDisplayDeflection(
+        aShape, StdPrs_ToolTriangulatedShape::GetDeflection(aShape, aDrawer));
+  }
+  if (!keepMesh)
+  {
+    XCAFPrs_AISObject::Compute(thePrsMgr, thePrs, theMode);
+    return;
+  }
+  const Standard_Boolean hadOwn = aDrawer->HasOwnIsAutoTriangulation();
+  const Standard_Boolean ownValue = aDrawer->IsAutoTriangulation();
+  struct RestoreAutoTriangulation {
+    Handle(Prs3d_Drawer) drawer; Standard_Boolean hadOwn; Standard_Boolean value;
+    ~RestoreAutoTriangulation()
+    {
+      if (hadOwn) drawer->SetAutoTriangulation(value);
+      else drawer->UnsetOwnIsAutoTriangulation();
+    }
+  } restore{aDrawer, hadOwn, ownValue};
+  aDrawer->SetAutoTriangulation(Standard_False);
+  XCAFPrs_AISObject::Compute(thePrsMgr, thePrs, theMode);
 }
 
 // =======================================================================

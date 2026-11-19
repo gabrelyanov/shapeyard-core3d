@@ -115,6 +115,11 @@ public:
 
 protected:
 
+  //! Keeps a face mesh already made with the current display settings (no re-mesh on open).
+  virtual void Compute (const Handle(PrsMgr_PresentationManager)& thePrsMgr,
+                        const Handle(Prs3d_Presentation)&         thePrs,
+                        const Standard_Integer                    theMode) Standard_OVERRIDE;
+
   void removeDefinitionRootCustomAspects();
   void clearImportedSubshapeAppearanceOverrides(
       const Standard_Boolean theClearMaterial,
