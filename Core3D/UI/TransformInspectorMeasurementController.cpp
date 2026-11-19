@@ -11,6 +11,7 @@
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
 #include "../OCCTKit/CylindricalCutDefinition.hxx"
+#include "../OCCTKit/SweepPersistence.hxx"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -288,6 +289,8 @@ bool TryInspectorRepresentation(
 
 // The one capability a bakeable saved Hole gets back (NonuniformScale, Dimensions).
 constexpr std::uint64_t kSavedHoleBakeCapabilities=1ull<<5;
+// The capability a part with a current Sweep record does not get (NonuniformScale, Dimensions; SWEEP-DIM B).
+constexpr std::uint64_t kSweepWithheldCapabilities=1ull<<5;
 bool TryInspectorOwnedRepresentation(const Handle(OcctDocument)& owner,const TDF_Label& label,
     TransformInspectorGeometryRepresentation& representation,std::uint64_t& capabilities) noexcept {
     try {
@@ -303,6 +306,14 @@ bool TryInspectorOwnedRepresentation(const Handle(OcctDocument)& owner,const TDF
             if(owner->CanBakeSavedCutForFaceEdit(label))unsupported&=~kSavedHoleBakeCapabilities;
             capabilities&=~unsupported;
         }
+        // SWEEP-DIM option B (CTO 19 Nov 09:23): a part with a current Sweep record keeps its guide and
+        // round section as numbers and is never stretched along one axis (OrdinaryEditController refuses
+        // any geometry change but SweepRebuild), so By numbers shows its Dimensions read-only instead of
+        // a number box that takes a value and throws it away. Move, Rotate and Uniform scale (placement
+        // only) stay. A malformed record keeps today's capabilities (its commit is still refused).
+        core3d::sweep_persistence::Record sweep;
+        if(core3d::sweep_persistence::Read(owner->Document(),label,sweep)&&!sweep.label.IsNull())
+            capabilities&=~kSweepWithheldCapabilities;
         return true;
     }catch(...){return false;}
 }
