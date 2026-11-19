@@ -2460,10 +2460,10 @@ void MeshPrivateExportSurfaces(
             && (state->exportType == ExportTypeStl
                 || state->exportType == ExportTypeObj
                 || state->exportType == ExportTypeGltf);
-        // Viewport quality keeps its one attempt; only when that attempt misses the requested
-        // deflection (Astra mug, 19 Nov: a resized cylinder wall stored as a spline meshed to
-        // 0.580 for 0.532 after a Join) it takes the presets' first refinement step once, with
-        // interior control. Exports that pass today are unchanged byte for byte.
+        // Viewport quality: one more attempt after clearing only the surface faces
+        // whose kept mesh misses the requested deflection. The mesher reuses a
+        // kept mesh up to about 10 % coarser, which the check below then refuses
+        // (joined mug, 18 Nov: a saved Join's drawn ring face at 0.58 vs 0.532).
         const int maximumAttempts = qualityPreset ? (parametricRetry ? 5 : 4) : 2;
         Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
         bool validMesh = false;
@@ -2485,9 +2485,20 @@ void MeshPrivateExportSurfaces(
                 }
                 if (!hasEligibleFailure) break;
             }
-            if (attempt > 0) { BRepTools::Clean(meshingShape); }
+            if (attempt > 0 && !qualityPreset) {
+                bool cleared = false;
+                for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                    ThrowIfCancelled(state);
+                    const auto face = TopoDS::Face(faces.Current());
+                    if (!BRep_Tool::Surface(face).IsNull() && !BRepTools::Triangulation(face, deflection)) {
+                        BRepTools::Clean(face);
+                        cleared = true;
+                    }
+                }
+                if (!cleared) break;
+            } else if (attempt > 0) { BRepTools::Clean(meshingShape); }
             constexpr double refinementFactors[] = {1.0, 0.25, 0.125, 0.0625, 0.0625};
-            const double target = attempt == 0 ? deflection
+            const double target = attempt == 0 || !qualityPreset ? deflection
                 : std::max(Precision::Confusion(), deflection * refinementFactors[attempt]);
             BRepMesh_IncrementalMesh mesher;
             mesher.ChangeParameters().Deflection = target;

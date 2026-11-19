@@ -33580,6 +33580,29 @@ bool ShapeBytes(const TopoDS_Shape& shape, std::vector<std::uint8_t>& output) no
     if (!retained_part_boolean::ExactShapeBytes(shape, value)) return false;
     output = Bytes(value); return true;
 }
+// The exact text of a shape with every Checked bit written as 0. Checked is a
+// cache (meshing for drawing or picking sets it), not geometry, so the kept-
+// originals proof and its memo key compare shapes without it (K28 / joined mug,
+// CTO 18 Nov 21:56). The bits are put back before returning; nothing meshes in
+// between, so the live part is left exactly as it was.
+bool ProofShapeBytes(const TopoDS_Shape& shape, std::vector<std::uint8_t>& output) noexcept {
+    std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> kept;
+    bool ok = false;
+    try {
+        TopTools_IndexedMapOfShape all;
+        TopExp::MapShapes(shape, all);
+        std::unordered_set<const TopoDS_TShape*> seen;
+        for (int index = 1; index <= all.Extent(); ++index) {
+            const Handle(TopoDS_TShape)& tshape = all(index).TShape();
+            if (tshape.IsNull() || !seen.insert(tshape.get()).second || !tshape->Checked()) continue;
+            kept.emplace_back(tshape, Standard_True);
+            tshape->Checked(Standard_False);
+        }
+        ok = ShapeBytes(shape, output);
+    } catch (...) { ok = false; }
+    for (auto& entry : kept) entry.first->Checked(entry.second);
+    return ok;
+}
 bool HashBytes(const std::vector<std::uint8_t>& bytes, retained_recipe::Digest& digest) noexcept {
     return !bytes.empty() && retained_solid::Hash(bytes, digest);
 }
@@ -34648,9 +34671,17 @@ bool ValidateOriginalsRecordContinued(
         if (!composite_recipe::Encode(graph, canonical)
             || canonical != record.value->bytes
             || record.value->sourceShapes.size() != 2
-            || !ShapeBytes(record.current, actual)
-            || replay.output.detachedShape != actual)
+            || !ShapeBytes(record.current, actual))
             return operation.deny();
+        if (replay.output.detachedShape != actual) {
+            // Same shape apart from the Checked cache bits (K28): compare both
+            // without them; any other byte still refuses.
+            std::vector<std::uint8_t> replayed, stored;
+            if (!ProofShapeBytes(candidate, replayed)
+                || !ProofShapeBytes(record.current, stored)
+                || replayed != stored)
+                return operation.deny();
+        }
         if (!operation.enterReadback(
                 OwnerReadbackPhase::Publish, *operation.featureBudget)) return false;
         ProvenCheckedBits::Shared().remember(record.current);
@@ -34736,7 +34767,7 @@ bool OriginalsProofKey(const Handle(TDocStd_Document)& document,
             if (!ShapeBytes(source, part)) return false;
             add(part);
         }
-        if (!ShapeBytes(record.current, part)) return false;
+        if (!ProofShapeBytes(record.current, part)) return false;
         add(part);
         Append(all, unit);
         return HashBytes(all, key);

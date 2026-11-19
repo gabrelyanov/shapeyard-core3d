@@ -2245,8 +2245,10 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
         if (owner.IsNull()) return NO;
         TopExp_Explorer face(XCAFDoc_ShapeTool::GetShape(owner), TopAbs_FACE);
         if (!face.More() || face.Current().TShape().IsNull()) return NO;
+        // A real change the proof reads. The Checked bit no longer counts: it is a
+        // meshing cache that the proof leaves out (K28 / joined mug, 18 Nov).
         const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
-        tshape->Checked(!tshape->Checked());
+        tshape->Orientable(!tshape->Orientable());
         return YES;
     } catch (...) { return NO; }
 }
