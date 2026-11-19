@@ -9334,6 +9334,7 @@ Standard_Boolean OcctDocument::ValidateGeometryRepresentations() const
 namespace core3d::part_boolean::owner {
 bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
                              const composite_recipe::Record& record) noexcept;
+void RestoreProvenOriginalsCheckedBits(const Handle(TDocStd_Document)& document) noexcept;
 }
 
 namespace {
@@ -31838,6 +31839,9 @@ Standard_Boolean OcctDocument::undo() {
             if (!engagedTreatmentDelta.IsNull()
                 && !ApplyTreatmentHistoryAfterHistoryChange(engagedTreatmentDelta, Standard_True))
                 return Standard_False;
+            // MUG-SAVE: kept-originals parts this step made current get back the Checked
+            // bits they had when last proven (meshing of a later part sharing their faces).
+            core3d::part_boolean::owner::RestoreProvenOriginalsCheckedBits(myOcafDoc);
             if (myNativeAuthority) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(
@@ -31897,6 +31901,9 @@ Standard_Boolean OcctDocument::redo() {
             if (!engagedTreatmentDelta.IsNull()
                 && !ApplyTreatmentHistoryAfterHistoryChange(engagedTreatmentDelta, Standard_False))
                 return Standard_False;
+            // MUG-SAVE: kept-originals parts this step made current get back the Checked
+            // bits they had when last proven (meshing of a later part sharing their faces).
+            core3d::part_boolean::owner::RestoreProvenOriginalsCheckedBits(myOcafDoc);
             if (myNativeAuthority) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(
@@ -34511,6 +34518,100 @@ bool ReplayOriginalsGraphDetached(const composite_recipe::Definition& graph,
     } catch (...) { output.Nullify(); return false; }
 }
 
+namespace {
+// MUG-SAVE (19 Nov 2026). The proof below compares the stored Join result with a fresh
+// replay of its originals as exact BRep text, and that text carries each sub-shape's
+// Checked bit (OCCT bookkeeping that meshing and validity checks set). A later part made
+// FROM the Join result (the mug's handle cut) shares the untouched faces of the cup, so
+// meshing that later part for the screen or a file export sets Checked on faces of the
+// Join result too. After Undo of the handle cut the Join result came back with those
+// marks, its proof refused, and the mug could neither save nor export (Astra mug,
+// AuthoredBooleanNativeTests testAstraMugCutThroughJoinedHandleKeepsExportAndSave).
+// The proof stays exact. What changes: every time a result is proven exactly, the
+// Checked bit of each of its sub-shapes is remembered here, and Undo / Redo put the
+// remembered bits back on the kept-originals parts the history step made current, before
+// anything is drawn or saved. A Checked bit changed with no history step between (for
+// instance testARememberedJoinProofDoesNotAnswerForAChangedStoredResult) is still refused.
+class ProvenCheckedBits final {
+public:
+    static ProvenCheckedBits& Shared() noexcept {
+        static ProvenCheckedBits* const shared = new ProvenCheckedBits();
+        return *shared;
+    }
+    void remember(const TopoDS_Shape& shape) noexcept {
+        try {
+            if (shape.IsNull() || shape.TShape().IsNull()) return;
+            Entry entry;
+            if (!Capture(shape, entry)) return;
+            const std::lock_guard<std::mutex> guard(lock_);
+            for (auto& existing : entries_)
+                if (existing.root == entry.root) { existing = std::move(entry); return; }
+            if (entries_.size() < Capacity) entries_.push_back(std::move(entry));
+            else { entries_[next_] = std::move(entry); next_ = (next_ + 1) % Capacity; }
+        } catch (...) {}
+    }
+    // Puts the remembered bits back when the shape still has exactly the sub-shapes that
+    // were proven; any other shape is left alone.
+    void restore(const TopoDS_Shape& shape) noexcept {
+        try {
+            if (shape.IsNull() || shape.TShape().IsNull()) return;
+            std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> bits;
+            {
+                const std::lock_guard<std::mutex> guard(lock_);
+                for (const auto& existing : entries_)
+                    if (existing.root == shape.TShape()) { bits = existing.bits; break; }
+            }
+            if (bits.empty()) return;
+            TopTools_IndexedMapOfShape all;
+            TopExp::MapShapes(shape, all);
+            if (std::size_t(all.Extent()) + 1 != bits.size()) return;
+            for (std::size_t index = 1; index < bits.size(); ++index) {
+                TopoDS_Shape probe;
+                probe.TShape(bits[index].first);
+                if (bits[index].first.IsNull() || !all.Contains(probe)) return;
+            }
+            for (auto& entry : bits) entry.first->Checked(entry.second);
+        } catch (...) {}
+    }
+private:
+    struct Entry {
+        Handle(TopoDS_TShape) root;
+        std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> bits;
+    };
+    static bool Capture(const TopoDS_Shape& shape, Entry& entry) noexcept {
+        try {
+            TopTools_IndexedMapOfShape all;
+            TopExp::MapShapes(shape, all);
+            constexpr int maximumShapes = 200000;
+            if (all.Extent() <= 0 || all.Extent() > maximumShapes) return false;
+            entry.root = shape.TShape();
+            entry.bits.reserve(std::size_t(all.Extent()) + 1);
+            entry.bits.emplace_back(shape.TShape(), shape.TShape()->Checked());
+            for (int index = 1; index <= all.Extent(); ++index) {
+                const Handle(TopoDS_TShape)& tshape = all(index).TShape();
+                if (tshape.IsNull()) return false;
+                entry.bits.emplace_back(tshape, tshape->Checked());
+            }
+            return true;
+        } catch (...) { return false; }
+    }
+    static constexpr std::size_t Capacity = 32; // newest proofs; oldest replaced first
+    std::mutex lock_;
+    std::vector<Entry> entries_;
+    std::size_t next_ = 0;
+};
+} // namespace
+
+void RestoreProvenOriginalsCheckedBits(const Handle(TDocStd_Document)& document) noexcept {
+    try {
+        std::vector<composite_recipe::Record> records;
+        if (document.IsNull() || !composite_recipe::ReadAll(document, records)) return;
+        for (const auto& record : records)
+            if (record.value && !record.current.IsNull())
+                ProvenCheckedBits::Shared().restore(record.current);
+    } catch (...) {}
+}
+
 bool ValidateOriginalsRecordContinued(
     const Handle(TDocStd_Document)& document,
     const composite_recipe::Record& record,
@@ -34552,6 +34653,7 @@ bool ValidateOriginalsRecordContinued(
             return operation.deny();
         if (!operation.enterReadback(
                 OwnerReadbackPhase::Publish, *operation.featureBudget)) return false;
+        ProvenCheckedBits::Shared().remember(record.current);
         output = candidate;
         return true;
     } catch (...) { output.Nullify(); operation.refused = true; return false; }
@@ -34652,6 +34754,7 @@ bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
         const CFAbsoluteTime proofStarted = CFAbsoluteTimeGetCurrent();
 #endif
         if (keyed && ProvenOriginalsMemo::Shared().contains(proofKey)) {
+            ProvenCheckedBits::Shared().remember(record.current);
 #if DEBUG
             if (std::getenv("SHAPEYARD_ORIGINALS_PROOF_TRACE"))
                 std::fprintf(stderr, "ORIGINALS_PROOF memo=hit ms=%.1f\n",
