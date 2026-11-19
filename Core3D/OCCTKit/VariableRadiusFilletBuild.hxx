@@ -1,5 +1,7 @@
 #pragma once
 
+#include <BinTools.hxx>
+#include <sstream>
 #include "NativePhysicalWorkingFrame.hxx"
 #include "VariableRadiusFilletDefinition.hxx"
 #include <BOPAlgo_ArgumentAnalyzer.hxx>
@@ -1230,6 +1232,44 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
 #endif
 }
 
+// What the saved file will hold (Fable F1, CTO 19 Nov 18:39; desk lamp K19): the project stores parts
+// in the binary shape format, and a part read back can differ from the freshly built one in its last
+// digits (slanted directions are re-normalised). The recipe proof compares the saved part with this
+// build byte for byte, so the build trips its result through that format until a pass changes
+// nothing (as PartBooleanBuild's PersistenceMaterializeStable does for Booleans). A result that is
+// already stable comes back as it was, so files saved today keep their bytes. Never stable after
+// four passes: ReplayMismatch.
+namespace detail {
+inline bool binaryTrip(const TopoDS_Shape& shape, TopoDS_Shape& restored) noexcept {
+    try {
+        std::stringstream buffer(std::ios::in | std::ios::out | std::ios::binary);
+        BinTools::Write(shape, buffer, Standard_False, Standard_False,
+                        BinTools_FormatVersion_VERSION_4);
+        if (!buffer.good()) return false;
+        buffer.seekg(0);
+        restored.Nullify();
+        BinTools::Read(restored, buffer);
+        return !restored.IsNull();
+    } catch (...) { restored.Nullify(); return false; }
+}
+inline bool fileStable(BuildResult& result) noexcept {
+    try {
+        TopoDS_Shape current;
+        if (!binaryTrip(result.solid, current)) return false;
+        std::vector<std::uint8_t> currentBytes;
+        if (!exactShapeBytes(current, currentBytes)) return false;
+        for (int pass = 0; pass < 3; ++pass) {
+            TopoDS_Shape next;
+            std::vector<std::uint8_t> nextBytes;
+            if (!binaryTrip(current, next) || !exactShapeBytes(next, nextBytes)) return false;
+            if (nextBytes == currentBytes) { result.solid = current; return true; }
+            current = next; currentBytes.swap(nextBytes);
+        }
+        return false;
+    } catch (...) { return false; }
+}
+} // namespace detail
+
 inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
                                           const Definition& definition,
                                           const std::atomic_bool& cancelled) noexcept {
@@ -1252,6 +1292,9 @@ inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
             || lhs.measuredRadiusLocal != rhs.measuredRadiusLocal) {
             BuildResult mismatch; mismatch.refusal = Refusal::ReplayMismatch; return mismatch;
         }
+    }
+    if (!detail::fileStable(first)) {
+        BuildResult mismatch; mismatch.refusal = Refusal::ReplayMismatch; return mismatch;
     }
     return first;
 }
@@ -1610,6 +1653,9 @@ inline BuildResult BuildMultiStationDeterministically(
             || lhs.measuredRadiusLocal != rhs.measuredRadiusLocal) {
             BuildResult mismatch; mismatch.refusal = Refusal::ReplayMismatch; return mismatch;
         }
+    }
+    if (!detail::fileStable(first)) {
+        BuildResult mismatch; mismatch.refusal = Refusal::ReplayMismatch; return mismatch;
     }
     return first;
 }
