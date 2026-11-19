@@ -4130,6 +4130,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     Core3DRoundFailureObservation result = {
         0,
         Core3DRoundFailureKindNone,
+        0.0,
     };
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
@@ -4148,6 +4149,10 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             break;
         case BevelFailureKind::RadiusRefused:
             result.kind = Core3DRoundFailureKindRadiusRefused;
+            result.largestFittingValue =
+                std::isfinite(observation.largestFittingValue)
+                    && observation.largestFittingValue > 0.0
+                ? observation.largestFittingValue : 0.0;
             break;
         case BevelFailureKind::Other:
             result.kind = Core3DRoundFailureKindOther;

@@ -1205,6 +1205,10 @@ typedef NS_ENUM(NSInteger, Core3DRoundFailureKind) {
 typedef struct {
     uint64_t generation;
     Core3DRoundFailureKind kind;
+    //! K11 (CTO 19 Nov 12:35): with radiusRefused on a plain round of one
+    //! part, the largest tested radius that builds, in the Bevel's stored
+    //! units (multiply by bevelMetersPerUnit); 0 when unknown.
+    double largestFittingValue;
 } Core3DRoundFailureObservation;
 
 @protocol PrimitiveManagerProtocol<NSObject>

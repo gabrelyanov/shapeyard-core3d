@@ -5296,6 +5296,7 @@ core3d_visibleRawR2RoundFailureObservation {
     Core3DRoundFailureObservation result = {
         _visibleRawR2BevelGeneration,
         Core3DRoundFailureKindNone,
+        0.0,
     };
     if (!_visibleRawR2BevelActive) return result;
     switch (_visibleRawR2BevelRefusalKind) {
