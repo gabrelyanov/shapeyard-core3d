@@ -1,4 +1,5 @@
 #include "OrdinaryEditController.hpp"
+#include "../OCCTKit/PlanarSweepSolid.hxx"
 //
 //  TransformInspectorMeasurementController.cpp
 //  Core3D
@@ -2594,6 +2595,8 @@ TransformInspectorMeasurementController::commitPosition(
         gp_Trsf aCandidateTransform = exactBaseline.transform;
         TopoDS_Shape candidateShape = aStoredShape;
         int inspectorPrimitiveKind = 0;
+        std::optional<planar_sweep::Definition> sweepRebuild;
+        std::shared_ptr<const SweepRebuildGuard> sweepSource;
         if(unchangedPlacement) {
             // Reserved no-op proceeds with the exact original transform to
             // ordinary source/catalog proof, without a receipt-only command.
@@ -2624,6 +2627,62 @@ TransformInspectorMeasurementController::commitPosition(
                 return anOutcome;
             }
             candidateShape = cut.solid;
+        } else if (sizes && exactBaseline.sweep.IsCurrent(aDocument, aDefinition)) {
+            // SWEEP-DIM (CTO 19 Nov 08:03, base proposal A): Dimensions on a Sweep follows its guide. A
+            // straight guide along the typed axis is made longer or shorter about its centre; the round
+            // section keeps its radius and the Sweep stays editable (its record is restaged in this same
+            // command, as Edit sweep does). Any other axis or guide keeps the refusal.
+            const auto& original = exactBaseline.sweep.definition;
+            bool straight = !original.segments.empty()
+                && original.vertices.size() == original.segments.size() + 1;
+            for (const auto& segment : original.segments)
+                straight = straight && segment.kind == ProfileCurveKind::Line;
+            gp_Trsf frame;
+            if (!straight || (original.constructionFrame && !original.constructionFrame->Transform(frame))) {
+                anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+                return anOutcome;
+            }
+            const gp_Pnt first = ProfilePointInPlane(original.vertices.front().point, original.plane).Transformed(frame);
+            const gp_Pnt last = ProfilePointInPlane(original.vertices.back().point, original.plane).Transformed(frame);
+            const double guideLength = first.Distance(last);
+            gp_XYZ along(0, 0, 0);
+            along.SetCoord(static_cast<int>(anAxis) + 1, 1.0);
+            const double extent = dimensionBounds[anAxis + 3] - dimensionBounds[anAxis];
+            const double target = theRequest.value / std::abs(aCurrentTransform.uniformScale);
+            if (!std::isfinite(guideLength) || guideLength <= Precision::Confusion()
+                || std::abs(gp_Vec(first, last).XYZ().Dot(along)) < guideLength * (1.0 - 1.0e-9)
+                || !std::isfinite(extent) || !std::isfinite(target)) {
+                anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+                return anOutcome;
+            }
+            // Flat caps square to a straight guide: the size on its axis is the guide's length.
+            const double ratio = (guideLength + (target - extent)) / guideLength;
+            if (!std::isfinite(ratio) || ratio * guideLength <= 32 * Precision::Confusion()) {
+                anOutcome.result = TransformInspectorPositionCommitResult::InvalidValue;
+                return anOutcome;
+            }
+            planar_sweep::Definition stretched = original;
+            const gp_XY middle = (original.vertices.front().point.XY() + original.vertices.back().point.XY()) * 0.5;
+            for (auto& vertex : stretched.vertices)
+                vertex.point.SetXY(middle + (vertex.point.XY() - middle) * ratio);
+            planar_sweep::Admission admission = planar_sweep::Admission::InvalidNumber;
+            const auto prepared = planar_sweep::Prepare(stretched, admission);
+            std::atomic_bool stop{false};
+            planar_sweep::SolidResult built;
+            if (!prepared || planar_sweep::Build(prepared, stop, built) != planar_sweep::BuildStatus::Built
+                || built.solid.IsNull()
+                || std::abs((built.bounds[anAxis + 3] - built.bounds[anAxis]) - target)
+                    > std::max(1.0e-6 * target, 1.0e-4)) {
+                anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+                return anOutcome;
+            }
+            sweepSource = theEdits->captureSavedSweepRebuildSource();
+            if (!sweepSource) {
+                anOutcome.result = TransformInspectorPositionCommitResult::Busy;
+                return anOutcome;
+            }
+            candidateShape = built.solid;
+            sweepRebuild = std::move(stretched);
         } else if (sizes) {
             const int kind = exactBaseline.inspectorPrimitive.IsCurrent(aStoredShape)
                 ? 2 : InspectorAnalyticPrimitiveKind(aStoredShape);
@@ -2707,6 +2766,13 @@ TransformInspectorMeasurementController::commitPosition(
         change.bakeSavedCut = sizes && !unchangedPlacement && bool(retainedPlacement.value);
         change.operation = (scales || sizes) ? OrdinaryTransformOperation::Scale
             : rotates ? OrdinaryTransformOperation::Rotate : OrdinaryTransformOperation::Translate;
+        if (sweepRebuild) {
+            // The Sweep's own rebuild route: same transform, new guide, record restaged with the shape.
+            change.operation = OrdinaryTransformOperation::SweepRebuild;
+            change.sweepRebuild = std::move(sweepRebuild);
+            change.sweepSource = std::move(sweepSource);
+            change.faceColourMap.reset();
+        }
 #ifdef DEBUG
         const Standard_Integer fault = std::exchange(myImpl->debugPositionCommitMode, 0);
         if (fault != 0) {
