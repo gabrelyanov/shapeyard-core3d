@@ -27109,9 +27109,30 @@ Standard_Boolean OcctDocument::StageVariableRadiusFilletOwner(
                 before.current, companion->flagsBefore))
             return fail();
         beforeCaptured = true;
+        // Store exactly what the saved recipe rebuilds (CaptureVariableRadiusFilletOwner and every
+        // reopen compare the part with that rebuild byte for byte). The preview was built from the
+        // live part; on a part whose faces came from a Bevel the recipe's copy of that part differs
+        // in bits only (signed zeros), and the stored Ramp was then refused at Apply (desk lamp K19:
+        // 0.3 -> 1 previewed, Apply did nothing).
+        TopoDS_Shape recipeShape = candidate;
+        {
+            namespace vrf = core3d::variable_radius_fillet;
+            TopoDS_Shape recipeBase;
+            const std::atomic_bool notCancelled{false};
+            vrf::BuildResult rebuilt;
+            vrf::Definition linear;
+            vrf::MultiStationDefinition stations;
+            if (owner::ReadShape(base, recipeBase)) {
+                if (vrf::Decode(law, linear))
+                    rebuilt = vrf::BuildDeterministically(recipeBase, linear, notCancelled);
+                else if (vrf::Decode(law, stations))
+                    rebuilt = vrf::BuildMultiStationDeterministically(recipeBase, stations, notCancelled);
+            }
+            if (rebuilt.built() && !rebuilt.solid.IsNull()) recipeShape = rebuilt.solid;
+        }
         OcctPreparedLabelClone clone;
         clone.source = before.exact;
-        clone.detachedShape = candidate;
+        clone.detachedShape = recipeShape;
         clone.representation =
             before.exact.visibility.object.object.resolvedRepresentation;
         OcctExactLabelReceipt staged;
@@ -27119,7 +27140,7 @@ Standard_Boolean OcctDocument::StageVariableRadiusFilletOwner(
             || !CaptureVariableRadiusFilletOwner(ownerLabel, capture)
             || !capture.present || capture.ownerBytes != ownerBytes)
             return fail();
-        companion->ownerShapeAfter = candidate;
+        companion->ownerShapeAfter = recipeShape;
         if (!CaptureNamedOwnerCompanionSide(myOcafDoc, ownerLabel,
                 companion->after, companion->sourceBytesAfter,
                 companion->syetAfter, companion->syetBytesAfter))
