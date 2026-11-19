@@ -13119,6 +13119,25 @@ bool PointOnFace(const gp_Pnt& point, const TopoDS_Face& face, double tolerance)
 
 // Join / Cut / Overlap of one part with one or more tools, in the part's own
 // frame: Cut takes every tool away, Join fuses every tool in; Overlap takes one.
+// The copy a plain Join, Cut or Overlap works on. BRepBuilderAPI_Copy can turn a valid part
+// into an invalid one (treasure chest R2-N01, 19 Nov: a cube that already holds one joined
+// 4 mm rivet, the face cutting the ball through its poles; the copy failed the exact check
+// and the next Join was refused). Then the file's own copy (as FileStableShape stores it) is
+// used, if that one is valid.
+TopoDS_Shape WorkingCopy(const TopoDS_Shape& shape) noexcept {
+    const TopoDS_Shape copy = DetachedCopy(shape);
+    try {
+        if (copy.IsNull() || BRepCheck_Analyzer(copy, Standard_True).IsValid()
+            || !BRepCheck_Analyzer(shape, Standard_True).IsValid())
+            return copy;
+        TopoDS_Shape stable;
+        if (FileStableShape(shape, stable) && !stable.IsNull()
+            && BRepCheck_Analyzer(stable, Standard_True).IsValid())
+            return stable;
+    } catch (...) {}
+    return copy;
+}
+
 bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
     const std::vector<std::pair<TopoDS_Shape, gp_Trsf>>& toolsStored, int operation,
     TopoDS_Shape& result, std::string& refusal, double* removedShare = nullptr) noexcept {
@@ -13142,15 +13161,15 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             }
         }
         const bool severalPieces = onlySolids && targetPieces >= 2;
-        const TopoDS_Shape targetShape = severalPieces ? DetachedCopy(stored)
-            : ExactResizedPrimitive(DetachedCopy(stored));
+        const TopoDS_Shape targetShape = severalPieces ? WorkingCopy(stored)
+            : ExactResizedPrimitive(WorkingCopy(stored));
         if (targetShape.IsNull() || (!severalPieces && targetShape.ShapeType() != TopAbs_SOLID)
             || operation < 0 || operation > 2)
             return false;
         TopTools_ListOfShape arguments, tools;
         arguments.Append(targetShape);
         for (const auto& [toolStored, toolPlacement] : toolsStored) {
-            const TopoDS_Shape toolShape = ExactResizedPrimitive(DetachedCopy(SingleSolidOf(toolStored)));
+            const TopoDS_Shape toolShape = ExactResizedPrimitive(WorkingCopy(SingleSolidOf(toolStored)));
             if (toolShape.IsNull() || toolShape.ShapeType() != TopAbs_SOLID) return false;
             gp_Trsf toolToTarget = targetPlacement.Inverted();
             toolToTarget.Multiply(toolPlacement);
