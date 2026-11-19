@@ -1765,10 +1765,20 @@ Standard_Boolean BevelOperationController::setValueImpl(
         && theSignedDistance <= 0.0) {
         return Standard_False;
     }
+    // The cap is in the part's own units. On a part made smaller (scale 0.64)
+    // 20 units are only 12.8 mm, so a typed 15 mm Bevel was silently cut down
+    // (desk lamp K14: a 6.4 mm top instead of 2 mm). Never cap below the 15 mm
+    // the editor offers as the user sees the part (getChamferBoundaries).
+    Standard_Real aLimit = kMaxDistance;
+    const Standard_Real aMetersPerUnit = bevelMetersPerUnit();
+    if (std::isfinite(aMetersPerUnit) && aMetersPerUnit > 0.0) {
+        const Standard_Real aFifteenMillimetres = 0.015 / aMetersPerUnit;
+        if (std::isfinite(aFifteenMillimetres))
+            aLimit = std::max(aLimit, aFifteenMillimetres);
+    }
     const Standard_Real aValue = theRefuseOutOfRange
         ? theSignedDistance
-        : std::max(-kMaxDistance,
-            std::min(theSignedDistance, kMaxDistance));
+        : std::max(-aLimit, std::min(theSignedDistance, aLimit));
     if (std::abs(aValue - myValue) < 1.0e-9
         && (myState == BevelPreviewState::Computing
             || myState == BevelPreviewState::Ready)) {
