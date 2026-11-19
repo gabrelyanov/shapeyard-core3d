@@ -2460,7 +2460,11 @@ void MeshPrivateExportSurfaces(
             && (state->exportType == ExportTypeStl
                 || state->exportType == ExportTypeObj
                 || state->exportType == ExportTypeGltf);
-        const int maximumAttempts = qualityPreset ? (parametricRetry ? 5 : 4) : 1;
+        // Viewport quality keeps its one attempt; only when that attempt misses the requested
+        // deflection (Astra mug, 19 Nov: a resized cylinder wall stored as a spline meshed to
+        // 0.580 for 0.532 after a Join) it takes the presets' first refinement step once, with
+        // interior control. Exports that pass today are unchanged byte for byte.
+        const int maximumAttempts = qualityPreset ? (parametricRetry ? 5 : 4) : 2;
         Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
         bool validMesh = false;
         for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
