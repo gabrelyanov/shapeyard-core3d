@@ -379,7 +379,10 @@ constexpr bool Core3DHasExpectedCapabilities(
             // Native retained-cut capture emits this exact reduced mask. This
             // validates a DTO shape, not retained-feature or Reserved authority.
             // A bakeable saved Hole also keeps NonuniformScale (Dimensions, HOLE-BOX-DIM).
+            // A part with a current Sweep record shows read-only Dimensions (SWEEP-DIM B).
             return capabilities == kBRepModelCapabilities
+                || capabilities == (kBRepModelCapabilities
+                    & ~static_cast<std::uint64_t>(Core3DModelCapabilityNonuniformScale))
                 || capabilities == (kBRepModelCapabilities
                     & ~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities)
                 || capabilities == (kBRepModelCapabilities
@@ -401,6 +404,8 @@ static_assert(Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentati
     kRetainedCutInspectorCapabilities));
 static_assert(Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
     kRetainedCutInspectorCapabilities | static_cast<std::uint64_t>(Core3DModelCapabilityNonuniformScale)));
+static_assert(Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
+    kBRepModelCapabilities & ~static_cast<std::uint64_t>(Core3DModelCapabilityNonuniformScale)));
 static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep, 0));
 static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
     kRetainedCutInspectorCapabilities | static_cast<std::uint64_t>(Core3DModelCapabilityBoolean)));
