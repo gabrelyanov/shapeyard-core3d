@@ -1567,6 +1567,11 @@ __attribute__((objc_subclassing_restricted))
 //! the faces in the document now. Read-only.
 - (NSString *)debugFaceCheckedBitsSummary
     NS_SWIFT_NAME(debugFaceCheckedBitsSummary());
+//! DEBUG probe (CTO 19 Nov 03:25, option A): redraws every displayed part once and
+//! returns @{faces, remeshed, displayed}: how many document faces there are and how
+//! many of them got a new surface mesh from that redraw. Changes no recipe.
+- (NSDictionary<NSString *, NSNumber *> *)debugRedisplayAllPartsCountingRemeshedFaces
+    NS_SWIFT_NAME(debugRedisplayAllPartsCountingRemeshedFaces());
 //! B2-only values/observation seam. `expected` is an independently authored
 //! complete Profile value; the real entity is detached and observed separately.
 //! No accessibility attribute, witness, edit authority or matcher success is
