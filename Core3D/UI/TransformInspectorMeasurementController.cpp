@@ -9,6 +9,8 @@
 #include "ObjectInteractor.hpp"
 #include "ShapeInteractor.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
+#include "../OCCTKit/AnalyticBooleanSolid.hxx"
+#include "../OCCTKit/CylindricalCutDefinition.hxx"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -62,6 +64,7 @@
 #include <condition_variable>
 #include <limits>
 #include <list>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -283,6 +286,8 @@ bool TryInspectorRepresentation(
     return false;
 }
 
+// The one capability a bakeable saved Hole gets back (NonuniformScale, Dimensions).
+constexpr std::uint64_t kSavedHoleBakeCapabilities=1ull<<5;
 bool TryInspectorOwnedRepresentation(const Handle(OcctDocument)& owner,const TDF_Label& label,
     TransformInspectorGeometryRepresentation& representation,std::uint64_t& capabilities) noexcept {
     try {
@@ -290,7 +295,14 @@ bool TryInspectorOwnedRepresentation(const Handle(OcctDocument)& owner,const TDF
             ||!TryInspectorRepresentation(owner->StoredGeometryRepresentationForLabel(label),representation,capabilities))return false;
         core3d::retained_solid::Record retained;
         if(!core3d::retained_solid::Read(owner->Document(),label,retained))return false;
-        if(retained.value)capabilities&=~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+        if(retained.value){
+            std::uint64_t unsupported=core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+            // HOLE-BOX-DIM (round 1): Dimensions on a part with a standalone saved Hole bakes the
+            // hole into the part inside its own command (as Push-pull, Bevel and Shell do; Undo
+            // restores the resizable hole), so By numbers keeps the one-axis resize for it.
+            if(owner->CanBakeSavedCutForFaceEdit(label))unsupported&=~kSavedHoleBakeCapabilities;
+            capabilities&=~unsupported;
+        }
         return true;
     }catch(...){return false;}
 }
@@ -1395,6 +1407,7 @@ struct TransformInspectorMeasurementController::Impl {
         std::string entityIdentifier;
         std::string definitionIdentifier;
         PersistedTransformCapture persistedTransform;
+        TransformInspectorVector3 displayedXYZDegrees;
         TransformInspectorGeometryRepresentation representation =
             TransformInspectorGeometryRepresentation::Invalid;
         std::uint64_t modelCapabilities = 0;
@@ -1411,6 +1424,72 @@ struct TransformInspectorMeasurementController::Impl {
         TransformInspectorNegativeBoundsReason reason =
             TransformInspectorNegativeBoundsReason::ExactBoundsFailed;
     };
+
+    // Presentation preferences only: no OCAF attributes, command deltas or
+    // retained shapes. A fixed bound prevents long sessions growing this cache.
+    // Geometry and the canonical API remain authoritative. Matching the current
+    // quaternion also makes Undo/Redo recover the appropriate earlier spelling.
+    struct RotationPreference {
+        std::string entity;
+        std::string definition;
+        TransformInspectorVector3 angles;
+    };
+    std::list<RotationPreference> rotationPreferences;
+    static constexpr std::size_t kMaximumRotationPreferences = 64;
+
+    static bool anglesMatchRotation(
+        const TransformInspectorVector3& angles,
+        const TransformInspectorQuaternion& quaternion) noexcept {
+        try {
+            gp_Quaternion expected;
+            constexpr double radians = M_PI / 180.0;
+            expected.SetEulerAngles(gp_Extrinsic_XYZ,
+                std::remainder(angles.x, 360.0) * radians,
+                std::remainder(angles.y, 360.0) * radians,
+                std::remainder(angles.z, 360.0) * radians);
+            expected.Normalize();
+            const double a[4] = {expected.X(), expected.Y(), expected.Z(), expected.W()};
+            const double b[4] = {quaternion.x, quaternion.y, quaternion.z, quaternion.w};
+            double same = 0, opposite = 0;
+            for (int i = 0; i < 4; ++i) {
+                same += (a[i] - b[i]) * (a[i] - b[i]);
+                opposite += (a[i] + b[i]) * (a[i] + b[i]);
+            }
+            return std::min(same, opposite) <= 1e-24;
+        } catch (...) { return false; }
+    }
+
+    TransformInspectorVector3 displayedAngles(
+        const std::string& entity, const std::string& definition,
+        const PersistedTransformCapture& transform) const noexcept {
+        for (const auto& preference : rotationPreferences) {
+            if (preference.entity == entity && preference.definition == definition
+                && anglesMatchRotation(preference.angles, transform.quaternion)) {
+                return preference.angles;
+            }
+        }
+        return transform.extrinsicXYZDegrees;
+    }
+
+    void rememberAngles(const std::string& entity, const std::string& definition,
+        const TransformInspectorVector3& angles,
+        const TransformInspectorQuaternion& quaternion) noexcept {
+        if (!anglesMatchRotation(angles, quaternion)) return;
+        try {
+            // Allocate before changing anything; cache allocation failure must
+            // never turn an already committed model edit into a reported failure.
+            rotationPreferences.push_front({entity, definition, angles});
+            auto it = std::next(rotationPreferences.begin());
+            while (it != rotationPreferences.end()) {
+                if (it->entity == entity && it->definition == definition
+                    && anglesMatchRotation(it->angles, quaternion)) {
+                    it = rotationPreferences.erase(it);
+                } else { ++it; }
+            }
+            while (rotationPreferences.size() > kMaximumRotationPreferences)
+                rotationPreferences.pop_back();
+        } catch (...) {}
+    }
 
     std::list<CacheEntry> cache;
     std::list<NegativeCacheEntry> negativeCache;
@@ -1453,6 +1532,7 @@ struct TransformInspectorMeasurementController::Impl {
         if (cacheDocument != theDocument) {
             cache.clear();
             negativeCache.clear();
+            rotationPreferences.clear();
             cacheDocument = theDocument;
         }
     }
@@ -1672,6 +1752,7 @@ void TransformInspectorMeasurementController::shutdown() noexcept
         }
         myImpl->cache.clear();
         myImpl->negativeCache.clear();
+        myImpl->rotationPreferences.clear();
         myImpl->outstandingKeys.clear();
         myImpl->positionEditContext.reset();
         myImpl->cacheDocument.Nullify();
@@ -1861,6 +1942,9 @@ TransformInspectorMeasurementController::capture(
         aMeasurement.quaternion = aPersistedTransform.quaternion;
         aMeasurement.extrinsicXYZDegrees =
             aPersistedTransform.extrinsicXYZDegrees;
+        aMeasurement.displayedXYZDegrees = myImpl->displayedAngles(
+            aMeasurement.entityIdentifier, aMeasurement.definitionIdentifier,
+            aPersistedTransform);
         aMeasurement.uniformScale =
             aPersistedTransform.uniformScale;
         aMeasurement.presentationMatchesDocument = TransformsMatch(
@@ -1913,6 +1997,7 @@ TransformInspectorMeasurementController::capture(
             anEditContext.definitionIdentifier =
                 aMeasurement.definitionIdentifier;
             anEditContext.persistedTransform = aPersistedTransform;
+            anEditContext.displayedXYZDegrees = aMeasurement.displayedXYZDegrees;
             anEditContext.representation = aMeasurement.representation;
             anEditContext.modelCapabilities =
                 aMeasurement.modelCapabilities;
@@ -2151,6 +2236,9 @@ TransformInspectorMeasurementController::commitPosition(
     const std::shared_ptr<OrdinaryEditController>& theEdits,
     std::shared_ptr<NativeModelingCommitPermit> placementPermit) noexcept
 {
+    // Ordinary commit publishes synchronous observers; they may close the
+    // viewer. Keep this controller alive until its optional readback is done.
+    [[maybe_unused]] const auto keepAlive = weak_from_this().lock();
     TransformInspectorPositionCommitOutcome anOutcome;
     anOutcome.result =
         TransformInspectorPositionCommitResult::InternalFailure;
@@ -2184,8 +2272,17 @@ TransformInspectorMeasurementController::commitPosition(
                 TransformInspectorPositionCommitResult::InvalidValue;
             return anOutcome;
     }
+    const bool displayedRotation =
+        theRequest.kind == TransformInspectorEditKind::DisplayedRotation;
+    const bool rotates = displayedRotation
+        || theRequest.kind == TransformInspectorEditKind::Rotation;
+    if (displayedRotation && placementPermit) {
+        anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+        return anOutcome;
+    }
     if ((theRequest.kind != TransformInspectorEditKind::Position
             && theRequest.kind != TransformInspectorEditKind::Rotation
+            && theRequest.kind != TransformInspectorEditKind::DisplayedRotation
             && theRequest.kind != TransformInspectorEditKind::UniformScale
             && theRequest.kind != TransformInspectorEditKind::Dimension)
         || (theRequest.kind == TransformInspectorEditKind::Dimension && theRequest.value <= 0.0)
@@ -2421,7 +2518,7 @@ TransformInspectorMeasurementController::commitPosition(
                 aCapabilities)
             || aRepresentation != anEditContext.representation
             || aCapabilities != anEditContext.modelCapabilities
-            || (aCapabilities & (1ull << (theRequest.kind == TransformInspectorEditKind::Dimension ? 5 : theRequest.kind == TransformInspectorEditKind::UniformScale ? 4 : theRequest.kind == TransformInspectorEditKind::Rotation ? 3 : 2))) == 0) {
+            || (aCapabilities & (1ull << (theRequest.kind == TransformInspectorEditKind::Dimension ? 5 : theRequest.kind == TransformInspectorEditKind::UniformScale ? 4 : rotates ? 3 : 2))) == 0) {
             anOutcome.result =
                 TransformInspectorPositionCommitResult::Unsupported;
             return anOutcome;
@@ -2449,11 +2546,11 @@ TransformInspectorMeasurementController::commitPosition(
             return anOutcome;
         }
 
-        const bool rotates = theRequest.kind == TransformInspectorEditKind::Rotation;
         const bool scales = theRequest.kind == TransformInspectorEditKind::UniformScale;
         const bool sizes = theRequest.kind == TransformInspectorEditKind::Dimension;
         TransformInspectorVector3 aCandidatePosition = sizes ? measuredDimensions : scales
             ? TransformInspectorVector3{aCurrentTransform.uniformScale, 0.0, 0.0}
+            : displayedRotation ? anEditContext.displayedXYZDegrees
             : rotates ? aCurrentTransform.extrinsicXYZDegrees : aCurrentTransform.position;
         double* const aCandidateComponents[3] = {
             &aCandidatePosition.x,
@@ -2468,16 +2565,24 @@ TransformInspectorMeasurementController::commitPosition(
         // Derived cuts must prove live ordinary source/catalog admission even
         // for no-op requests. They remain excluded from reserved placement.
         core3d::retained_solid::Record retainedPlacement;
+        // HOLE-BOX-DIM: a size change on a standalone saved Hole bakes the hole in this command.
         if(!core3d::retained_solid::Read(aDocument,aDefinition,retainedPlacement)
-            ||(retainedPlacement.value&&(placementPermit||sizes||(scales&&theRequest.value<=0)))) {
+            ||(retainedPlacement.value&&(placementPermit||(scales&&theRequest.value<=0)
+                ||(sizes&&!myDoc->CanBakeSavedCutForFaceEdit(aDefinition))))) {
             anOutcome.result=TransformInspectorPositionCommitResult::Unsupported;return anOutcome;
         }
         if (unchangedPlacement&&!placementPermit&&!retainedPlacement.value) {
+            if (displayedRotation) {
+                *aCandidateComponents[anAxis] = theRequest.value;
+                myImpl->rememberAngles(anEditContext.entityIdentifier,
+                    anEditContext.definitionIdentifier, aCandidatePosition,
+                    aCurrentTransform.quaternion);
+            }
             anOutcome.result =
                 TransformInspectorPositionCommitResult::Unchanged;
             return anOutcome;
         }
-        if(!unchangedPlacement)*aCandidateComponents[anAxis] = theRequest.value;
+        if(!unchangedPlacement || displayedRotation)*aCandidateComponents[anAxis] = theRequest.value;
 
         OcctObjectTransformState exactBaseline;
         if (!myDoc->CaptureObjectTransformStateForLabel(aDefinition, exactBaseline)) {
@@ -2492,6 +2597,33 @@ TransformInspectorMeasurementController::commitPosition(
         if(unchangedPlacement) {
             // Reserved no-op proceeds with the exact original transform to
             // ordinary source/catalog proof, without a receipt-only command.
+        } else if (sizes && retainedPlacement.value) {
+            // HOLE-BOX-DIM (CTO 18 Nov 00:40): the part takes the new size and its saved Hole
+            // stays round, the same diameter in the same place measured from the centre. The
+            // hole-less base kept in the Hole's record is resized about the same centre and the
+            // same hole is cut again; stretching the drilled solid would make the hole an oval.
+            const auto* hole = std::get_if<core3d::retained_solid::Envelope>(&retainedPlacement.value->envelope);
+            if (!hole || retainedPlacement.value->base.IsNull() || !dimensionTransform) {
+                anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+                return anOutcome;
+            }
+            BRepBuilderAPI_Copy baseCopy(retainedPlacement.value->base, Standard_True, Standard_False);
+            if (!baseCopy.IsDone() || baseCopy.Shape().IsNull()) {
+                anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
+                return anOutcome;
+            }
+            BRepBuilderAPI_GTransform resizedBase(baseCopy.Shape(), *dimensionTransform, Standard_True);
+            std::atomic_bool stop{false};
+            core3d::analytic_boolean::Result cut;
+            if (!resizedBase.IsDone() || resizedBase.Shape().IsNull()
+                || core3d::analytic_boolean::Build(resizedBase.Shape(), core3d::cylindrical_cut::Recipe(*hole),
+                       stop, cut) != core3d::analytic_boolean::Status::Built
+                || cut.solid.IsNull()) {
+                // The hole no longer fits the new size: nothing changes.
+                anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+                return anOutcome;
+            }
+            candidateShape = cut.solid;
         } else if (sizes) {
             const int kind = exactBaseline.inspectorPrimitive.IsCurrent(aStoredShape)
                 ? 2 : InspectorAnalyticPrimitiveKind(aStoredShape);
@@ -2572,6 +2704,7 @@ TransformInspectorMeasurementController::commitPosition(
             change.inspectorPrimitiveBounds = dimensionBounds;
         }
         change.transform = aCandidateTransform;
+        change.bakeSavedCut = sizes && !unchangedPlacement && bool(retainedPlacement.value);
         change.operation = (scales || sizes) ? OrdinaryTransformOperation::Scale
             : rotates ? OrdinaryTransformOperation::Rotate : OrdinaryTransformOperation::Translate;
 #ifdef DEBUG
@@ -2595,6 +2728,23 @@ TransformInspectorMeasurementController::commitPosition(
         auto lease = placementPermit?theEdits->beginModelingPlacement(change,std::move(placementPermit),&result)
             :theEdits->beginTransform({change}, &result);
         if (lease) { result = lease.stageAndCommit(); }
+        if (displayedRotation && !myStopped && myImpl && !myDoc.IsNull()
+            && (result == OrdinaryEditResult::Committed
+            || result == OrdinaryEditResult::NoChange)) {
+            // Verify the actual persisted pose after reconciliation. Never
+            // remember an aborted, unknown or externally replaced candidate.
+            try {
+                PersistedTransformCapture committed;
+                if (myDoc->Document() == aDocument
+                    && myDoc->EntityIdentifierForLabel(aDefinition) == anEditContext.entityIdentifier
+                    && myDoc->DefinitionIdentifierForLabel(aDefinition) == anEditContext.definitionIdentifier
+                    && TryCapturePersistedTransform(aDefinition, committed)
+                    && TransformsMatch(committed.transform, aCandidateTransform)) {
+                    myImpl->rememberAngles(anEditContext.entityIdentifier,
+                        anEditContext.definitionIdentifier, aCandidatePosition, committed.quaternion);
+                }
+            } catch (...) {} // Optional readback must not change commit outcome.
+        }
         switch (result) {
             case OrdinaryEditResult::Committed:
                 anOutcome.result = TransformInspectorPositionCommitResult::Committed;

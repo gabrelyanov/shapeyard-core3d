@@ -440,7 +440,7 @@ bool DetachedMemberShape(const TopoDS_Shape& source,
         BRepBuilderAPI_Transform copy(source, placement, Standard_True);
         if (!copy.IsDone() || copy.Shape().IsNull()
             || copy.Shape().IsPartner(source)) return false;
-        output = copy.Shape();
+        output = core3d::pattern_owner::FileStableMemberShape(copy.Shape());
         return true;
     } catch (...) { output.Nullify(); return false; }
 }

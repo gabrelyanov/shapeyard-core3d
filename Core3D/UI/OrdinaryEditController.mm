@@ -4,7 +4,6 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
 #include <XCAFDoc_VisMaterialPBR.hxx>
-#include <BRepBuilderAPI_GTransform.hxx>
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -57,6 +56,15 @@ struct SweepRebuildGuard {
         OcctScalarAppearanceState appearance;
         OcctReferenceAxis axis;
         OcctReferenceAxisReadState axisState;
+        // ANOTHER part whose look this catalog cannot read as plain numbers: a
+        // painted face, a picture, an imported colour, or one more saved record
+        // (oval cylinder, pattern, tube, draft). Its shape, records, placement
+        // and visibility are still compared through `visibility`; its look is
+        // not, and a sweep or loft rebuild never writes another part's look.
+        // Before 17 Nov one such part anywhere in the project closed Edit sweep
+        // radius / path for every Sweep (round 1, K16).
+        bool appearanceUnread=false;
+        int shapeHoldingChildren=0;
     };
     using Catalog=std::map<std::string,Entry>;
     Catalog previous,candidate;
@@ -125,8 +133,16 @@ bool CaptureSweepEditCatalog(const Handle(OcctDocument)& owner,
         || !CaptureCreationRoots(owner,roots) || !owner->CaptureSavedGroups(groups)) return false;
     for (const auto& [key,root]:roots) {
         SweepRebuildGuard::Entry entry;
-        if (!owner->CaptureObjectVisibilityStateForLabel(root.label,entry.visibility)
-            || !owner->CaptureScalarAppearanceForSavedSweepRebuild(root.label,entry.appearance)) return false;
+        if (!owner->CaptureObjectVisibilityStateForLabel(root.label,entry.visibility)) return false;
+        if (!owner->CaptureScalarAppearanceForSavedSweepRebuild(root.label,entry.appearance)) {
+            // Kept in the catalog instead of closing the edit. The part being
+            // edited is still read strictly: storedSweepDefinition /
+            // storedRectangularLoftDefinition before the edit, the paired
+            // document stage inside it, and SealSweepCandidate below.
+            entry.appearance={};entry.appearanceUnread=true;
+            TDF_LabelSequence held;XCAFDoc_ShapeTool::GetSubShapes(root.label,held);
+            entry.shapeHoldingChildren=held.Length();
+        }
         entry.axisState=owner->ReadReferenceAxisForLabel(root.label,entry.axis);
         if (entry.axisState==OcctReferenceAxisReadState::Invalid || !output.emplace(key,std::move(entry)).second) return false;
     }
@@ -134,6 +150,7 @@ bool CaptureSweepEditCatalog(const Handle(OcctDocument)& owner,
 }
 bool SweepEditEntryEqual(const SweepRebuildGuard::Entry& a,const SweepRebuildGuard::Entry& b) {
     if (!a.visibility.IsEqual(b.visibility) || !a.appearance.IsEqual(b.appearance)
+        || a.appearanceUnread!=b.appearanceUnread || a.shapeHoldingChildren!=b.shapeHoldingChildren
         || !sweep_rebuild::SameRawScalars(a.visibility.object.object.scalars,b.visibility.object.object.scalars)
         || !sweep_rebuild::SameRawScalars(a.appearance.visualValues,b.appearance.visualValues)
         || a.axisState!=b.axisState || a.axis.pivotSpace!=b.axis.pivotSpace
@@ -177,6 +194,8 @@ bool SealSweepCandidate(const Handle(OcctDocument)& owner,OrdinaryTransformLedge
         const auto found=guard.candidate.find(oldKey);if(found==guard.candidate.end()) return false;
         if (oldKey!=key) {if(!SweepEditEntryEqual(oldEntry,found->second))return false;continue;}
         sawTarget=true;auto normalized=found->second;
+        // The edited part itself is never taken on trust.
+        if (oldEntry.appearanceUnread || normalized.appearanceUnread) return false;
         const auto& before=oldEntry.visibility.object.object;
         auto& after=normalized.visibility.object.object;
         if (!after.shape.IsEqual(record.requested.shape)) return false;
@@ -811,10 +830,18 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ledger.cutPrevious=request.cutSource;
                 sweepNoChange=request.cutProgramSourceRebuild->isNoChange();
             }
+            // HOLE-BOX-DIM: one Dimensions change on a standalone saved Hole, placement unchanged,
+            // geometry changed, no other record, bakeable by the same rule Push-pull uses.
+            if(request.bakeSavedCut&&(permit||changes.size()!=1||!geometryChanges
+                ||request.operation!=OrdinaryTransformOperation::Scale||request.rotationAroundPivot
+                ||!record.previous.retained.value||!MatricesEqual(record.previous.transform,request.transform)
+                ||request.cut||request.cutSource||request.cutProgramEdit||request.inspectorPrimitiveKind!=0
+                ||!_document->CanBakeSavedCutForFaceEdit(request.label)))
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if(record.previous.retained.value&&!IsCylindricalCutOperation(request.operation)
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
-                && !treatmentRoute) {
+                && !treatmentRoute && !request.bakeSavedCut) {
                 // An occurrence edit never changes the original-local result,
                 // retained base or cylinder. No reserved-placement fallback.
                 OcctCylindricalCutSource cut;double originalRadius=0,candidateRadius=0;
@@ -1114,6 +1141,9 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
 }
 
 
+#if DEBUG
+extern "C" int Core3DDebugMeshCopyRejectStage;
+#endif
 OrdinaryEditLease OrdinaryEditController::beginMeshCopy(
     const Handle(AIS_Shape)& source, const TCollection_ExtendedString& name,
     OrdinaryEditResult* failure) noexcept {
@@ -1122,27 +1152,46 @@ OrdinaryEditLease OrdinaryEditController::beginMeshCopy(
         if (failure) *failure=result;
         return OrdinaryEditLease();
     };
+#if DEBUG
+    const auto stage=[](int n) { Core3DDebugMeshCopyRejectStage=n; };
+#else
+    const auto stage=[](int) {};
+#endif
     if (![NSThread isMainThread]) return reject(OrdinaryEditResult::Invalid);
-    if (blocksNormalWork()) return reject(OrdinaryEditResult::Busy);
+    if (blocksNormalWork()) { stage(10); return reject(OrdinaryEditResult::Busy); }
     try {
+        stage(11);
         if (_document.IsNull() || _document->Document().IsNull()
             || _document->Document()->HasOpenCommand() || source.IsNull()
-            || !OcctObjectNameIsValid(name) || !_document->IsPresentationEditable(source)
-            || !_document->ValidateGeometryRepresentations()) return reject(OrdinaryEditResult::Invalid);
+            || !OcctObjectNameIsValid(name)) return reject(OrdinaryEditResult::Invalid);
+        stage(12);
+        if (!_document->IsPresentationEditable(source)) return reject(OrdinaryEditResult::Invalid);
+        stage(13);
+        if (!_document->ValidateGeometryRepresentations()) return reject(OrdinaryEditResult::Invalid);
         OrdinaryMeshCopySource copy;copy.presentation=source;copy.destinationName=name;
         const auto label=_document->ShapeLabel(source);
+        stage(14);
         if (!_document->CaptureObjectVisibilityStateForLabel(label,copy.previous)
-            || !copy.previous.IsEffectivelyVisible()
-            || copy.previous.object.object.resolvedRepresentation!=OcctGeometryRepresentation::BRep
-            || !copy.previous.object.object.shape.IsEqual(source->Shape())
-            || !MatricesEqual(copy.previous.object.object.transform,source->LocalTransformation())
-            || !_document->CaptureScalarAppearanceForMeshCopy(label,copy.appearance)) return reject(OrdinaryEditResult::Invalid);
+            || !copy.previous.IsEffectivelyVisible()) return reject(OrdinaryEditResult::Invalid);
+        stage(15);
+        if (copy.previous.object.object.resolvedRepresentation!=OcctGeometryRepresentation::BRep)
+            return reject(OrdinaryEditResult::Invalid);
+        stage(16);
+        if (!copy.previous.object.object.shape.IsEqual(source->Shape())) return reject(OrdinaryEditResult::Invalid);
+        stage(17);
+        if (!MatricesEqual(copy.previous.object.object.transform,source->LocalTransformation()))
+            return reject(OrdinaryEditResult::Invalid);
+        stage(18);
+        if (!_document->CaptureScalarAppearanceForMeshCopy(label,copy.appearance)) return reject(OrdinaryEditResult::Invalid);
         copy.axisState=_document->ReadReferenceAxisForLabel(label,copy.axis);
+        stage(19);
         if (copy.axisState==OcctReferenceAxisReadState::Invalid) return reject(OrdinaryEditResult::Invalid);
         std::atomic_bool cancelled(false);
         meshcopy::CurrentTessellationCopy geometry;
-        if (meshcopy::PrepareCurrentTessellationCopy(source->Shape(),geometry,cancelled)
-            !=meshcopy::PreparationResult::Ready) return reject(OrdinaryEditResult::Invalid);
+        const auto prepared=meshcopy::PrepareCurrentTessellationCopy(source->Shape(),geometry,cancelled);
+        stage(20+static_cast<int>(prepared));
+        if (prepared!=meshcopy::PreparationResult::Ready) return reject(OrdinaryEditResult::Invalid);
+        stage(30);
         // Thread the N1 provenance with the ledger; it is persisted on the
         // copy label in the same creation command (see stageCreationAndCommit).
         copy.faces=std::move(geometry.faces);
@@ -2817,14 +2866,15 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 && !record.previous.shape.IsEqual(record.requested.shape)
                 && _document->CaptureFaceColours(record.previous.label, 1.0, paintedLabels, paintedFaces)
                 && keepFaceLabelsOnly(paintedLabels);
-            if (carriesFaceColours && record.requested.faceColourMap) {
-                for (auto& painted : paintedFaces) {
-                    BRepBuilderAPI_GTransform moved(painted.first, *record.requested.faceColourMap, Standard_True);
-                    if (moved.IsDone() && !moved.Shape().IsNull() && moved.Shape().ShapeType() == TopAbs_FACE)
-                        painted.first = TopoDS::Face(moved.Shape());
-                }
-            }
-            if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
+            // Each painted face's colour follows by points mapped through the size change; a lone
+            // painted face is never rebuilt (its GTransform crashed in OCCT NurbsConvert on an
+            // already converted face: lamp shade, builds 5 and 6, 17 Nov).
+            if (carriesFaceColours && record.requested.faceColourMap)
+                paintedFaces = _document->ResizedFaceColours(record.requested.shape,
+                    *record.requested.faceColourMap, paintedFaces);
+            if ((record.requested.bakeSavedCut
+                    && !_document->PrepareBooleanResultForFaceEdit(record.previous.label))
+                || (!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
                     && (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
                         // ReplaceShape keeps the representation; Make solid alone changes it.
                         ? !_document->ReplaceMeshWithSolid(record.previous.label, candidate)
@@ -2938,6 +2988,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                             || !record.candidate.retained.current.IsEqual(record.candidate.shape)
                             || !record.candidate.edgeTreatmentR2
                             || !record.candidate.edgeTreatmentR2->current.IsEqual(record.candidate.shape))
+                        : record.requested.bakeSavedCut
+                        ? (bool(record.candidate.retained.value) || !record.candidate.retained.label.IsNull())
                         : !record.candidate.retained.IsEqual(record.previous.retained)))
                 || (treatmentStaged
                     ?(!record.candidate.edgeTreatment||!ledger.edgeTreatmentReadback

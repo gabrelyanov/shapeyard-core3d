@@ -84,6 +84,7 @@ struct TransformInspectorMeasurement {
         TransformInspectorGeometryRepresentation::Invalid;
     TransformInspectorVector3 position;
     TransformInspectorVector3 extrinsicXYZDegrees;
+    TransformInspectorVector3 displayedXYZDegrees;
     TransformInspectorQuaternion quaternion;
     double uniformScale = 1.0;
     double metersPerUnit = 0.001;
@@ -117,7 +118,7 @@ enum class TransformInspectorPositionCommitResult : std::uint8_t {
 
 //! Public DTO values copied back into the native compare-and-swap gate. The
 //! actual document/TShape lease remains private to the controller.
-enum class TransformInspectorEditKind : std::uint8_t { Position, Rotation, UniformScale, Dimension };
+enum class TransformInspectorEditKind : std::uint8_t { Position, Rotation, UniformScale, Dimension, DisplayedRotation };
 
 struct TransformInspectorPositionCommitRequest {
     TransformInspectorEditKind kind = TransformInspectorEditKind::Position;

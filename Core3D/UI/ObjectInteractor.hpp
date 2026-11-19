@@ -39,6 +39,7 @@ namespace core3d {
     struct OrdinaryNameLedger;
     struct OrdinaryVisibilityLedger;
     struct OrdinaryCreationLedger;
+    struct PendingObjectDeletion;
 
     enum struct PrimitiveManipulatorType {
         PrimitiveGizmoTypeNone = 0,
@@ -101,6 +102,8 @@ namespace core3d {
     class ObjectInteractor : public Interactor {
         friend class Core3DViewer;
         std::weak_ptr<OrdinaryEditController> _ordinaryEditController;
+        std::shared_ptr<PendingObjectDeletion> _pendingDeletion;
+        bool _reconcilingDeletion = false;
         bool blocksForOrdinaryEdit() const noexcept;
         bool hasUnresolvedEdit() const noexcept;
         bool captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept;
@@ -141,6 +144,14 @@ namespace core3d {
         void selectLastObject();
 		void selectAll();
         void deleteSelected();
+        bool hasUnresolvedDeletion() const noexcept;
+        bool reconcileDeletion() noexcept;
+#if DEBUG
+        void debugSetDeleteFailureMode(int mode) noexcept { _debugDeleteFailureMode = mode; _debugDeleteStagedRootCount = 0; }
+        int _debugDeleteFailureMode = 0;
+        int _debugDeleteStagedRootCount = 0;
+        int _debugDeleteRefusal = 0; // K27 readout: which Delete guard refused (0 = committed)
+#endif
         void duplicateSelected();
 		//! A Duplicate command or committed-result presentation repair still owns
 		//! exactly-once recovery state that must survive interactor recreation.
@@ -216,6 +227,8 @@ namespace core3d {
         bool manipulatorRotationAllowed() const { return _manipulatorRotationAllowed; }
 		Handle(TopLoc_Datum3D) manipulatorTransform();
 		gp_XYZ manipulatorPosition();
+		//! The Move handles' Z arrow direction (world); +Z when no handles are attached.
+		gp_XYZ manipulatorZDirection();
 		//! The handles' configured side in view pixels (design system 7.2).
 		float manipulatorSide() const { return _manipulatorSide; }
 		//! DEBUG/UI-test evidence: where the real hit test finds each Scale handle
@@ -630,6 +643,7 @@ namespace core3d {
 			TopoDS_Shape storedShape;
 			gp_Trsf transform;
 			gp_Trsf bakedTransform;
+            gp_Trsf resultTransform;
 			OcctReferenceAxisReadState referenceAxisState =
 				OcctReferenceAxisReadState::Invalid;
 			OcctReferenceAxis referenceAxis;

@@ -65,6 +65,7 @@ namespace core3d::composite_recipe { struct Payload; struct Record; }
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_GTrsf.hxx>
 #include <gp_Vec.hxx>
 #include <cstdint>
 #include "ProfilePersistence.hxx"
@@ -96,6 +97,10 @@ class OcctDocument;
 class OcctModelingPlanHistory;
 
 class Message_ProgressRange;
+//! DEBUG readout: which clause of RemoveShapePreservingPatternMembers last refused (0 = none).
+int OcctDebugPatternDetachStage() noexcept;
+//! DEBUG readout: the last NamedShape records read from a file (byte-drift diagnostic).
+std::string OcctDebugNamedShapeReadSummary() noexcept;
 namespace core3d { class OrdinaryEditController; class Core3DViewer; class BevelOperationController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
 namespace core3d::native_opening { class CommandLease; }
 namespace core3d::native_opening { class Context; }
@@ -1941,6 +1946,13 @@ public:
         const TopoDS_Shape& result,
         const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
         Standard_Boolean eitherWay = Standard_False) const noexcept;
+    //! A Dimensions change (`sizeChange` maps the old shape onto `result`): each face of `result`
+    //! whose inside point, taken back through the inverse of `sizeChange`, lies on one of the
+    //! `painted` faces of the old shape, with that face's look. Only points are mapped: a lone
+    //! painted face is never rebuilt (its GTransform crashed in OCCT NurbsConvert, 17 Nov).
+    Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> ResizedFaceColours(
+        const TopoDS_Shape& result, const gp_GTrsf& sizeChange,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& painted) const noexcept;
     //! Push-pull: a face of `result` that is new (lies on no face of `original`), flat, and in the
     //! plane of a coloured face it touches continues that face (the upper strip of a side made
     //! longer), so it takes that face's look. Faces that were there before never change look here.
@@ -1974,6 +1986,47 @@ public:
     Standard_EXPORT Standard_Boolean ApplyThroughHole(
         const TDF_Label& label, const Handle(AIS_Shape)& presentation,
         const gp_Pnt& start, const gp_Dir& direction, double radius, double depth,
+        std::string& refusal) noexcept;
+    //! Round holes of a part, read from its stored solid: a Hole needs no record to be
+    //! found (a Hole on a joined, cut or painted part is plain geometry). One entry per
+    //! hole, part coordinates: [px, py, pz, dx, dy, dz, radius, depth]; the point is on the
+    //! axis where the hole starts, the direction goes into the part, depth 0 is "through".
+    //! Read-only; empty for a part the Hole command itself would refuse.
+    Standard_EXPORT std::vector<std::vector<double>> RoundHolesOfPart(
+        const TDF_Label& label) const noexcept;
+    //! Holes: the part with one of its round holes repeated `count` times in all (the
+    //! hole itself included), `spacing` apart centre to centre, without changing the
+    //! document. `nearPoint` picks the hole whose axis is nearest (null: the first).
+    //! The row runs square to the hole, along the part's longer side, towards the
+    //! side with more room; a negative spacing turns it round. Refusals: "no-hole",
+    //! "holes-overlap", "row-leaves-part", "bad-values", "unsupported-source",
+    //! "invalid-result".
+    Standard_EXPORT Standard_Boolean BuildHoleRow(
+        const TDF_Label& label, int count, double spacing, const gp_Pnt* nearPoint,
+        TopoDS_Shape& result, std::string& refusal) const noexcept;
+    //! The same as ONE undoable command (an earlier saved hole or Join record is baked
+    //! in that command, exactly as ApplyThroughHole does, so Undo gives it back).
+    Standard_EXPORT Standard_Boolean ApplyHoleRow(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        int count, double spacing, const gp_Pnt* nearPoint, std::string& refusal) noexcept;
+    //! Hole size for a hole that has no saved-cut record: the hole is closed and
+    //! drilled again at `radius` on the same axis, from the same side, to the same
+    //! floor. Refusals: "no-hole", "unchanged", "cannot-close", "hole-leaves-part",
+    //! "holes-overlap", "bad-values", "unsupported-source", "invalid-result".
+    Standard_EXPORT Standard_Boolean BuildHoleResize(
+        const TDF_Label& label, double radius, const gp_Pnt* nearPoint,
+        TopoDS_Shape& result, std::string& refusal) const noexcept;
+    //! The same as ONE undoable command.
+    Standard_EXPORT Standard_Boolean ApplyHoleResize(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        double radius, const gp_Pnt* nearPoint, std::string& refusal) noexcept;
+    //! Shared by the three commands above; not for other callers. The part's one
+    //! solid when the Hole command would take the part (`verified`: a checked copy).
+    Standard_Boolean HoleEditSource(const TDF_Label& label, TopoDS_Shape& source,
+        std::string& refusal, Standard_Boolean verified) const noexcept;
+    //! Shared: writes a drilled solid as one command, as ApplyThroughHole does.
+    Standard_Boolean CommitDrilledShape(const TDF_Label& label,
+        const Handle(AIS_Shape)& presentation, const TopoDS_Shape& result,
         std::string& refusal) noexcept;
     //! The prepared result (in the target's own frame) and the two entity
     //! identifiers, for an on-model preview before Apply. Read-only.
@@ -2088,13 +2141,19 @@ public:
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
 
-    // Native-only measured naming history for profile creation and Shell.
+    // Native-only measured naming history for profile/C1 creation and Shell.
     // The issuing controller owns the pending token through reconciliation.
 #if DEBUG
     std::array<std::size_t, 3> DebugOrdinaryNamingHistoryStorage() const noexcept;
 #endif
+    enum class OrdinaryNamingFamily { Profile, UnretainedShell, SavedCutShell, BoundedCurveCreation, Removal };
+    // Only the ordinary Delete route issues these tokens. Its command stamp
+    // retains the token through exact prior/candidate settlement.
+    std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryRemovalNamingHistory(
+        const std::vector<TDF_Label>& roots) noexcept;
     std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryNamingHistory(
-        std::size_t creationRootCount, const TDF_Label& existingOwner = {}) noexcept;
+        std::size_t creationRootCount, const TDF_Label& existingOwner = {},
+        OrdinaryNamingFamily family = OrdinaryNamingFamily::Profile) noexcept;
     Standard_Boolean TrackOrdinaryNamingCreationRoot(
         const std::shared_ptr<core3d::ordinary_naming::Record>& record,
         std::size_t index, const TDF_Label& label) noexcept;
@@ -2470,6 +2529,11 @@ public:
     //! False for a read-only XCAF component occurrence.
     Standard_Boolean IsPresentationEditable(
         Handle(AIS_InteractiveObject) object) const;
+    //! Is `face` (definition-local) a face of `root`'s current shape? After an Undo a part's cached
+    //! face map can still describe the undone shape (phone stand fault 2, Fable review F2), so the
+    //! shape itself decides. Inside an open command a stale cache is rebuilt, so FindSubShape and
+    //! AddSubShape can label the face. Never opens or commits a command.
+    Standard_Boolean IsFaceOfCurrentShape(const TDF_Label& root, const TopoDS_Shape& face) const noexcept;
     //! True only for a free, simple, whole XCAF definition label. Material
     //! authoring uses this stricter gate in addition to AIS editability.
     Standard_Boolean IsEditableFreeSimpleDefinitionLabel(
@@ -2553,6 +2617,12 @@ public:
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     
+    //! Delete's explicit detach/remove route, inside its existing OCAF command.
+    //! Validates the complete D2 member set, removes only its association,
+    //! and leaves independent member shapes/identities/appearance untouched.
+    //! The ordinary RemoveShape dependency guard remains authoritative.
+    Standard_Boolean RemoveShapePreservingPatternMembers(const TDF_Label& label) noexcept;
+
     void RemoveShape(TopoDS_Shape object);
     void RemoveShape(Handle(AIS_Shape) object);
     void RemoveShape(Handle(AIS_InteractiveObject) object);
@@ -2599,6 +2669,12 @@ public:
     void NotifyChanges();
 
 private:
+  // Delete validates only its complete D2 member set. All public capture
+  // callers retain the existing whole-document free-root admission.
+  Standard_Boolean CapturePatternLabelsForScope(
+      const std::string& selectedEntityIdentifier,
+      std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot,
+      bool membersOnly) const noexcept;
   // Read-only capture validation for stages that already hold the ordinary
   // command. Public capture still performs shared tool-input admission.
   Standard_Boolean ValidateCylindricalCutSource(
@@ -2818,5 +2894,15 @@ private:
   // ReplaceShape/RemoveShape calls remain fail-closed for retained dependents.
   std::unordered_set<std::string> myDependentReplayAuthorization;
 };
+
+#if DEBUG
+#include <map>
+#include <string>
+//! DEBUG: one SHA-256 per free part (entity identifier -> hex) over the part's exact shape (BRep
+//! text of every shape in its label tree) and every attribute in that tree as the project file's
+//! own binary drivers write it (colours, pictures, records). Two equal digests mean the part
+//! would be saved byte for byte the same. Used by the Edit sweep check (K16, CTO 17 Nov 18:09).
+Standard_EXPORT std::map<std::string, std::string> OcctDebugPartDigests(const OcctDocument& document) noexcept;
+#endif
 
 #endif // OcctDocument_h

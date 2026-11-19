@@ -9,6 +9,8 @@
 #include "NativeOpeningContext.hxx"
 #include "CompositeRecipeAttribute.hxx"
 #include "OcctDocument.h"
+#include "RetainedPartBoolean.hxx"
+#include <BinTools.hxx>
 #include <Standard_GUID.hxx>
 
 #include <TDF_LabelMap.hxx>
@@ -25,11 +27,42 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 namespace core3d::pattern_owner {
 using pattern::UUID;
+
+// A member copy is built by BRepBuilderAPI_Transform with a compound gp_Trsf, so
+// every analytic frame goes through the matrix and its zero components come out
+// as +0. The file reader rebuilds frames with gp_Ax3(P, N, Vx) and gives -0 for
+// some of them (a sphere copy: Vx.z and Vy.x), so a new copy and the same copy
+// after a cold reopen differed in two sign bytes. Store the copy as the file
+// will hold it: round trip through the binary format until a pass changes
+// nothing, as FileStableShape does for Join inputs. On any doubt the copy is
+// returned exactly as built, so this never refuses anything.
+inline TopoDS_Shape FileStableMemberShape(const TopoDS_Shape& shape) noexcept {
+    try {
+        if (shape.IsNull()) return shape;
+        TopoDS_Shape current = shape;
+        std::string currentBytes;
+        if (!retained_part_boolean::ExactShapeBytes(current, currentBytes)) return shape;
+        for (int pass = 0; pass < 3; ++pass) {
+            std::stringstream binary;
+            BinTools::Write(current, binary);
+            TopoDS_Shape back;
+            BinTools::Read(back, binary);
+            std::string backBytes;
+            if (back.IsNull() || back.ShapeType() != shape.ShapeType()
+                || back.Orientation() != shape.Orientation()
+                || !retained_part_boolean::ExactShapeBytes(back, backBytes)) return shape;
+            if (pass > 0 && backBytes == currentBytes) return current;
+            current = back; currentBytes = std::move(backBytes);
+        }
+    } catch (...) {}
+    return shape;
+}
 
 enum class Refusal : std::uint8_t {
     None = 0, ClosedDocument, OpenCommand, CorruptTable, AmbiguousSelection,

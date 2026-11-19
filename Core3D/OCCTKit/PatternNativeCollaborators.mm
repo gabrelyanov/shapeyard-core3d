@@ -80,7 +80,7 @@ bool DetachedShape(const Snapshot& opening, const pattern::Definition& value,
                                      Standard_True);
         if (!copy.IsDone() || copy.Shape().IsNull()
             || copy.Shape().IsPartner(opening.source.shape)) return false;
-        shape = copy.Shape();
+        shape = FileStableMemberShape(copy.Shape());
         return true;
     } catch (...) { shape.Nullify(); return false; }
 }

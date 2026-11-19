@@ -603,6 +603,16 @@ namespace core3d {
     bool applyThroughHole(const std::string& entity, const gp_Pnt& worldPoint,
         const gp_Dir& worldDirection, double radius, double depth,
         std::string& refusal) noexcept;
+    //! Round holes of a part read from its solid, world coordinates and document units:
+    //! [px, py, pz, dx, dy, dz, radius, depth] each (depth 0: through).
+    std::vector<std::vector<double>> roundHoles(const std::string& entity) noexcept;
+    //! Holes: one round hole of the part repeated in a row, ONE Undo step. `worldNear`
+    //! picks the hole (null: the first); spacing in document units as seen.
+    bool applyHoleRow(const std::string& entity, int count, double spacing,
+        const gp_Pnt* worldNear, std::string& refusal) noexcept;
+    //! Hole size for a hole with no saved-cut record, ONE Undo step.
+    bool applyHoleResize(const std::string& entity, double radius,
+        const gp_Pnt* worldNear, std::string& refusal) noexcept;
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentEditR2(
         const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
         const retained_edge_treatment::r2::Edit&, const ObjectFrameIdentity&,
@@ -944,6 +954,8 @@ namespace core3d {
         void cancelTransformInspectorMeasurement() noexcept;
         TransformInspectorMeasurementPerformanceState
             transformInspectorMeasurementPerformanceState() const noexcept;
+        //! Adds every part of an app-created import document at `path` as one creation (fault 3).
+        OrdinaryEditResult insertPartsFromImportedDocument(const std::string& path, int& inserted) noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
         //! Change projection while retaining target, direction and apparent
@@ -999,7 +1011,9 @@ namespace core3d {
         //! pairs for scene capture, assembly prepare, native commit, creation
         //! publication and its viewer update. These inclusive totals overlap.
         //! Scene captures nested in prepare/commit overlap those totals.
-        std::array<double, 10> debugHistoryCostObservation() const noexcept;
+        //! Further pairs split scene admission/build and time stored profile,
+        //! stored enclosure and native-opening fence reads (also inclusive).
+        std::array<double, 20> debugHistoryCostObservation() const noexcept;
 #endif
         //! True only when the active typed operation owns every deviation from
         //! the retained selection mode. Ordinary GL selection authority stays
@@ -1329,7 +1343,7 @@ namespace core3d {
         std::function<void(PrimitiveManipulatorType)>
             _interactorRecreatedCallback;
 #if DEBUG
-        std::array<double, 10> _debugHistoryCosts{};
+        std::array<double, 20> _debugHistoryCosts{};
 #endif
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
         std::shared_ptr<native_opening::detail::State> _nativeOpeningState;

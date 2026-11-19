@@ -5,6 +5,7 @@
 #include <StdSelect_ViewerSelector3d.hxx>
 #endif
 #include "../OCCTKit/PlanarSweepTangentArc.hxx"
+#include "../OCCTKit/CommittedFaceCheckedBits.h"
 #include "../OCCTKit/PartBooleanOwner.hxx"
 #include "../OCCTKit/PartBooleanFamilyAdmission.hxx"
 #include "../OCCTKit/PartBooleanPersistence.hxx"
@@ -157,6 +158,9 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #include "../OCCTKit/SpatialSweepEditor.hxx"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
+// Release code (face colour route) uses these two; the block below is DEBUG only.
+#include <TDF_ChildIterator.hxx>
+#include <TDF_TagSource.hxx>
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/ReceiptCatalogBinaryDriver.hxx"
@@ -246,6 +250,9 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <SelectMgr_SelectableObject.hxx>
+#include <XCAFDoc_ShapeMapTool.hxx>
+#include <SelectMgr_Selection.hxx>
+#include <SelectMgr_SensitiveEntity.hxx>
 #include <Precision.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
@@ -5585,19 +5592,36 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 
 // A face edit owns a subshape label, never the selected interactive's root.
 // Build the complete batch first; label creation and materials share one undo.
+// DEBUG probe (editor, 17 Nov; fault 2, phone stand): which guard refused a face colour.
+static NSString *gCore3DFacePBRRefusal = @"";
+static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal = reason; }
+
+- (NSString *)debugLastFacePBRRefusal { return gCore3DFacePBRRefusal ?: @""; }
+
+- (NSInteger)insertPartsFromImportedDocumentAtURL:(NSURL *)url {
+    if (!NSThread.isMainThread || !url.isFileURL || !GLController.viewer) return 0;
+    int inserted = 0;
+    const auto result = GLController.viewer->insertPartsFromImportedDocument(
+        std::string(url.path.UTF8String ?: ""), inserted);
+    if (result != core3d::OrdinaryEditResult::Committed || inserted <= 0) return 0;
+    [self sendNotifyUIState:UIStateChangingHistory];
+    return inserted;
+}
+
 -(void)core3d_updateSelectedFacesWithPBR:(Core3DPBRMaterial*)pbr
                                 preset:(Core3DMaterial*)preset
                                  color:(Core3DColor*)color {
-    if (self.currentSelectionType != PrimitiveSelectionTypeFace
-        || ![self core3d_canBeginCommittedEdit]
-        || (self.selectedModelCapabilities & Core3DModelCapabilityMaterial) == 0) return;
+    if (self.currentSelectionType != PrimitiveSelectionTypeFace) { Core3DFacePBRRefuse(@"not-face-mode"); return; }
+    if (![self core3d_canBeginCommittedEdit]) { Core3DFacePBRRefuse(@"cannot-begin-edit"); return; }
+    if ((self.selectedModelCapabilities & Core3DModelCapabilityMaterial) == 0) { Core3DFacePBRRefuse(@"no-material-capability"); return; }
+    Core3DFacePBRRefuse(@"none");
     const auto viewer = GLController.viewer;
     const auto context = viewer->AisContext();
     const auto doc = viewer->getDocument();
     const auto transaction = doc->ChangeDocument();
-    if (transaction.IsNull() || transaction->HasOpenCommand()) return;
+    if (transaction.IsNull() || transaction->HasOpenCommand()) { Core3DFacePBRRefuse(@"open-command"); return; }
     const auto shapes = XCAFDoc_DocumentTool::ShapeTool(transaction->Main());
-    if (shapes.IsNull()) return;
+    if (shapes.IsNull()) { Core3DFacePBRRefuse(@"no-shape-tool"); return; }
     struct FaceStyle {
         Handle(AIS_Shape) presentation;
         TDF_Label root;
@@ -5611,10 +5635,16 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
             const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
             const auto root = doc->ShapeLabel(presentation);
             if (presentation.IsNull() || owner.IsNull() || !owner->HasShape()
-                || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()
-                || !doc->IsPresentationEditable(presentation)
-                || !doc->IsEditableFreeSimpleDefinitionLabel(root)
-                || !shapes->IsSubShape(root, owner->Shape()) || pending.size() >= 64) return;
+                || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()) { Core3DFacePBRRefuse(@"no-face-owner"); return; }
+            if (!doc->IsPresentationEditable(presentation)) { Core3DFacePBRRefuse(@"presentation-not-editable"); return; }
+            if (!doc->IsEditableFreeSimpleDefinitionLabel(root)) { Core3DFacePBRRefuse(@"root-not-free-simple"); return; }
+            // The part's cached face map can still describe an undone edit (fault 2, phone stand:
+            // a Hole, Undo, then a face colour did nothing); the shape itself decides, and the map
+            // is rebuilt inside this colour's own command below (OcctDocument::IsFaceOfCurrentShape).
+            if (!doc->IsFaceOfCurrentShape(root, owner->Shape())) {
+                Core3DFacePBRRefuse(@"face-not-subshape-of-root"); return;
+            }
+            if (pending.size() >= 64) { Core3DFacePBRRefuse(@"too-many"); return; }
             // Owner shape is definition-local; SelectedShape applies the instance
             // transform and cannot safely identify a face on a scaled object.
             const auto face = owner->Shape();
@@ -5622,12 +5652,12 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
             shapes->FindSubShape(root, face, faceLabel);
             const auto materialLabel = faceLabel.IsNull()
                 || XCAFDoc_VisMaterialTool::GetShapeMaterial(faceLabel).IsNull() ? root : faceLabel;
-            if (!doc->SupportsScalarPBRMaterialEditingForLabel(materialLabel)) return;
+            if (!doc->SupportsScalarPBRMaterialEditingForLabel(materialLabel)) { Core3DFacePBRRefuse(@"label-no-scalar-pbr"); return; }
             XCAFDoc_VisMaterialPBR material;
             if (!doc->TryEffectivePBRMaterialForLabel(materialLabel, material))
                 material = Core3DLegacyPBRMaterial(doc->MaterialNameForLabel(materialLabel), doc->ColorNameForLabel(materialLabel));
             if (pbr) {
-                if (!Core3DApplyNativePBRScalars(pbr, material)) return;
+                if (!Core3DApplyNativePBRScalars(pbr, material)) { Core3DFacePBRRefuse(@"scalars-refused"); return; }
             } else {
                 if (preset || !color) {
                     const auto materialName = preset ? (Graphic3d_NameOfMaterial)preset.identity
@@ -5644,11 +5674,23 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
             })) return;
             pending.push_back({presentation, root, face, material});
         }
-        if (pending.empty()) return;
+        if (pending.empty()) { Core3DFacePBRRefuse(@"nothing-selected"); return; }
         transaction->NewCommand();
         if (!transaction->HasOpenCommand()) return;
         std::vector<OcctPBRMaterialUpdate> updates;
         for (const auto& style : pending) {
+            // A part keeps Position, Rotation and Scale as numbers on its children 1...8
+            // (FindChild, which never advances the tag source), and feature records up to
+            // 12. Reserve them, as the Material panel route and CarryFaceColours do: the
+            // first AddSubShape on a fresh part otherwise hands the face colour child 1,
+            // the Position X number (toy car, build 5: "a Hole moves the part after save").
+            Standard_Integer highWater = 12;
+            for (TDF_ChildIterator child(style.root, Standard_False); child.More(); child.Next())
+                highWater = std::max(highWater, child.Value().Tag());
+            const Handle(TDF_TagSource) tags = TDF_TagSource::Set(style.root);
+            if (tags.IsNull()) { Core3DAbortCommandNoThrow(transaction); return; }
+            tags->Set(std::max(highWater, tags->Get()));
+            if (!doc->IsFaceOfCurrentShape(style.root, style.face)) { Core3DAbortCommandNoThrow(transaction); return; }
             const auto label = shapes->AddSubShape(style.root, style.face);
             if (label.IsNull()) { Core3DAbortCommandNoThrow(transaction); return; }
             updates.push_back({label, style.material, {}, {}});
@@ -5667,7 +5709,52 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     }
     // Founder test, build 8545: a colour put on a pocket floor showed only after the project
     // was reopened. Draw the parts again from the document, as reopening does.
+    // The redraw replaces every part's drawing and so drops the picked faces: More > Color
+    // right after a face material then had nothing to colour (CTO 17 Nov 12:47). Pick the
+    // same faces again on the new drawings, found by the part's label and the face's
+    // place in the part's face list.
+    std::vector<std::pair<TDF_Label, Standard_Integer>> repicks;
+    for (const auto& style : pending) {
+        TopTools_IndexedMapOfShape oldFaces;
+        if (!style.presentation->Shape().IsNull())
+            TopExp::MapShapes(style.presentation->Shape(), TopAbs_FACE, oldFaces);
+        const Standard_Integer index = oldFaces.FindIndex(style.face);
+        if (index > 0) repicks.emplace_back(style.root, index);
+    }
     (void)viewer->redrawDocument();
+    if (!repicks.empty()) {
+        try {
+            OCC_CATCH_SIGNALS
+            AIS_ListOfInteractive shown;
+            context->DisplayedObjects(AIS_KOI_Shape, -1, shown);
+            for (AIS_ListIteratorOfListOfInteractive it(shown); it.More(); it.Next()) {
+                const auto drawn = Handle(AIS_Shape)::DownCast(it.Value());
+                if (drawn.IsNull() || drawn->Shape().IsNull()) continue;
+                const auto label = doc->ShapeLabel(drawn);
+                if (label.IsNull()) continue;
+                TopTools_IndexedMapOfShape faces;
+                bool mapped = false;
+                for (const auto& pick : repicks) {
+                    if (!pick.first.IsEqual(label)) continue;
+                    if (!mapped) { TopExp::MapShapes(drawn->Shape(), TopAbs_FACE, faces); mapped = true; }
+                    if (pick.second > faces.Extent()) continue;
+                    const TopoDS_Shape& face = faces.FindKey(pick.second);
+                    const Handle(SelectMgr_Selection)& selection =
+                        drawn->Selection(AIS_Shape::SelectionMode(TopAbs_FACE));
+                    if (selection.IsNull()) continue;
+                    for (const auto& sensitive : selection->Entities()) {
+                        if (sensitive.IsNull() || sensitive->BaseSensitive().IsNull()) continue;
+                        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(
+                            sensitive->BaseSensitive()->OwnerId());
+                        if (owner.IsNull() || !owner->HasShape() || !owner->Shape().IsSame(face)) continue;
+                        if (!context->IsSelected(owner)) context->AddOrRemoveSelected(owner, Standard_False);
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
     [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
     [self.materialController didChangeSelectionWithPBRMaterials:values];
     context->UpdateCurrentViewer();
@@ -6354,6 +6441,8 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     if (self.currentSelectionType == PrimitiveSelectionTypeFace) {
         if (material && material.supportsScalarEditing)
             [self core3d_updateSelectedFacesWithPBR:material preset:nil color:nil];
+        else
+            Core3DFacePBRRefuse(material ? @"material-not-scalar" : @"no-material");
         return;
     }
 
@@ -8131,6 +8220,17 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         if(group==groups.groups.end()||!group->originPresent||!OcctDocument::IsAdmittedSavedGroupOrigin(group->origin))return nil;
         return @[@(group->origin.X()),@(group->origin.Y()),@(group->origin.Z())];
     } catch (...) { return nil; }
+}
+
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr || !interactor->isManipulatorAttached()) { return nil; }
+    const gp_XYZ direction = interactor->manipulatorZDirection();
+    if (!std::isfinite(direction.X()) || !std::isfinite(direction.Y())
+        || !std::isfinite(direction.Z()) || direction.Modulus() < 1e-9) { return nil; }
+    return @[@(direction.X()), @(direction.Y()), @(direction.Z())];
 }
 
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition {
@@ -12071,6 +12171,19 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         return nil;
     } catch (...) {return nil;}
 }
+#if DEBUG
+- (NSDictionary<NSString *, NSString *> *)debugPartDigests {
+    NSMutableDictionary<NSString *, NSString *> *result = [NSMutableDictionary dictionary];
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return result;
+    const auto doc = GLController.viewer->getDocument();
+    if (doc.IsNull()) return result;
+    for (const auto& [key, value] : OcctDebugPartDigests(*doc)) {
+        NSString *k = [NSString stringWithUTF8String:key.c_str()], *v = [NSString stringWithUTF8String:value.c_str()];
+        if (k && v) result[k] = v;
+    }
+    return result;
+}
+#endif
 - (NSDictionary<NSString *, id> *)debugStoredSweepForEntityIdentifier:(NSString *)identifier {
     if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
         || ![identifier isKindOfClass:[NSString class]] || identifier.length==0 || identifier.length>128) return nil;
@@ -13290,6 +13403,9 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
             mesh.primitives = {{0,6,0,true}};
             mesh.topology = {1,0,0};
             mesh.localBounds = {{-10,0,0}, {10,10,0}, true};
+            // The fixture has one face and no edges: the source part's edge
+            // lines (and their drawing classes) do not belong to it.
+            mesh.edgeSegments.clear(); mesh.edgeDrawClasses.clear();
             auto& instance = result.instances.front();
             instance.meshIndex = 0; instance.selected = false;
             instance.primitiveBindings = {{0,1,true}};
@@ -14469,6 +14585,11 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
                   @"nativeCommitCalls": @(costs[4]), @"nativeCommitSeconds": @(costs[5]),
                   @"creationPublishCalls": @(costs[6]), @"creationPublishSeconds": @(costs[7]),
                   @"creationViewerCalls": @(costs[8]), @"creationViewerSeconds": @(costs[9]),
+                  @"sceneAdmissionCalls": @(costs[10]), @"sceneAdmissionSeconds": @(costs[11]),
+                  @"sceneBuildCalls": @(costs[12]), @"sceneBuildSeconds": @(costs[13]),
+                  @"storedProfileReadCalls": @(costs[14]), @"storedProfileReadSeconds": @(costs[15]),
+                  @"storedEnclosureReadCalls": @(costs[16]), @"storedEnclosureReadSeconds": @(costs[17]),
+                  @"openingFenceReadCalls": @(costs[18]), @"openingFenceReadSeconds": @(costs[19]),
                   @"solidTimingCalls": @(_debugNativeSolidCosts[0]),
                   @"workerQueueSeconds": @(_debugNativeSolidCosts[1]),
                   @"workerBuildSeconds": @(_debugNativeSolidCosts[2]),
@@ -15307,6 +15428,40 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 
 - (void)debugInvokeNativeDeleteSelected {
     [GLController deleteSelected];
+}
+
+- (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 4 || GLController == nil
+        || !GLController.viewer || !GLController.viewer->getObjectInteractor()
+        || GLController.viewer->hasUnresolvedEdit()) return NO;
+    GLController.viewer->getObjectInteractor()->debugSetDeleteFailureMode(static_cast<int>(mode));
+    return YES;
+}
+- (NSInteger)debugNativeDeleteStagedRootCount {
+    if (![NSThread isMainThread] || GLController == nil || !GLController.viewer
+        || !GLController.viewer->getObjectInteractor()) return -1;
+    return GLController.viewer->getObjectInteractor()->_debugDeleteStagedRootCount;
+}
+- (NSInteger)debugNativeDeleteRefusalStage {
+    if (![NSThread isMainThread] || GLController == nil || !GLController.viewer
+        || !GLController.viewer->getObjectInteractor()) return -1;
+    // Delete guard * 100 + Pattern-original detach clause (K27 diagnostic).
+    return GLController.viewer->getObjectInteractor()->_debugDeleteRefusal * 100
+        + OcctDebugPatternDetachStage();
+}
+#if DEBUG
+extern "C" int Core3DDebugMeshCopyRejectStage;
+#endif
+- (NSInteger)debugMeshCopyRejectStage {
+    // N04 diagnostic: the last Mesh copy guard reached (Core3DViewer / OrdinaryEditController).
+#if DEBUG
+    return Core3DDebugMeshCopyRejectStage;
+#else
+    return -1;
+#endif
+}
++ (NSString *)debugNamedShapeReadSummary {
+    return [NSString stringWithUTF8String:OcctDebugNamedShapeReadSummary().c_str()] ?: @"";
 }
 
 - (PrimitiveGizmoType)debugNativeGizmoType {
@@ -21778,6 +21933,14 @@ static bool Core3DPublishCommittedSpatialSweep(
         identity.documentGeneration = expected.revisions.documentGeneration;
         identity.modelRevision = expected.revisions.modelRevision;
         bool selectionWasTouched = false;
+        // Selecting a part meshes it for picking and highlighting, which sets the Checked bit
+        // of some of its faces; that bit is written into the saved file, so only selecting a
+        // part made the project save different bytes, and a later Undo gave those marked faces
+        // back (lamp shade Width, 18 Nov: 7 of 9 faces checked before selecting, 9 after).
+        // Keep every part's face bits as they were, through the selection refresh too.
+        const auto selectionDocument = GLController.viewer->getDocument();
+        const core3d::CommittedFaceCheckedBits keepFaceBits(
+            selectionDocument.IsNull() ? Handle(TDocStd_Document)() : selectionDocument->Document());
         const bool selected = GLController.viewer->selectObjectFromBrowser(
             identity, static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)), selectionWasTouched);
@@ -23209,6 +23372,61 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     }catch(...){return nil;}
 }
 
+// DEBUG probe (base lane, 18 Nov): which step sets the face Checked bit that the lamp
+// Width Undo check sees (flag byte 0x0a -> 0x0e). Holds TShape handles, changes nothing.
+static std::vector<Handle(TopoDS_TShape)>& Core3DDebugRememberedFaceShapes() {
+    static std::vector<Handle(TopoDS_TShape)> faces;
+    return faces;
+}
+static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Handle(TDocStd_Document)& document) {
+    std::vector<Handle(TopoDS_TShape)> result;
+    if (document.IsNull()) return result;
+    const Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    if (shapes.IsNull()) return result;
+    TDF_LabelSequence roots;
+    shapes->GetFreeShapes(roots);
+    std::unordered_set<const TopoDS_TShape*> seen;
+    for (int i = 1; i <= roots.Length(); ++i) {
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(roots.Value(i));
+        for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next()) {
+            const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+            if (tshape.IsNull() || !seen.insert(tshape.get()).second) continue;
+            result.push_back(tshape);
+        }
+    }
+    return result;
+}
+- (NSInteger)debugRememberDocumentFaceShapes {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer) return -1;
+    try {
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) return -1;
+        Core3DDebugRememberedFaceShapes() = Core3DDebugDocumentFaceShapes(document->Document());
+        return NSInteger(Core3DDebugRememberedFaceShapes().size());
+    } catch (...) { return -1; }
+}
+- (NSString *)debugFaceCheckedBitsSummary {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer) return @"unavailable";
+    try {
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) return @"no document";
+        auto count = [](const std::vector<Handle(TopoDS_TShape)>& faces) {
+            NSInteger checked = 0;
+            for (const auto& face : faces) if (!face.IsNull() && face->Checked()) ++checked;
+            return checked;
+        };
+        const auto& remembered = Core3DDebugRememberedFaceShapes();
+        const auto current = Core3DDebugDocumentFaceShapes(document->Document());
+        std::unordered_set<const TopoDS_TShape*> now;
+        for (const auto& face : current) now.insert(face.get());
+        NSInteger rememberedInDocument = 0;
+        for (const auto& face : remembered) if (now.count(face.get())) ++rememberedInDocument;
+        return [NSString stringWithFormat:@"remembered=%ld checked=%ld inDocument=%ld | document=%ld checked=%ld",
+            long(remembered.size()), long(count(remembered)), long(rememberedInDocument),
+            long(current.size()), long(count(current))];
+    } catch (...) { return @"failed"; }
+}
+
 // Bounded DEBUG read-only kernel evidence for the ACTUAL retained BRep of one
 // saved entity. Every reported value is measured from a private mesh-free
 // deep copy of the stored shape, never projected from any stored recipe;
@@ -23494,6 +23712,13 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot {
     return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot kind:core3d::TransformInspectorEditKind::Rotation];
+}
+
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDisplayedRotationValue:(double)value
+        axis:(Core3DTransformInspectorAxis)axis
+        expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot {
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot kind:core3d::TransformInspectorEditKind::DisplayedRotation];
 }
 
 - (Core3DTransformInspectorPositionCommitResult)

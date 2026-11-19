@@ -1154,6 +1154,10 @@ typedef struct {
     CGFloat minimumThickness;
     CGFloat maximumThickness;
     double metersPerUnit;
+    //! Not 0 only while the preview is refused because a rounded edge of the
+    //! part is smaller than the wall: that edge's radius, in the same local
+    //! units as thickness. The wall has to stay under it.
+    CGFloat refusedRoundedEdgeRadius;
 } Core3DShellParameters;
 
 //! Truthful outcome for an explicit modeling Apply or Cancel request. An

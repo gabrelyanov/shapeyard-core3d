@@ -1453,7 +1453,8 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     NSMutableSet<UITouch *> *_rawViewportTouches;
     BOOL _pinchRendering;
     BOOL _panRendering;
-    CGPoint _pinchPreviousTouch[2];
+    double _pinchPreviousScale;
+    CGPoint _pinchPreviousCenter;
     UITapGestureRecognizer *_tapRecognizer;
     BOOL _suppressTapSelectionForManipulatorInteraction;
     // A tap that began on a move arrow while taps select through the arrows:
@@ -2907,42 +2908,28 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         return;
     }
 
-    if (_isPreviewMode) {
-        return;
-    }
-
-    if (pinchRecognizer.numberOfTouches > 1) {
-        if (state == UIGestureRecognizerStateBegan) {
-            if (!_pinchRendering) {
-                _pinchRendering = YES;
-                [[self viewportView] beginInteractiveRendering];
-            }
-            _pinchPreviousTouch[0] = [pinchRecognizer locationOfTouch:0 inView:self.view];
-            _pinchPreviousTouch[1] = [pinchRecognizer locationOfTouch:1 inView:self.view];
-        } else if (state == UIGestureRecognizerStateChanged) {
-            CGPoint aLastTouch[2] = {
-                [pinchRecognizer locationOfTouch:0 inView:self.view],
-                [pinchRecognizer locationOfTouch:1 inView:self.view]
-            };
-
-            const CGFloat drawableScale = [self drawableScale];
-            double aPinchCenterXStart =
-                (_pinchPreviousTouch[0].x + _pinchPreviousTouch[1].x) * drawableScale / 2.0;
-            double aPinchCenterYStart =
-                (_pinchPreviousTouch[0].y + _pinchPreviousTouch[1].y) * drawableScale / 2.0;
-
-            double aStartDist = Sqrt( ( _pinchPreviousTouch[0].x - _pinchPreviousTouch[1].x ) * ( _pinchPreviousTouch[0].x - _pinchPreviousTouch[1].x ) +
-                                     ( _pinchPreviousTouch[0].y - _pinchPreviousTouch[1].y ) * ( _pinchPreviousTouch[0].y - _pinchPreviousTouch[1].y ) );
-            double anEndDist = Sqrt( ( aLastTouch[0].x - aLastTouch[1].x ) * ( aLastTouch[0].x - aLastTouch[1].x ) +
-                                    ( aLastTouch[0].y - aLastTouch[1].y ) * ( aLastTouch[0].y - aLastTouch[1].y ) );
-
-            double aDeltaDist = (anEndDist - aStartDist) * drawableScale;
-
-            _viewer->Zoom(aPinchCenterXStart, aPinchCenterYStart, aDeltaDist);
+    if (_isPreviewMode || !_viewer || pinchRecognizer.numberOfTouches < 2) { return; }
+    const double scale = pinchRecognizer.scale;
+    const CGPoint first = [pinchRecognizer locationOfTouch:0 inView:self.view];
+    const CGPoint second = [pinchRecognizer locationOfTouch:1 inView:self.view];
+    const CGPoint center = CGPointMake(first.x * 0.5 + second.x * 0.5,
+                                      first.y * 0.5 + second.y * 0.5);
+    if (!std::isfinite(scale) || scale <= 0.0
+        || !std::isfinite(center.x) || !std::isfinite(center.y)) { return; }
+    if (state == UIGestureRecognizerStateBegan) {
+        _pinchPreviousScale = scale;
+        _pinchPreviousCenter = center;
+        if (!_pinchRendering) {
+            _pinchRendering = YES;
+            [[self viewportView] beginInteractiveRendering];
+        }
+    } else if (state == UIGestureRecognizerStateChanged && _pinchRendering) {
+        const double drawableScale = [self drawableScale];
+        if (_viewer->ZoomByFactor(_pinchPreviousCenter.x * drawableScale,
+                _pinchPreviousCenter.y * drawableScale, scale / _pinchPreviousScale)) {
+            _pinchPreviousScale = scale;
+            _pinchPreviousCenter = center;
             [self requestRender];
-
-            _pinchPreviousTouch[0] = aLastTouch[0];
-            _pinchPreviousTouch[1] = aLastTouch[1];
         }
     }
 }
@@ -4347,6 +4334,8 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     parameters.minimumThickness = range.first;
     parameters.maximumThickness = range.second;
     parameters.metersPerUnit = interactor->shellMetersPerUnit();
+    parameters.refusedRoundedEdgeRadius =
+        interactor->shellRefusedRoundedEdgeRadius();
     return parameters;
 }
 
@@ -6585,6 +6574,11 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         state.state == ShellPreviewState::Ready
         && state.canApply != Standard_False;
     return @{
+        @"planarNormalizationStatus": @(state.planarNormalizationStatus),
+        @"usedPlanarNormalization": @(state.usedPlanarNormalization != Standard_False),
+        @"failureStage": @(state.failureStage),
+        @"offsetError": @(state.offsetError),
+        @"offsetDone": @(state.offsetDone != Standard_False),
         @"state": @(static_cast<NSUInteger>(state.state)),
         @"generation": @(
             static_cast<unsigned long long>(state.generation)),

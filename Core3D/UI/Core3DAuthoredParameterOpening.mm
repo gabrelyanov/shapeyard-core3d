@@ -1556,6 +1556,82 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     } catch (...) { return NO; }
 }
 
+- (NSArray<NSArray<NSNumber *> *> *)roundHolesOfEntity:(NSString *)entity {
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0)
+        return @[];
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return @[];
+        NSMutableArray<NSArray<NSNumber *> *> *listed = [NSMutableArray array];
+        for (const auto& hole : viewer->roundHoles(entity.UTF8String ?: "")) {
+            if (hole.size() != 8) continue;
+            [listed addObject:@[@(hole[0]), @(hole[1]), @(hole[2]), @(hole[3]), @(hole[4]),
+                                @(hole[5]), @(hole[6]), @(hole[7])]];
+        }
+        return listed;
+    } catch (...) { return @[]; }
+}
+
+- (BOOL)applyHoleRowOnEntity:(NSString *)entity
+    count:(NSInteger)count spacing:(double)spacing
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        std::string code;
+        const bool chosen = std::isfinite(nx) && std::isfinite(ny) && std::isfinite(nz);
+        const gp_Pnt nearPoint(chosen ? nx : 0, chosen ? ny : 0, chosen ? nz : 0);
+        const bool counted = count >= 2 && count <= 32;
+        if (!counted) code = "bad-values";
+        const bool applied = counted && viewer->applyHoleRow(entity.UTF8String ?: "",
+            static_cast<int>(count), spacing, chosen ? &nearPoint : nullptr, code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (applied) {
+            const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+            if ([gl respondsToSelector:checkSelections])
+                ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+            [gl requestRender];
+        }
+        return applied ? YES : NO;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)applyHoleResizeOnEntity:(NSString *)entity
+    radius:(double)radius
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        std::string code;
+        const bool chosen = std::isfinite(nx) && std::isfinite(ny) && std::isfinite(nz);
+        const gp_Pnt nearPoint(chosen ? nx : 0, chosen ? ny : 0, chosen ? nz : 0);
+        const bool applied = viewer->applyHoleResize(entity.UTF8String ?: "",
+            radius, chosen ? &nearPoint : nullptr, code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (applied) {
+            const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+            if ([gl respondsToSelector:checkSelections])
+                ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+            [gl requestRender];
+        }
+        return applied ? YES : NO;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)clearBooleanPairPreview {
     if (![NSThread isMainThread]) return NO;
     GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
@@ -2155,6 +2231,26 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
         return document->DebugAppendBooleanOriginalsSuffix(context, owner,
             std::uint32_t(size.width), std::uint32_t(size.height));
     } catch (...) { return 1; }
+}
+
+- (BOOL)debugFlipFirstFaceCheckedBit:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        const TDF_Label owner = ExactRoot(viewer->getDocument(),
+            entityIdentifier.UTF8String ?: "");
+        if (owner.IsNull()) return NO;
+        TopExp_Explorer face(XCAFDoc_ShapeTool::GetShape(owner), TopAbs_FACE);
+        if (!face.More() || face.Current().TShape().IsNull()) return NO;
+        // A real change the proof reads. The Checked bit no longer counts: it is a
+        // meshing cache that the proof leaves out (K28 / joined mug, 18 Nov).
+        const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+        tshape->Orientable(!tshape->Orientable());
+        return YES;
+    } catch (...) { return NO; }
 }
 
 - (BOOL)debugInstallBooleanSourceHiddenLayer:(NSString *)entityIdentifier {

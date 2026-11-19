@@ -124,6 +124,82 @@ bool ComputeClosedWitness(const bounded_curve::Definition& curve,
     } catch (...) { return false; }
 }
 
+// The seed only says where the round section starts counting its angle. A seed
+// that runs along the first leg of the guide says nothing, and the default
+// (0, 0, 1) does exactly that for every guide that starts straight up: the
+// frame could not be seeded and the tube was refused with no reason (round 1,
+// K15). Such a seed is replaced by the retained axis that is furthest from the
+// start direction; the replacement is what is stored. A seed of the wrong
+// length is not touched: it stays a refused value.
+void RepairSeedAlongStart(const bounded_curve::Definition& curve,
+                          Definition& sweep) noexcept {
+    try {
+        const Vector3 authored = sweep.orientation.authoredSeed;
+        const double length = std::sqrt(authored[0] * authored[0]
+            + authored[1] * authored[1] + authored[2] * authored[2]);
+        if (!std::isfinite(length) || length < 0.5 || length > 2) return;
+        Handle(Geom_BSplineCurve) geometry = geomfill_detail::Curve(
+            curve, sweep.dimensionMetersPerUnit * 1000.0);
+        if (geometry.IsNull()) return;
+        Handle(GeomAdaptor_Curve) adaptor = new GeomAdaptor_Curve(geometry);
+        gp_Pnt start;
+        gp_Vec derivative;
+        adaptor->D1(adaptor->FirstParameter(), start, derivative);
+        const Vector3 tangent = geomfill_detail::RetainedTangent(curve, derivative);
+        Vector3 unit{};
+        Frame frame{};
+        if (!Normalize(tangent, unit) || SeedFrame(tangent, authored, frame)) return;
+        std::size_t furthest = 0;
+        for (std::size_t axis = 1; axis < 3; ++axis)
+            if (std::abs(unit[axis]) < std::abs(unit[furthest])) furthest = axis;
+        Vector3 replacement{{0, 0, 0}};
+        replacement[furthest] = 1;
+        if (SeedFrame(tangent, replacement, frame))
+            sweep.orientation.authoredSeed = replacement;
+    } catch (...) {}
+}
+
+// Which check refused the build, as a word the screen turns into a sentence
+// that says what to change. Nothing here changes what is admitted.
+const char *BuildRefusalReason(const GeomFillBuildResult& build,
+                               double& largestRadiusMM) noexcept {
+    largestRadiusMM = 0;
+    switch (build.status) {
+        case GeomFillBuildStatus::Cancelled: return "cancelled-before-build";
+        case GeomFillBuildStatus::TransportRefused: return "frame-refused";
+        case GeomFillBuildStatus::SurfaceRefused:
+        case GeomFillBuildStatus::SewingRefused:
+        case GeomFillBuildStatus::SolidRefused: return "surface-build-refused";
+        case GeomFillBuildStatus::ProofRefused: break;
+        default: return "admission-or-build-refused";
+    }
+    switch (build.admission.refusal) {
+        case AdmissionRefusal::TightCurvature: {
+            // Admission asks curvature * (radius + 4 eps) < 0.25. Show a radius
+            // two per cent under that limit, cut to 0.1 mm, so the number on
+            // the screen passes the same test when it is typed back.
+            const double curvature = build.curveProof.curvaturePerMM.upper;
+            if (std::isfinite(curvature) && curvature > 0) {
+                const double limit = 0.25 / curvature - 4 * PositionalEpsilonMM;
+                const double shown = std::floor(limit * 0.98 * 10.0) / 10.0;
+                if (std::isfinite(shown) && shown >= 0.1) largestRadiusMM = shown;
+            }
+            return "bend-too-tight";
+        }
+        case AdmissionRefusal::NonlocalContact:
+        case AdmissionRefusal::NonlocalClearanceUnproved: return "path-too-close-to-itself";
+        case AdmissionRefusal::Kink: return "path-has-corner";
+        case AdmissionRefusal::ZeroTangent: return "path-stalls";
+        case AdmissionRefusal::LengthOutOfBounds: return "path-length-out-of-range";
+        case AdmissionRefusal::ExtentOutOfBounds: return "path-too-far-away";
+        case AdmissionRefusal::ParallelSeed: return "seed-along-path";
+        case AdmissionRefusal::LawOutOfBounds: return "radius-or-twist-out-of-range";
+        case AdmissionRefusal::OpenSeam: return "closed-path-does-not-close";
+        default: break;
+    }
+    return "proof-refused";
+}
+
 } // namespace
 
 struct OcafOwner::State final {
@@ -250,6 +326,7 @@ Receipt OcafOwner::create(const CreateRequest& request) noexcept {
         sweep.transport = TransportKind::BishopV1;
         sweep.parameterization = ParameterizationKind::NormalizedArcLengthV1;
         sweep.profile = BuildProfile{};
+        RepairSeedAlongStart(curve, sweep);
         if (!ComputeClosedWitness(curve, sweep)
             || Validate(sweep) != Refusal::None)
             return finish(Refused(Outcome::refused, "sweep-value-refused"));
@@ -264,8 +341,22 @@ Receipt OcafOwner::create(const CreateRequest& request) noexcept {
         std::atomic_bool cancelled{false};
         const auto first = BuildGeomFillSweep(curve, sweep, cancelled);
         const auto second = BuildGeomFillSweep(curve, sweep, cancelled);
-        if (!first.built() || !second.built())
-            return finish(Refused(Outcome::refused, "admission-or-build-refused"));
+        if (!first.built() || !second.built()) {
+            double largestRadiusMM = 0;
+            Receipt refusal = Refused(Outcome::refused,
+                BuildRefusalReason(first.built() ? second : first, largestRadiusMM));
+            refusal.largestRadiusMM = largestRadiusMM;
+#if DEBUG
+            // Debug builds name the builder check that refused (K15 surface
+            // stage); release keeps the plain reason word.
+            const auto& refused = first.built() ? second : first;
+            if (refused.refusalPoint > 0)
+                refusal.reason += " at check " + std::to_string(refused.refusalPoint)
+                    + " value " + std::to_string(refused.refusalValue)
+                    + refused.refusalDetail;
+#endif
+            return finish(std::move(refusal));
+        }
         const auto fixed = composite_recipe::spatial_g0::PrepareFixedPoint(
             first.solid, second.solid, composite_recipe::spatial_g0::PinnedProfile);
         if (!fixed.admitted())

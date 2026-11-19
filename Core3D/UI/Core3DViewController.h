@@ -1558,6 +1558,15 @@ __attribute__((objc_subclassing_restricted))
 //! unresolved edit, invalid unit, non-BRep or excessive topology with nil.
 - (nullable NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity
     NS_SWIFT_NAME(debugNativeSolidEvidence(_:));
+//! DEBUG probe (base lane, lamp Width Undo 10->14): remembers the face TShapes of every
+//! part now in the document; returns how many were remembered. Read-only on the model.
+- (NSInteger)debugRememberDocumentFaceShapes
+    NS_SWIFT_NAME(debugRememberDocumentFaceShapes());
+//! DEBUG probe: "remembered=<n> checked=<k> | document=<m> checked=<j>": the Checked bit
+//! of the faces remembered above (also when they are only held by history now) and of
+//! the faces in the document now. Read-only.
+- (NSString *)debugFaceCheckedBitsSummary
+    NS_SWIFT_NAME(debugFaceCheckedBitsSummary());
 //! B2-only values/observation seam. `expected` is an independently authored
 //! complete Profile value; the real entity is detached and observed separately.
 //! No accessibility attribute, witness, edit authority or matcher success is
@@ -1651,6 +1660,14 @@ __attribute__((objc_subclassing_restricted))
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot
     NS_SWIFT_NAME(commitTransformInspectorRotation(_:axis:expected:));
+//! Edit one component of displayedEulerXYZDegrees. Use this together with that
+//! readback in By numbers; the canonical rotation API keeps its old semantics.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDisplayedRotationValue:(double)value
+        axis:(Core3DTransformInspectorAxis)axis
+        expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorDisplayedRotation(_:axis:expected:));
+
 
 //! Set an absolute signed uniform scale factor, dimensionless. Magnitude must
 //! be greater than OCCT confusion tolerance and at most 1,000,000. Uses the
@@ -1700,6 +1717,12 @@ __attribute__((objc_subclassing_restricted))
 - (void)setManipulatorRotationAllowed:(BOOL)allowed;
 
 - (void)setGizmoType:(PrimitiveGizmoType)type;
+
+//! Release API (Fable review 2, 18 Nov: it sat inside the DEBUG block). Adds every part of an app-created import document (a Core3DNativeImportResult's primaryURL)
+//! to the open model as one creation (one Undo removes them all). Returns how many parts were
+//! added; 0 when nothing could be added (the model is unchanged).
+- (NSInteger)insertPartsFromImportedDocumentAtURL:(NSURL *)url
+    NS_SWIFT_NAME(insertPartsFromImportedDocument(at:));
 
 #ifdef DEBUG
 //! Re-run the production selection callback without changing AIS owners.
@@ -1785,6 +1808,8 @@ __attribute__((objc_subclassing_restricted))
 //! Exact current attached manipulator location; nil when no gizmo is attached.
 //! Read-only DEBUG evidence for saved-group pivot attachment paths.
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
+//! The attached Move handles' Z arrow direction (world, unit); nil when none (K13 check).
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection;
 //! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).
 - (NSNumber *_Nullable)debugManipulatorSidePoints;
 //! How many displayed parts carry a highlight style of their own (a tool's colour); 0 when no
@@ -2347,6 +2372,11 @@ __attribute__((objc_subclassing_restricted))
 + (NSDictionary<NSString *,id> *)debugRectangularLoftFamilyBudget;
 
 
+#if DEBUG
+//! Entity identifier -> "sha256 byteCount" of each part as the project file would store it
+//! (exact shape and every attribute through the file's own drivers). K16 check.
+- (NSDictionary<NSString *, NSString *> *)debugPartDigests NS_SWIFT_NAME(debugPartDigests());
+#endif
 //! Read-only existing saved record and fixed malformed production-loader fixtures.
 - (nullable NSDictionary<NSString *, id> *)debugStoredSweepForEntityIdentifier:(NSString *)identifier
     NS_SWIFT_NAME(debugStoredSweep(entityIdentifier:));
@@ -2575,6 +2605,8 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugSelectAtWorldPoint(x:y:z:));
 //! Replay native touch begin/cancel/select with UIKit's rounded projected pixel.
+//! DEBUG probe: which guard last refused a face colour or material ("none" when it went through).
+- (NSString *)debugLastFacePBRRefusal;
 - (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
 //! Replay a reported camera eye without changing its direction or any model/selection state.
@@ -2675,6 +2707,16 @@ __attribute__((objc_subclassing_restricted))
 //! reject both operations without changing document or selection state.
 - (void)debugInvokeNativeSelectAll;
 - (void)debugInvokeNativeDeleteSelected;
+//! Delete: 1 partial stage, 2 throw after commit, 3 commit/first-abort open,
+//! 4 two unavailable post-commit inspections. Zero clears the next fault.
+- (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode;
+- (NSInteger)debugNativeDeleteStagedRootCount;
+//! K27 diagnostic: Delete guard * 100 + Pattern-original detach clause; 0 = committed.
+- (NSInteger)debugNativeDeleteRefusalStage;
+//! N04 diagnostic: the last Mesh copy guard reached (2-6 viewer, 10-19 source, 20+PreparationResult tessellation, 30 creation, 90 staged).
+- (NSInteger)debugMeshCopyRejectStage;
+//! Byte-drift diagnostic: the last NamedShape records read from a file.
++ (NSString *)debugNamedShapeReadSummary;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
 //! native value deliberately leaves the public cached tool untouched.
 - (PrimitiveGizmoType)debugNativeGizmoType;
