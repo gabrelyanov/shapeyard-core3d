@@ -713,7 +713,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 - (Core3DRoundFailureObservation)roundFailureObservation {
     if (![NSThread isMainThread] || GLController == nil
         || _currentGizmoType != PrimitiveGizmoTypeChamfer) {
-        return {0, Core3DRoundFailureKindNone};
+        return {0, Core3DRoundFailureKindNone, 0.0};
     }
     return [GLController roundFailureObservation];
 }

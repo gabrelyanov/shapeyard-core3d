@@ -44,6 +44,9 @@ enum class BevelFailureKind : std::uint8_t {
 struct BevelFailureObservation {
     std::uint64_t generation = 0;
     BevelFailureKind kind = BevelFailureKind::None;
+    //! K11 (CTO 19 Nov 12:35): for a round refused as too large on one part,
+    //! the largest tested size that builds (stored units); 0 when unknown.
+    Standard_Real largestFittingValue = 0.0;
 };
 
 //! Immutable selection captured on the main thread before any worker starts.
@@ -241,7 +244,8 @@ private:
     Standard_Boolean sourcesAreCurrent() const noexcept;
     std::string selectionFingerprint(Standard_Boolean& complete) const;
     void notifyPreviewStateChanged() noexcept;
-    void recordFailure(BevelFailureKind kind) noexcept;
+    void recordFailure(BevelFailureKind kind,
+        Standard_Real largestFittingValue = 0.0) noexcept;
     void clearState() noexcept;
     Standard_Boolean abortOpenCommand(
         const Handle(TDocStd_Document)& document) noexcept;

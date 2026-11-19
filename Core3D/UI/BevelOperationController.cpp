@@ -84,6 +84,8 @@ struct BevelPreviewWorkerResult {
     std::string fingerprint;
     BevelPreviewWorkerOutcome outcome = BevelPreviewWorkerOutcome::Failed;
     BevelFailureKind failureKind = BevelFailureKind::Other;
+    //! K11: largest round (stored units) that builds after a size refusal; 0 = unknown.
+    Standard_Real largestFittingValue = 0.0;
     std::vector<TopoDS_Shape> results;
     std::vector<std::shared_ptr<const retained_edge_treatment::DetachedResult>>
         retainedResults;
@@ -563,6 +565,66 @@ private:
     std::shared_ptr<std::atomic_bool> myCancellation;
 };
 
+//! True when the same edges built at theValue (distance for a chamfer,
+//! radius for a round) give one valid solid, exactly as a preview checks it.
+//! theNodesBefore / theSolidsBefore are the counts of the parts the preview
+//! already built before this one, so the probe counts topology across all
+//! parts like the real attempt (Fable review of 202b233c, CTO 19 Nov 12:55):
+//! a part refused for the shared node limit is never called "too large".
+Standard_Boolean PlainBevelBuildsAt(
+    const BevelPreviewWorkerSource& theSource,
+    const Standard_Real theValue,
+    const Standard_Boolean theIsChamfer,
+    const std::shared_ptr<std::atomic_bool>& theCancellation,
+    const Standard_Size theNodesBefore,
+    const Standard_Size theSolidsBefore,
+    const Standard_Size theMaximumNodes,
+    const Standard_Size theMaximumSolids) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (theSource.shape.IsNull() || theSource.edges.empty()
+            || !(theValue > Precision::Confusion())
+            || theCancellation == nullptr
+            || theCancellation->load(std::memory_order_relaxed)) {
+            return Standard_False;
+        }
+        Handle(BevelCancellationIndicator) aProgress =
+            new BevelCancellationIndicator(theCancellation);
+        TopoDS_Shape aShape;
+        if (theIsChamfer) {
+            BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
+            for (const TopoDS_Edge& anEdge : theSource.edges) {
+                aBuilder.Add(theValue, anEdge);
+            }
+            aBuilder.Build(aProgress->Start());
+            if (!aBuilder.IsDone()
+                || theCancellation->load(std::memory_order_relaxed)) {
+                return Standard_False;
+            }
+            aShape = PlainBevelResultWithoutWrapper(aBuilder.Shape());
+        } else {
+            BRepFilletAPI_MakeFillet aBuilder(theSource.shape);
+            for (const TopoDS_Edge& anEdge : theSource.edges) {
+                aBuilder.Add(theValue, anEdge);
+            }
+            aBuilder.Build(aProgress->Start());
+            if (!aBuilder.IsDone()
+                || theCancellation->load(std::memory_order_relaxed)) {
+                return Standard_False;
+            }
+            aShape = PlainBevelResultWithoutWrapper(aBuilder.Shape());
+        }
+        Standard_Size aNodes = theNodesBefore;
+        Standard_Size aSolids = theSolidsBefore;
+        return !aShape.IsNull() && !aShape.IsSame(theSource.shape)
+            && IsValidSolidResult(aShape, theMaximumNodes, theMaximumSolids,
+                   aNodes, aSolids);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 //! OCCT's chamfer builder, unlike the fillet builder, exposes no faulty
 //! contour status. A plain chamfer that failed at theDistance is classified
 //! as refused for its size only when the same edges chamfered at a quarter
@@ -570,79 +632,74 @@ private:
 //! the person can be told so. Anything else stays an ordinary failure.
 //! K11 (build 7): the same quarter-size probe for a plain round, so a round
 //! that is too large for a short step says so instead of "Preview failed".
+//! K11 (CTO 19 Nov 12:35): the sentence names the size that fits. After the
+//! quarter probe builds, six halvings between it (builds) and theDistance
+//! (refused) find the largest tested value that builds; it is returned in
+//! *theLargestFitting (stored units; 0 when none was found). The search runs
+//! only when theLargestFitting is given (a round on one part), only after a
+//! refusal, never on a preview that works, and is cancellable like a preview.
 BevelFailureKind ClassifyFailedPlainBevel(
     const BevelPreviewWorkerSource& theSource,
     const Standard_Real theDistance,
     const Standard_Boolean theIsChamfer,
     const std::shared_ptr<std::atomic_bool>& theCancellation,
+    const Standard_Size theNodesBefore,
+    const Standard_Size theSolidsBefore,
     const Standard_Size theMaximumNodes,
-    const Standard_Size theMaximumSolids) noexcept;
+    const Standard_Size theMaximumSolids,
+    Standard_Real* theLargestFitting) noexcept
+{
+    if (theLargestFitting != nullptr) {
+        *theLargestFitting = 0.0;
+    }
+    try {
+        const Standard_Real aProbe = theDistance * 0.25;
+        if (!PlainBevelBuildsAt(theSource, aProbe, theIsChamfer,
+                theCancellation, theNodesBefore, theSolidsBefore,
+                theMaximumNodes, theMaximumSolids)) {
+            return BevelFailureKind::Other;
+        }
+        if (theLargestFitting == nullptr) {
+            return BevelFailureKind::RadiusRefused;
+        }
+        Standard_Real aFits = aProbe;
+        Standard_Real aRefused = theDistance;
+        for (int aStep = 0; aStep < 6; ++aStep) {
+            if (theCancellation == nullptr
+                || theCancellation->load(std::memory_order_relaxed)) {
+                break;
+            }
+            const Standard_Real aMiddle = 0.5 * (aFits + aRefused);
+            if (PlainBevelBuildsAt(theSource, aMiddle, theIsChamfer,
+                    theCancellation, theNodesBefore, theSolidsBefore,
+                theMaximumNodes, theMaximumSolids)) {
+                aFits = aMiddle;
+            } else {
+                aRefused = aMiddle;
+            }
+        }
+        *theLargestFitting = aFits;
+        return BevelFailureKind::RadiusRefused;
+    } catch (...) {
+        if (theLargestFitting != nullptr) {
+            *theLargestFitting = 0.0;
+        }
+        return BevelFailureKind::Other;
+    }
+}
 
 BevelFailureKind ClassifyFailedPlainChamfer(
     const BevelPreviewWorkerSource& theSource,
     const Standard_Real theDistance,
     const std::shared_ptr<std::atomic_bool>& theCancellation,
+    const Standard_Size theNodesBefore,
+    const Standard_Size theSolidsBefore,
     const Standard_Size theMaximumNodes,
     const Standard_Size theMaximumSolids) noexcept
 {
     return ClassifyFailedPlainBevel(theSource, theDistance, Standard_True,
-        theCancellation, theMaximumNodes, theMaximumSolids);
-}
-
-BevelFailureKind ClassifyFailedPlainBevel(
-    const BevelPreviewWorkerSource& theSource,
-    const Standard_Real theDistance,
-    const Standard_Boolean theIsChamfer,
-    const std::shared_ptr<std::atomic_bool>& theCancellation,
-    const Standard_Size theMaximumNodes,
-    const Standard_Size theMaximumSolids) noexcept
-{
-    try {
-        OCC_CATCH_SIGNALS
-        const Standard_Real aProbe = theDistance * 0.25;
-        if (theSource.shape.IsNull() || theSource.edges.empty()
-            || !(aProbe > Precision::Confusion())
-            || theCancellation == nullptr
-            || theCancellation->load(std::memory_order_relaxed)) {
-            return BevelFailureKind::Other;
-        }
-        Handle(BevelCancellationIndicator) aProgress =
-            new BevelCancellationIndicator(theCancellation);
-        TopoDS_Shape aProbeShape;
-        if (theIsChamfer) {
-            BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
-            for (const TopoDS_Edge& anEdge : theSource.edges) {
-                aBuilder.Add(aProbe, anEdge);
-            }
-            aBuilder.Build(aProgress->Start());
-            if (!aBuilder.IsDone()
-                || theCancellation->load(std::memory_order_relaxed)) {
-                return BevelFailureKind::Other;
-            }
-            aProbeShape = aBuilder.Shape();
-        } else {
-            BRepFilletAPI_MakeFillet aBuilder(theSource.shape);
-            for (const TopoDS_Edge& anEdge : theSource.edges) {
-                aBuilder.Add(aProbe, anEdge);
-            }
-            aBuilder.Build(aProgress->Start());
-            if (!aBuilder.IsDone()
-                || theCancellation->load(std::memory_order_relaxed)) {
-                return BevelFailureKind::Other;
-            }
-            aProbeShape = aBuilder.Shape();
-        }
-        Standard_Size aNodes = 0;
-        Standard_Size aSolids = 0;
-        if (aProbeShape.IsNull() || aProbeShape.IsSame(theSource.shape)
-            || !IsValidSolidResult(aProbeShape, theMaximumNodes,
-                   theMaximumSolids, aNodes, aSolids)) {
-            return BevelFailureKind::Other;
-        }
-        return BevelFailureKind::RadiusRefused;
-    } catch (...) {
-        return BevelFailureKind::Other;
-    }
+        theCancellation, theNodesBefore, theSolidsBefore, theMaximumNodes,
+        theMaximumSolids, nullptr);
 }
 
 } // namespace
@@ -914,6 +971,11 @@ private:
                     aResult.results.clear();
                     return aResult;
                 }
+                // The counts of the parts already built, before this one:
+                // a size probe for this part starts from them (CTO 12:55).
+                const Standard_Size aNodesBefore =
+                    anAggregateResultTopologyNodes;
+                const Standard_Size aSolidsBefore = anAggregateResultSolids;
                 TopoDS_Shape aCandidate;
                 std::shared_ptr<const retained_edge_treatment::DetachedResult>
                     aRetainedResult;
@@ -939,6 +1001,7 @@ private:
                     if (!aBuilder.IsDone()) {
                         aResult.failureKind = ClassifyFailedPlainChamfer(
                             aSource, aDistance, theRequest.cancellation,
+                            aNodesBefore, aSolidsBefore,
                             theRequest.maximumResultTopologyNodes,
                             theRequest.maximumResultSolids);
                         return aResult;
@@ -951,14 +1014,33 @@ private:
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
-                        aResult.failureKind =
-                            fillet_failure::IsClearanceRefusal(aBuilder)
-                                ? BevelFailureKind::RadiusRefused
-                                : ClassifyFailedPlainBevel(
+                        // K11 (CTO 19 Nov 12:35): a round on one part also
+                        // finds the largest size that builds, for the hint.
+                        Standard_Real* aLargest =
+                            theRequest.sources.size() == 1
+                                ? &aResult.largestFittingValue
+                                : nullptr;
+                        if (fillet_failure::IsClearanceRefusal(aBuilder)) {
+                            if (aLargest != nullptr) {
+                                ClassifyFailedPlainBevel(
                                     aSource, aDistance, Standard_False,
                                     theRequest.cancellation,
+                                    aNodesBefore, aSolidsBefore,
                                     theRequest.maximumResultTopologyNodes,
-                                    theRequest.maximumResultSolids);
+                                    theRequest.maximumResultSolids,
+                                    aLargest);
+                            }
+                            aResult.failureKind =
+                                BevelFailureKind::RadiusRefused;
+                        } else {
+                            aResult.failureKind = ClassifyFailedPlainBevel(
+                                aSource, aDistance, Standard_False,
+                                theRequest.cancellation,
+                                aNodesBefore, aSolidsBefore,
+                                theRequest.maximumResultTopologyNodes,
+                                theRequest.maximumResultSolids,
+                                aLargest);
+                        }
                         return aResult;
                     }
                     aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
@@ -986,8 +1068,12 @@ private:
                         aResult.failureKind = ClassifyFailedPlainBevel(
                             aSource, aDistance, isChamfer,
                             theRequest.cancellation,
+                            aNodesBefore, aSolidsBefore,
                             theRequest.maximumResultTopologyNodes,
-                            theRequest.maximumResultSolids);
+                            theRequest.maximumResultSolids,
+                            !isChamfer && theRequest.sources.size() == 1
+                                ? &aResult.largestFittingValue
+                                : nullptr);
                     }
                     return aResult;
                 }
@@ -1834,7 +1920,10 @@ void BevelOperationController::acceptWorkerResult(
     if (theResult.outcome != BevelPreviewWorkerOutcome::Success) {
         myCanApply = Standard_False;
         myState = BevelPreviewState::Failed;
-        recordFailure(theResult.failureKind);
+        recordFailure(theResult.failureKind,
+            theResult.failureKind == BevelFailureKind::RadiusRefused
+                ? theResult.largestFittingValue
+                : 0.0);
         notifyPreviewStateChanged();
         return;
     }
@@ -2047,11 +2136,13 @@ BevelOperationController::failureObservation() const noexcept
 }
 
 void BevelOperationController::recordFailure(
-    const BevelFailureKind theKind) noexcept
+    const BevelFailureKind theKind,
+    const Standard_Real theLargestFittingValue) noexcept
 {
     myFailureObservation = {
         myGeneration,
         theKind,
+        theLargestFittingValue > 0.0 ? theLargestFittingValue : 0.0,
     };
 }
 
