@@ -14,8 +14,6 @@
 #ifndef _RWObj_ObjWriterContext_HeaderFiler
 #define _RWObj_ObjWriterContext_HeaderFiler
 
-#include <cstdio>
-
 #include <Graphic3d_Vec.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TColStd_IndexedDataMapOfStringString.hxx>
@@ -75,11 +73,6 @@ public:
 
   //! Writing a vector
   Standard_EXPORT bool WriteTexCoord (const Graphic3d_Vec2& theValue);
-
-  //! Writing an object name
-  bool WriteObject (const TCollection_AsciiString& theValue) {
-    return myFile != NULL && std::fprintf(myFile, "o %s\n", theValue.ToCString()) >= 0;
-  }
 
   //! Writing a group name
   Standard_EXPORT bool WriteGroup (const TCollection_AsciiString& theValue);

@@ -399,9 +399,6 @@ protected:
         } else {
             name = sourceName;
         }
-        if (!writer.WriteObject(name)) {
-            return false;
-        }
         TopoDS_Shape shape;
         XCAFPrs_IndexedDataMapOfShapeStyle styles;
         if (!CollectNestedLocationStyles(label, shape, styles)) {
