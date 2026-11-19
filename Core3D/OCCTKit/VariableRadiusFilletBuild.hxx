@@ -183,12 +183,23 @@ struct AuthoredParameterMap final {
     double nativeLast = 0;
     double authoredFirst = 0;
     double authoredLast = 0;
+    // The kernel's radius law is a function of the spine abscissa (arc length
+    // from the spine's first vertex), not of the edge curve's own parameter.
+    // The two coincide only when the curve runs from 0 at the spine's first
+    // vertex at unit speed (a plain box edge); an edge made by an earlier
+    // feature (e.g. the top edge left by a Bevel) carries an offset range.
+    // Filled after the kernel has built the spine (kernelLawParameters).
+    double lawFirst = 0;
+    double lawLast = 0;
 
     double parameter(double authored) const noexcept {
         return authoredFirst + (authoredLast - authoredFirst) * authored;
     }
     double normalized(double authored) const noexcept {
         return (parameter(authored) - nativeFirst) / (nativeLast - nativeFirst);
+    }
+    double lawParameter(double authored) const noexcept {
+        return lawFirst + (lawLast - lawFirst) * authored;
     }
 };
 
@@ -219,6 +230,42 @@ inline bool authoredParameterMap(const TopoDS_Edge& edge,
             (authoredStart.Y() + authoredEnd.Y()) * .5,
             (authoredStart.Z() + authoredEnd.Z()) * .5);
         return samePoint(curve.Value(middle), expectedMiddle, tolerance);
+    } catch (...) {
+        return false;
+    }
+}
+
+// Where the kernel's law for this one-edge contour reads the authored start
+// and end: spine abscissa 0 at the contour's first vertex, Length(contour) at
+// its last. False (the caller refuses) unless the contour is exactly this edge
+// with its spine running between the edge's own two vertices.
+inline bool kernelLawParameters(const BRepFilletAPI_MakeFillet& fillet, int contour,
+                                const TopoDS_Edge& edge, double tolerance,
+                                AuthoredParameterMap& mapping) noexcept {
+    try {
+        TopoDS_Vertex atNativeFirst, atNativeLast;
+        TopExp::Vertices(edge, atNativeFirst, atNativeLast);
+        const TopoDS_Vertex spineFirst = fillet.FirstVertex(contour);
+        const TopoDS_Vertex spineLast = fillet.LastVertex(contour);
+        if (atNativeFirst.IsNull() || atNativeLast.IsNull()
+            || spineFirst.IsNull() || spineLast.IsNull()) return false;
+        const bool spineAlongNative = spineFirst.IsSame(atNativeFirst)
+            && spineLast.IsSame(atNativeLast);
+        const bool spineAgainstNative = spineFirst.IsSame(atNativeLast)
+            && spineLast.IsSame(atNativeFirst);
+        if (spineAlongNative == spineAgainstNative) return false;
+        const double length = fillet.Length(contour);
+        BRepAdaptor_Curve curve(edge);
+        const double chord = curve.Value(mapping.nativeFirst)
+            .Distance(curve.Value(mapping.nativeLast));
+        if (!std::isfinite(length) || !(length > 0)
+            || std::abs(length - chord) > tolerance) return false;
+        const double lawAtNativeFirst = spineAlongNative ? 0 : length;
+        const double lawAtNativeLast = spineAlongNative ? length : 0;
+        const bool authoredStartsAtNativeFirst = mapping.authoredFirst == mapping.nativeFirst;
+        mapping.lawFirst = authoredStartsAtNativeFirst ? lawAtNativeFirst : lawAtNativeLast;
+        mapping.lawLast = authoredStartsAtNativeFirst ? lawAtNativeLast : lawAtNativeFirst;
+        return true;
     } catch (...) {
         return false;
     }
@@ -525,20 +572,19 @@ inline void observeRealizedLaw(const Handle(Law_Function)& law,
         for (std::size_t index = 0; index < samples.size(); ++index) {
             const double parameter = mapping.parameter(samples[index]);
             double value = 0, derivative = 0;
-            law->D1(parameter, value, derivative);
+            law->D1(mapping.lawParameter(samples[index]), value, derivative);
             output.sampleParameters[index] = parameter;
             output.samplePositionsZ[index] = curve.Value(parameter).Z();
             output.sampleValues[index] = value;
             output.sampleDerivatives[index] = derivative
-                * (mapping.authoredLast - mapping.authoredFirst);
+                * (mapping.lawLast - mapping.lawFirst);
         }
         for (std::size_t index = 0; index < output.gridValues.size(); ++index) {
             const double t = double(index + 1) / 100;
-            const double parameter = mapping.parameter(t);
             double derivative = 0;
-            law->D1(parameter, output.gridValues[index], derivative);
+            law->D1(mapping.lawParameter(t), output.gridValues[index], derivative);
             output.gridDerivatives[index] = derivative
-                * (mapping.authoredLast - mapping.authoredFirst);
+                * (mapping.lawLast - mapping.lawFirst);
         }
 
         struct Part final {
@@ -1031,13 +1077,15 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         if (!fillet.IsDone() || fillet.Shape().IsNull()) return decline(Refusal::KernelFailure);
         for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
             const auto& edge = edges[edgeIndex];
-            const auto& mapping = mappings[edgeIndex];
+            auto& mapping = mappings[edgeIndex];
             const bool authoredStartsAtNativeFirst =
                 mapping.authoredFirst == mapping.nativeFirst;
             const std::array<double, 2> nativeRadii{{
                 workingDefinition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
                 workingDefinition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
             const int contour = fillet.Contour(edge); Standard_Real first = 0, last = 0;
+            if (!detail::kernelLawParameters(fillet, contour, edge, tolerance, mapping))
+                return decline(Refusal::EndpointMismatch);
             Handle(Law_Function) law;
             if (flatLaw) {
                 // A constant spine carries no law object: GetLaw and GetBounds
@@ -1063,17 +1111,17 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
                 Handle(Law_Constant) realized = new Law_Constant();
                 realized->Set(fillet.Radius(contour, edge), first, last);
                 law = realized;
-                if (std::abs(law->Value(mapping.authoredFirst)
+                if (std::abs(law->Value(mapping.lawFirst)
                         - workingDefinition.stations[0].radiusLocal) > tolerance
-                    || std::abs(law->Value(mapping.authoredLast)
+                    || std::abs(law->Value(mapping.lawLast)
                         - workingDefinition.stations[1].radiusLocal) > tolerance)
                     return decline(Refusal::EndpointMismatch);
             } else {
                 law = fillet.GetLaw(contour, edge);
                 if (law.IsNull() || !fillet.GetBounds(contour, edge, first, last)
-                    || std::abs(law->Value(mapping.authoredFirst)
+                    || std::abs(law->Value(mapping.lawFirst)
                         - workingDefinition.stations[0].radiusLocal) > tolerance
-                    || std::abs(law->Value(mapping.authoredLast)
+                    || std::abs(law->Value(mapping.lawLast)
                         - workingDefinition.stations[1].radiusLocal) > tolerance)
                     return decline(Refusal::EndpointMismatch);
             }
@@ -1352,11 +1400,12 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         if (!fillet.IsDone() || fillet.Shape().IsNull()) return decline(Refusal::KernelFailure);
         for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
             const auto& edge = edges[edgeIndex];
-            const auto& mapping = mappings[edgeIndex];
+            auto& mapping = mappings[edgeIndex];
             const int contour = fillet.Contour(edge);
             BRepAdaptor_Curve spine(edge);
             const double first = spine.FirstParameter(), last = spine.LastParameter();
-            if (!std::isfinite(first) || !std::isfinite(last) || !(last > first))
+            if (!std::isfinite(first) || !std::isfinite(last) || !(last > first)
+                || !detail::kernelLawParameters(fillet, contour, edge, tolerance, mapping))
                 return decline(Refusal::EndpointMismatch);
             Handle(Law_Function) law;
             if (flatLaw) {
@@ -1378,7 +1427,7 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             }
             if (law.IsNull()) return decline(Refusal::EndpointMismatch);
             const auto lawAt = [&](double authoredParameter) {
-                return law->Value(mapping.parameter(authoredParameter));
+                return law->Value(mapping.lawParameter(authoredParameter));
             };
             // The realized kernel law must pin every authored station, not only
             // the endpoints; a law that misses a station refuses here.
@@ -1407,7 +1456,7 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
                             nativeParameter,
                             native.station.radiusLocal,
                             observedCurve.Value(nativeParameter).Z(),
-                            law->Value(nativeParameter)});
+                            lawAt(native.station.parameter)});
                     }
                 } catch (...) {
                     observed.exception = true;
