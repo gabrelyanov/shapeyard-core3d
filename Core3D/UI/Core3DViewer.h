@@ -1301,6 +1301,7 @@ namespace core3d {
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
         bool admitVisibility(OrdinaryVisibilityLedger& ledger) noexcept override;
         bool repairVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept override;
+        bool rebuildVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept override;
         OrdinaryEditResult publishCreatedPrimitives(const std::vector<OrdinaryCreationRequest>& requests,
             std::shared_ptr<NativeModelingCommitPermit> permit = {}) noexcept;
         bool admitCreation(OrdinaryCreationLedger& ledger) noexcept override;
