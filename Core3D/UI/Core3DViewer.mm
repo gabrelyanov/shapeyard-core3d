@@ -16457,6 +16457,12 @@ void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
 #else
         Handle(OpenGl_GraphicDriver) graphicDriver = new OpenGl_GraphicDriver(displayConnection);
 #endif
+        // Founder 19 Nov (lesson save): this view shares the live viewport's
+        // context and, on iOS, wraps its bound renderbuffer as the window. A
+        // swap there presented the 500 x 500 black-background picture on the
+        // screen as a huge, stretched model. The picture is read from an
+        // off-screen buffer only; nothing here may ever present.
+        graphicDriver->ChangeOptions().buffersNoSwap = Standard_True;
         Handle(V3d_Viewer) viewer = new V3d_Viewer(graphicDriver);
         viewer->SetDefaultTypeOfView(V3d_PERSPECTIVE);
         Handle(V3d_DirectionalLight) lightDir = new V3d_DirectionalLight(V3d_Zneg, Quantity_Color(Quantity_NOC_WHITE), Standard_True);
@@ -16548,7 +16554,8 @@ void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
         }
 
         view->FitAll();
-        view->Redraw();
+        // No view->Redraw() here: it drew into the live viewport's renderbuffer.
+        // ToPixMap redraws into its own off-screen buffer of the asked size.
         // prepare pixmap image
         Image_AlienPixMap img;
         if (!view->ToPixMap(img, width, height))
@@ -16621,6 +16628,12 @@ void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
 #else
         Handle(OpenGl_GraphicDriver) graphicDriver = new OpenGl_GraphicDriver(displayConnection);
 #endif
+        // Founder 19 Nov (lesson save): this view shares the live viewport's
+        // context and, on iOS, wraps its bound renderbuffer as the window. A
+        // swap there presented the 500 x 500 black-background picture on the
+        // screen as a huge, stretched model. The picture is read from an
+        // off-screen buffer only; nothing here may ever present.
+        graphicDriver->ChangeOptions().buffersNoSwap = Standard_True;
         Handle(V3d_Viewer) viewer = new V3d_Viewer(graphicDriver);
 		viewer->SetDefaultTypeOfView(V3d_PERSPECTIVE);
         Handle(V3d_DirectionalLight) lightDir = new V3d_DirectionalLight(V3d_Zneg, Quantity_Color(Quantity_NOC_WHITE), Standard_True);
@@ -16654,7 +16667,8 @@ void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
         context->Display(presentation, Standard_False);
         context->SetDisplayMode(presentation, AIS_Shaded, Standard_False);
         view->FitAll();
-        view->Redraw();
+        // No view->Redraw() here: it drew into the live viewport's renderbuffer.
+        // ToPixMap redraws into its own off-screen buffer of the asked size.
         // prepare pixmap image
         Image_AlienPixMap img;
         if (!view->ToPixMap(img, width, height))
