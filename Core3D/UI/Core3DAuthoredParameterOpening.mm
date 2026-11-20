@@ -1,3 +1,6 @@
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
+#include <sstream>
 #import "Core3DAuthoredParameterOpening.h"
 #import "../OCCTKit/GLViewController.h"
 #import "../Viewport/Core3DSceneSnapshot.h"
@@ -1499,6 +1502,38 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
         return @[@(point.X()), @(point.Y()), @(point.Z()),
                  @(direction.X()), @(direction.Y()), @(direction.Z())];
     } catch (...) { return nil; }
+}
+
+- (BOOL)showRampPreviewOnEntity:(NSString *)entity brepBytes:(NSData *)bytes {
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0
+        || ![bytes isKindOfClass:NSData.class] || bytes.length == 0)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        std::istringstream input(std::string(static_cast<const char *>(bytes.bytes), bytes.length));
+        input.imbue(std::locale::classic());
+        TopoDS_Shape shape; BRep_Builder builder;
+        BRepTools::Read(shape, input, builder);
+        if (shape.IsNull()) return NO;
+        const bool shown = viewer->showRampPreview(entity.UTF8String ?: "", shape);
+        if (shown) [gl requestRender];
+        return shown ? YES : NO;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)clearRampPreview {
+    if (![NSThread isMainThread]) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    if (!viewer) return NO;
+    const bool had = viewer->hasRampPreview();
+    const bool cleared = viewer->clearRampPreview();
+    if (had) [gl requestRender];
+    return cleared ? YES : NO;
 }
 
 - (BOOL)showHolePreviewOnEntity:(NSString *)entity
