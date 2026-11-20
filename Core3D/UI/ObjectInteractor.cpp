@@ -76,10 +76,13 @@ namespace core3d {
 // returned (0 = it made its copy), and why a source was or was not copied plain.
 int g_duplicateLastStep = 0;
 int g_duplicatePlainBits = 0;
+int g_duplicateFinishStep = 0;
 #if DEBUG
 #define CORE3D_DUPLICATE_STEP(n) (::core3d::g_duplicateLastStep = (n))
+#define CORE3D_DUPLICATE_FINISH(n) (::core3d::g_duplicateFinishStep = (n))
 #else
 #define CORE3D_DUPLICATE_STEP(n) ((void)0)
+#define CORE3D_DUPLICATE_FINISH(n) ((void)0)
 #endif
 	namespace {
 Standard_Boolean CaptureDuplicateFaceFinishes(
@@ -89,6 +92,7 @@ Standard_Boolean CaptureDuplicateFaceFinishes(
     std::vector<LinearArrayFaceFinish>& theFinishes) noexcept
 {
     theFinishes.clear();
+    CORE3D_DUPLICATE_FINISH(1);
     try {
         OCC_CATCH_SIGNALS
         const Handle(TDocStd_Document) theDocument = theOwner.IsNull()
@@ -110,6 +114,7 @@ Standard_Boolean CaptureDuplicateFaceFinishes(
         for (TDF_ChildIterator anItem(theDefinition, Standard_False);
              anItem.More(); anItem.Next()) {
             if (++aLabelCount > theMaximumLabels) {
+                CORE3D_DUPLICATE_FINISH(3);
                 return Standard_False;
             }
             const TDF_Label& aLabel = anItem.Value();
@@ -126,12 +131,21 @@ Standard_Boolean CaptureDuplicateFaceFinishes(
                 || (!aLayerTool.IsNull()
                     && aLayerTool->GetLayers(aLabel, aLayers)
                     && !aLayers.IsEmpty())) {
+#if DEBUG
+                g_duplicateFinishStep = aLabel.IsNull() ? 40
+                    : aColorTool.IsNull() ? 45
+                    : aColorTool->IsSet(aLabel, XCAFDoc_ColorGen) ? 41
+                    : aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf) ? 42
+                    : aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv) ? 43
+                    : !XCAFDoc_ColorTool::IsVisible(aLabel) ? 44 : 45;
+#endif
                 return Standard_False;
             }
             const auto aVisual = XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel);
             if (aVisual.IsNull()) continue;
             const TopoDS_Shape aFace = XCAFDoc_ShapeTool::GetShape(aLabel);
             XCAFDoc_VisMaterialPBR aPbr;
+            CORE3D_DUPLICATE_FINISH(5);
             if (aFace.IsNull() || aFace.ShapeType() != TopAbs_FACE
                 || !aShapeTool->IsSubShape(theDefinition, aFace)
                 || !theOwner->TryPBRMaterialForLabel(aLabel, aPbr)
@@ -144,6 +158,7 @@ Standard_Boolean CaptureDuplicateFaceFinishes(
             const auto isUnit = [](const double value) {
                 return std::isfinite(value) && value >= 0.0 && value <= 1.0;
             };
+            CORE3D_DUPLICATE_FINISH(6);
             const auto& aColor = aPbr.BaseColor.GetRGB();
             if (!isUnit(aColor.Red()) || !isUnit(aColor.Green())
                 || !isUnit(aColor.Blue()) || !isUnit(aPbr.Metallic)
@@ -158,18 +173,22 @@ Standard_Boolean CaptureDuplicateFaceFinishes(
             // SaveObjectPBRMaterials writes this canonical opaque scalar form.
             // Refuse imported/custom culling, alpha or Common definitions rather
             // than silently converting them during the independent copy.
+            CORE3D_DUPLICATE_FINISH(8);
             Handle(XCAFDoc_VisMaterial) aCanonical = new XCAFDoc_VisMaterial();
             aCanonical->SetPbrMaterial(aPbr);
             aCanonical->SetCommonMaterial(aCanonical->ConvertToCommonMaterial());
             aCanonical->SetAlphaMode(Graphic3d_AlphaMode_Opaque, 0.5f);
             aCanonical->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_Auto);
             if (!aVisual->IsEqual(aCanonical)) return Standard_False;
+            CORE3D_DUPLICATE_FINISH(9);
             for (const auto& anExisting : theFinishes)
                 if (anExisting.face.IsSame(aFace)) return Standard_False;
             theFinishes.push_back({aFace, aPbr});
         }
+        CORE3D_DUPLICATE_FINISH(100 + static_cast<int>(std::min<std::size_t>(theFinishes.size(), 899)));
         return Standard_True;
     } catch (...) {
+        CORE3D_DUPLICATE_FINISH(10);
         theFinishes.clear();
         return Standard_False;
     }
@@ -2114,6 +2133,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 							source.presentation->Shape(), shapeCopy))) {
 					return;
 				}
+                CORE3D_DUPLICATE_STEP(51);
 				// Duplicates must remain capable of drawing authored face
                 // materials immediately, before history rebuilds a CafShapePrs.
                 Handle(AIS_Shape) copy = new AIS_ColoredShape(shapeCopy.Shape());
@@ -2141,8 +2161,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 duplicate.sourceSavedCutCopiedPlain = source.savedCutCopiedPlain;
                 // Use the same canonical scalar-face contract as Repeat. The
                 // source and the copied face must both belong to these solids.
+                CORE3D_DUPLICATE_STEP(52);
                 if (!CaptureDuplicateFaceFinishes(myDoc, source.label,
                         profile::MaximumLabels, duplicate.originalFaceFinishes)) return;
+                CORE3D_DUPLICATE_STEP(53);
                 for (const auto& finish : duplicate.originalFaceFinishes) {
                     const auto copiedFace = shapeCopy.ModifiedShape(finish.face);
                     if (copiedFace.IsNull() || copiedFace.ShapeType() != TopAbs_FACE
@@ -2155,6 +2177,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                         if (previous.face.IsSame(copiedFace)) return;
                     duplicate.expectedFaceFinishes.push_back({copiedFace, finish.material});
                 }
+                CORE3D_DUPLICATE_STEP(54);
                 if (!source.savedProfile.label.IsNull()) {
                     duplicate.preparedProfileIdentifier = OcctDocument::NewProfileIdentifier();
                     if (!profile::IsIdentifier(duplicate.preparedProfileIdentifier)
