@@ -1262,7 +1262,17 @@ inline bool fileStable(BuildResult& result) noexcept {
             TopoDS_Shape next;
             std::vector<std::uint8_t> nextBytes;
             if (!binaryTrip(current, next) || !exactShapeBytes(next, nextBytes)) return false;
-            if (nextBytes == currentBytes) { result.solid = current; return true; }
+            if (nextBytes == currentBytes) {
+                // The tripped solid must still be the same valid solid (as PartBooleanBuild checks).
+                if (!BRepCheck_Analyzer(current, Standard_True).IsValid()) return false;
+                for (const TopAbs_ShapeEnum kind : {TopAbs_SOLID, TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+                    TopTools_IndexedMapOfShape before, after;
+                    TopExp::MapShapes(result.solid, kind, before);
+                    TopExp::MapShapes(current, kind, after);
+                    if (before.Extent() != after.Extent()) return false;
+                }
+                result.solid = current; return true;
+            }
             current = next; currentBytes.swap(nextBytes);
         }
         return false;

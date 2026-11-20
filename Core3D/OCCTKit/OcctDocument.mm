@@ -13138,9 +13138,12 @@ TopoDS_Shape WorkingCopy(const TopoDS_Shape& shape) noexcept {
     return copy;
 }
 
-bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
+bool BakedBooleanShapeOfManyCopies(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
     const std::vector<std::pair<TopoDS_Shape, gp_Trsf>>& toolsStored, int operation,
-    TopoDS_Shape& result, std::string& refusal, double* removedShare = nullptr) noexcept {
+    TopoDS_Shape& result, std::string& refusal, double* removedShare, bool fileCopies) noexcept {
+    const auto copyOf = [fileCopies](const TopoDS_Shape& shape) {
+        return fileCopies ? WorkingCopy(shape) : DetachedCopy(shape);
+    };
     try {
         OCC_CATCH_SIGNALS
         result.Nullify();
@@ -13161,15 +13164,15 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             }
         }
         const bool severalPieces = onlySolids && targetPieces >= 2;
-        const TopoDS_Shape targetShape = severalPieces ? WorkingCopy(stored)
-            : ExactResizedPrimitive(WorkingCopy(stored));
+        const TopoDS_Shape targetShape = severalPieces ? copyOf(stored)
+            : ExactResizedPrimitive(copyOf(stored));
         if (targetShape.IsNull() || (!severalPieces && targetShape.ShapeType() != TopAbs_SOLID)
             || operation < 0 || operation > 2)
             return false;
         TopTools_ListOfShape arguments, tools;
         arguments.Append(targetShape);
         for (const auto& [toolStored, toolPlacement] : toolsStored) {
-            const TopoDS_Shape toolShape = ExactResizedPrimitive(WorkingCopy(SingleSolidOf(toolStored)));
+            const TopoDS_Shape toolShape = ExactResizedPrimitive(copyOf(SingleSolidOf(toolStored)));
             if (toolShape.IsNull() || toolShape.ShapeType() != TopAbs_SOLID) return false;
             gp_Trsf toolToTarget = targetPlacement.Inverted();
             toolToTarget.Multiply(toolPlacement);
@@ -13281,6 +13284,21 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
         }
         return true;
     } catch (...) { refusal = "invalid-result"; result.Nullify(); return false; }
+}
+
+// The plain Join, Cut or Overlap first works on plain copies of the parts. Only when that attempt gives
+// no valid solid does it try once more on the file's own copies of any part whose plain copy is not a
+// valid solid (WorkingCopy; treasure chest R2-N01), so the extra exact check is paid only after a failure
+// (Fable engine review 3, item 4).
+bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
+    const std::vector<std::pair<TopoDS_Shape, gp_Trsf>>& toolsStored, int operation,
+    TopoDS_Shape& result, std::string& refusal, double* removedShare = nullptr) noexcept {
+    if (BakedBooleanShapeOfManyCopies(targetStored, targetPlacement, toolsStored, operation,
+            result, refusal, removedShare, false))
+        return true;
+    if (refusal != "invalid-result") return false;
+    return BakedBooleanShapeOfManyCopies(targetStored, targetPlacement, toolsStored, operation,
+        result, refusal, removedShare, true);
 }
 
 bool BakedBooleanShape(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
@@ -13825,8 +13843,11 @@ Standard_Boolean OcctDocument::BuildThroughHole(
         // App Store 5.34.1 and earlier stored a Union/Subtract result as a
         // compound around its one solid; a hole goes into that solid.
         // The plain copy can fail the exact check on a valid part (a cube with a joined rivet,
-        // Fable review 3 item 3): WorkingCopy then uses the file copy.
-        const TopoDS_Shape source = SingleSolidOf(WorkingCopy(XCAFDoc_ShapeTool::GetShape(label)));
+        // Fable review 3 item 3): then the file copy (WorkingCopy) is used.
+        TopoDS_Shape source = SingleSolidOf(DetachedCopy(XCAFDoc_ShapeTool::GetShape(label)));
+        if (!source.IsNull() && source.ShapeType() == TopAbs_SOLID
+            && !BRepCheck_Analyzer(source, Standard_True).IsValid())
+            source = SingleSolidOf(WorkingCopy(XCAFDoc_ShapeTool::GetShape(label)));
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
             || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
         return DrillRoundHole(source, start, direction, radius, depth, output, refusal);
@@ -14199,7 +14220,10 @@ Standard_Boolean OcctDocument::HoleEditSource(const TDF_Label& label, TopoDS_Sha
             }
         }
         const TopoDS_Shape stored = XCAFDoc_ShapeTool::GetShape(label);
-        source = SingleSolidOf(verified ? WorkingCopy(stored) : stored);
+        source = SingleSolidOf(verified ? DetachedCopy(stored) : stored);
+        if (verified && !source.IsNull() && source.ShapeType() == TopAbs_SOLID
+            && !BRepCheck_Analyzer(source, Standard_True).IsValid())
+            source = SingleSolidOf(WorkingCopy(stored));
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
             || (verified && !BRepCheck_Analyzer(source, Standard_True).IsValid())) {
             source.Nullify();
