@@ -925,8 +925,14 @@ ChamferInput ChamferInputWithoutFlatSeams(
 //! inside a face, for example) and the bevelled solid is kept as it was.
 TopoDS_Shape BevelledWithFlatSeamsRestored(
     const TopoDS_Shape& theBevelled,
-    const std::vector<TopoDS_Edge>& theSeams) noexcept
+    const std::vector<TopoDS_Edge>& theSeams,
+    const std::shared_ptr<std::atomic_bool>& theCancellation = nullptr) noexcept
 {
+    // Review 9 PP12: a preview the slider has already left stops trying.
+    const auto aCancelled = [&theCancellation]() {
+        return theCancellation != nullptr
+            && theCancellation->load(std::memory_order_relaxed);
+    };
     constexpr std::size_t kMaximumSeamsToRestore = 32;
     if (theBevelled.IsNull() || theSeams.empty()
         || theSeams.size() > kMaximumSeamsToRestore) {
@@ -1056,13 +1062,16 @@ TopoDS_Shape BevelledWithFlatSeamsRestored(
                 anAllSeams.Append(aSeam);
             }
         }
-        if (anAllSeams.Extent() > 1) {
+        if (anAllSeams.Extent() > 1 && !aCancelled()) {
             const TopoDS_Shape aTogether = aSplitWith(aCurrent, aFaces, anAllSeams);
             if (!aTogether.IsNull()) {
                 return aTogether;
             }
         }
         for (const TopoDS_Edge& aSeam : theSeams) {
+            if (aCancelled()) {
+                break;
+            }
             if (aSeam.IsNull()) {
                 continue;
             }
@@ -1581,7 +1590,8 @@ private:
                     if (!aCandidate.IsNull()
                         && !aChamferInput.seamsToRestore.empty()) {
                         aCandidate = BevelledWithFlatSeamsRestored(
-                            aCandidate, aChamferInput.seamsToRestore);
+                            aCandidate, aChamferInput.seamsToRestore,
+                            theRequest.cancellation);
                     }
                     // A slanted face's plane frame can flip between two
                     // last-digit versions on every save, so the part never
