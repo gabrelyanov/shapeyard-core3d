@@ -196,8 +196,10 @@ inline bool SameLocalIDs(const rectangular_loft::Definition& left,
 
 // A present-but-stale, malformed, composite, or retained-cut owner refuses.
 // plainSavedCutCopy: the caller has proven (CanBakeSavedCutForFaceEdit) that
-// the owner is a plain BRep whose only record is a standalone saved Hole; the
-// copy is then a plain solid (Family::None) and the source keeps its record.
+// the owner is a plain BRep whose only record is a standalone saved Hole, or
+// (CanBakeBooleanResultForFaceEdit, Duplicate only) an ordinary saved
+// Join/Cut/Overlap; the copy is then a plain solid (Family::None) and the
+// source keeps its record.
 // The legacy readers already require their binding and document units to be
 // current, so success is a usable transaction fence rather than a readable
 // historical recipe.
@@ -210,7 +212,11 @@ inline bool Capture(const Handle(TDocStd_Document)& document,
             || (retained_solid::HasRecord(owner) && !plainSavedCutCopy)
             || loft_correspondence::persistence::HasRecord(owner)) return false;
         Source value; value.owner = owner; value.ownerShape = XCAFDoc_ShapeTool::GetShape(owner);
-        value.plainSavedCutCopy = plainSavedCutCopy && retained_solid::HasRecord(owner);
+        const bool hasAnalyticBoolean = composite_recipe::HasRecord(owner);
+        const bool plainBooleanCopy = plainSavedCutCopy && hasAnalyticBoolean
+            && !retained_solid::HasRecord(owner);
+        value.plainSavedCutCopy = plainSavedCutCopy
+            && (retained_solid::HasRecord(owner) || plainBooleanCopy);
         if (value.ownerShape.IsNull()) return false;
         double carrierMetersPerUnit = 0;
         value.carrierLengthUnitPresent = XCAFDoc_DocumentTool::GetLengthUnit(
@@ -221,11 +227,11 @@ inline bool Capture(const Handle(TDocStd_Document)& document,
         }
         if (!sweep_persistence::Read(document, owner, value.sweep)
             || !loft_persistence::Read(document, owner, value.loft)) return false;
-        const bool hasAnalyticBoolean = composite_recipe::HasRecord(owner);
         const unsigned families = unsigned(hasAnalyticBoolean)
             + unsigned(!value.sweep.label.IsNull()) + unsigned(!value.loft.label.IsNull());
         if (families > 1) return false;
-        value.family = hasAnalyticBoolean ? Family::AnalyticBoolean
+        value.family = plainBooleanCopy ? Family::None
+            : hasAnalyticBoolean ? Family::AnalyticBoolean
             : !value.sweep.label.IsNull() ? Family::Sweep
             : !value.loft.label.IsNull() ? Family::Loft : Family::None;
         if (value.family == Family::None) {
