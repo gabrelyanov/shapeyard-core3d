@@ -1243,7 +1243,21 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     (void)[self tryCancelIntersect];
 }
 
+// Round 3 S5-F3: the history redraw rebuilds the engine's tools as None, so after Undo or Redo
+// of a scale-handle drag the part stayed selected with no handles and Delete and Duplicate went
+// grey. Give the still-selected part Scale again the way the Scale button does (setGizmoType).
+- (void)core3d_keepScaleAfterHistory:(BOOL)wasScale {
+    if (!wasScale || _currentGizmoType != PrimitiveGizmoTypeScale
+        || [GLController getGizmoType] != PrimitiveGizmoTypeNone
+        || GLController.viewer == nullptr
+        || GLController.viewer->getObjectInteractor() == nullptr
+        || !GLController.viewer->getObjectInteractor()->isSelected()) return;
+    [self setGizmoType:PrimitiveGizmoTypeScale];
+}
+
 - (void)undo {
+    const BOOL wasScale =
+        _currentGizmoType == PrimitiveGizmoTypeScale;
     const BOOL wasChamfer =
         _currentGizmoType == PrimitiveGizmoTypeChamfer;
     const BOOL wasExtrusion =
@@ -1255,6 +1269,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const BOOL wasRadialArray =
         _currentGizmoType == PrimitiveGizmoTypeRadialArray;
     [GLController undo];
+    [self core3d_keepScaleAfterHistory:wasScale];
     if (wasChamfer) {
         if (![GLController hasActiveBevel]
             && _currentGizmoType == PrimitiveGizmoTypeChamfer)
@@ -1354,6 +1369,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)redo {
+    const BOOL wasScale =
+        _currentGizmoType == PrimitiveGizmoTypeScale;
     const BOOL wasChamfer =
         _currentGizmoType == PrimitiveGizmoTypeChamfer;
     const BOOL wasExtrusion =
@@ -1365,6 +1382,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const BOOL wasRadialArray =
         _currentGizmoType == PrimitiveGizmoTypeRadialArray;
     [GLController redo];
+    [self core3d_keepScaleAfterHistory:wasScale];
     if (wasChamfer) {
         if (![GLController hasActiveBevel]
             && _currentGizmoType == PrimitiveGizmoTypeChamfer)
