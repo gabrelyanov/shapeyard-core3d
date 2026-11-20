@@ -42,6 +42,7 @@
 #include <TDF_Data.hxx>
 #include <TNaming_NamedShape.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -435,6 +436,12 @@ struct TransformInspectorBoundsKey {
 struct TransformInspectorBoundsValue {
     std::array<double, 6> bounds{};
     TransformInspectorVector3 localDimensions;
+    // Measure's floor size of the shape turned by exactly `floorRotation`
+    // (unscaled). The turn is not in the cache key: a transform-only edit
+    // keeps the own box, and a new turn only recomputes this floor box.
+    bool hasFloor = false;
+    TransformInspectorQuaternion floorRotation;
+    TransformInspectorVector3 floorLocalDimensions;
 };
 
 enum class TransformInspectorNegativeBoundsReason : std::uint8_t {
@@ -498,6 +505,65 @@ bool TryBoundsValue(
     }
 }
 
+// True when the turn is not made of quarter turns: then the part's own box
+// does not lie along the floor and Measure needs the turned shape's box.
+bool NeedsFloorBox(const TransformInspectorQuaternion& theTurn) noexcept
+{
+    const double aNorm = std::sqrt(theTurn.x * theTurn.x
+        + theTurn.y * theTurn.y + theTurn.z * theTurn.z
+        + theTurn.w * theTurn.w);
+    if (!std::isfinite(aNorm) || aNorm <= 1e-9) {
+        return false;
+    }
+    const double x = theTurn.x / aNorm, y = theTurn.y / aNorm,
+        z = theTurn.z / aNorm, w = theTurn.w / aNorm;
+    const double aMatrix[9] = {
+        1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+        2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+        2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
+    };
+    for (const double anEntry : aMatrix) {
+        const double aMagnitude = std::abs(anEntry);
+        if (aMagnitude > 1e-6 && std::abs(aMagnitude - 1) > 1e-6) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FloorBoxMatches(
+    const TransformInspectorBoundsValue& theBounds,
+    const TransformInspectorQuaternion& theTurn) noexcept
+{
+    return theBounds.hasFloor
+        && theBounds.floorRotation.x == theTurn.x
+        && theBounds.floorRotation.y == theTurn.y
+        && theBounds.floorRotation.z == theTurn.z
+        && theBounds.floorRotation.w == theTurn.w;
+}
+
+bool TryFloorRotation(
+    const TransformInspectorQuaternion& theTurn,
+    gp_Trsf& theRotation) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        const double aNorm = std::sqrt(theTurn.x * theTurn.x
+            + theTurn.y * theTurn.y + theTurn.z * theTurn.z
+            + theTurn.w * theTurn.w);
+        if (!std::isfinite(aNorm) || aNorm <= 1e-9) {
+            return false;
+        }
+        theRotation = gp_Trsf();
+        theRotation.SetRotation(gp_Quaternion(
+            theTurn.x / aNorm, theTurn.y / aNorm,
+            theTurn.z / aNorm, theTurn.w / aNorm));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool TryApplyBounds(
     const TransformInspectorBoundsValue& theBounds,
     TransformInspectorMeasurement& theMeasurement) noexcept
@@ -516,6 +582,22 @@ bool TryApplyBounds(
     theMeasurement.localBounds = theBounds.bounds;
     theMeasurement.localDimensions = theBounds.localDimensions;
     theMeasurement.dimensions = aDimensions;
+    theMeasurement.hasFloorDimensions = false;
+    theMeasurement.floorDimensions = {};
+    if (NeedsFloorBox(theMeasurement.quaternion)
+        && FloorBoxMatches(theBounds, theMeasurement.quaternion)) {
+        const TransformInspectorVector3 aFloor = {
+            theBounds.floorLocalDimensions.x * aScale,
+            theBounds.floorLocalDimensions.y * aScale,
+            theBounds.floorLocalDimensions.z * aScale,
+        };
+        if (std::isfinite(aFloor.x) && std::isfinite(aFloor.y)
+            && std::isfinite(aFloor.z) && aFloor.x >= 0.0
+            && aFloor.y >= 0.0 && aFloor.z >= 0.0) {
+            theMeasurement.floorDimensions = aFloor;
+            theMeasurement.hasFloorDimensions = true;
+        }
+    }
     return true;
 }
 
@@ -757,7 +839,8 @@ TriangleMeshSweepOutcome TrySweepTriangleMeshBounds(
     const Standard_Size theAdmittedNodeCount,
     const Standard_Real theWatchdogDeadlineMilliseconds,
     const Standard_Size theWatchdogPollNodes,
-    TransformInspectorBoundsValue& theValue) noexcept
+    TransformInspectorBoundsValue& theValue,
+    const TransformInspectorQuaternion* theFloorTurn = nullptr) noexcept
 {
     if (theShape.IsNull()) {
         return TriangleMeshSweepOutcome::Failed;
@@ -766,6 +849,10 @@ TriangleMeshSweepOutcome TrySweepTriangleMeshBounds(
         OCC_CATCH_SIGNALS
         const Clock::time_point aStart = Clock::now();
         Bnd_Box aBounds;
+        gp_Trsf aFloorRotation;
+        const bool wantsFloor = theFloorTurn != nullptr
+            && TryFloorRotation(*theFloorTurn, aFloorRotation);
+        Bnd_Box aFloorBounds;
         Standard_Size aFaceCount = 0;
         Standard_Size aNodeCount = 0;
         for (TopExp_Explorer aFaceItem(theShape, TopAbs_FACE);
@@ -798,6 +885,12 @@ TriangleMeshSweepOutcome TrySweepTriangleMeshBounds(
                     return TriangleMeshSweepOutcome::Failed;
                 }
                 aBounds.Update(aPoint.X(), aPoint.Y(), aPoint.Z());
+                if (wantsFloor) {
+                    const gp_Pnt aTurned =
+                        aPoint.Transformed(aFloorRotation);
+                    aFloorBounds.Update(
+                        aTurned.X(), aTurned.Y(), aTurned.Z());
+                }
                 ++aNodeCount;
                 if (theWatchdogPollNodes > 0
                     && aNodeCount % theWatchdogPollNodes == 0
@@ -809,10 +902,18 @@ TriangleMeshSweepOutcome TrySweepTriangleMeshBounds(
                 }
             }
         }
-        return aFaceCount > 0 && aNodeCount > 0
-            && TryBoundsValue(aBounds, theValue)
-            ? TriangleMeshSweepOutcome::Success
-            : TriangleMeshSweepOutcome::Failed;
+        if (aFaceCount == 0 || aNodeCount == 0
+            || !TryBoundsValue(aBounds, theValue)) {
+            return TriangleMeshSweepOutcome::Failed;
+        }
+        theValue.hasFloor = false;
+        TransformInspectorBoundsValue aFloorValue;
+        if (wantsFloor && TryBoundsValue(aFloorBounds, aFloorValue)) {
+            theValue.hasFloor = true;
+            theValue.floorRotation = *theFloorTurn;
+            theValue.floorLocalDimensions = aFloorValue.localDimensions;
+        }
+        return TriangleMeshSweepOutcome::Success;
     } catch (...) {
         return TriangleMeshSweepOutcome::Failed;
     }
@@ -1102,6 +1203,9 @@ enum class BoundsWorkerOutcome : std::uint8_t {
 struct TransformInspectorBoundsWorkerRequest {
     std::uint64_t generation = 0;
     TopoDS_Shape copiedShape;
+    // Measure's floor box: also bound the copy turned by this turn.
+    bool wantsFloor = false;
+    TransformInspectorQuaternion floorTurn;
     std::shared_ptr<std::atomic_bool> cancellation;
     bool forceFailure = false;
 };
@@ -1325,6 +1429,31 @@ private:
             if (!TryBoundsValue(aBounds, aResult.bounds)) {
                 aResult.outcome = BoundsWorkerOutcome::Failed;
                 return aResult;
+            }
+            aResult.bounds.hasFloor = false;
+            gp_Trsf aFloorRotation;
+            if (theRequest.wantsFloor
+                && TryFloorRotation(theRequest.floorTurn, aFloorRotation)) {
+                // A failed floor box keeps the own box: Measure then shows
+                // the part's own size, as before.
+                try {
+                    OCC_CATCH_SIGNALS
+                    const TopoDS_Shape aTurned = theRequest.copiedShape.Moved(
+                        TopLoc_Location(aFloorRotation));
+                    Bnd_Box aFloorBounds;
+                    BRepBndLib::AddOptimal(
+                        aTurned, aFloorBounds, Standard_False, Standard_False);
+                    WidenBoundsToFreeformFaceExtremes(aTurned, aFloorBounds);
+                    TransformInspectorBoundsValue aFloorValue;
+                    if (TryBoundsValue(aFloorBounds, aFloorValue)) {
+                        aResult.bounds.hasFloor = true;
+                        aResult.bounds.floorRotation = theRequest.floorTurn;
+                        aResult.bounds.floorLocalDimensions =
+                            aFloorValue.localDimensions;
+                    }
+                } catch (...) {
+                    aResult.bounds.hasFloor = false;
+                }
             }
             aResult.outcome = BoundsWorkerOutcome::Success;
             return aResult;
@@ -2068,8 +2197,11 @@ TransformInspectorMeasurementController::capture(
 #else
         constexpr bool forceBoundsFailure = false;
 #endif
+        const bool aWantsFloor = NeedsFloorBox(aMeasurement.quaternion);
         if (!forceBoundsFailure
-            && myImpl->lookup(aKey, aBounds)) {
+            && myImpl->lookup(aKey, aBounds)
+            && (!aWantsFloor
+                || FloorBoxMatches(aBounds, aMeasurement.quaternion))) {
             if (!TryApplyBounds(aBounds, aMeasurement)) {
                 aMeasurement.state =
                     TransformInspectorMeasurementState::Invalid;
@@ -2139,7 +2271,8 @@ TransformInspectorMeasurementController::capture(
                     anAdmittedMeshNodeCount,
                     aMeshWatchdogDeadlineMilliseconds,
                     aMeshWatchdogPollNodes,
-                    aBounds);
+                    aBounds,
+                    aWantsFloor ? &aMeasurement.quaternion : nullptr);
             }
             myImpl->lastMeshSweepMilliseconds =
                 MillisecondsSince(aStart);
@@ -2231,6 +2364,8 @@ TransformInspectorMeasurementController::capture(
         TransformInspectorBoundsWorkerRequest aRequest;
         aRequest.generation = aMeasurement.generation;
         aRequest.copiedShape = std::move(aCopiedShape);
+        aRequest.wantsFloor = aWantsFloor;
+        aRequest.floorTurn = aMeasurement.quaternion;
         aRequest.cancellation =
             std::make_shared<std::atomic_bool>(false);
         aRequest.forceFailure = forceBoundsFailure;
