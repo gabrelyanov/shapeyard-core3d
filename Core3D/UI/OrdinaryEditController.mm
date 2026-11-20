@@ -838,6 +838,13 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ||request.cut||request.cutSource||request.cutProgramEdit||request.inspectorPrimitiveKind!=0
                 ||!_document->CanBakeSavedCutForFaceEdit(request.label)))
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+            // A size change on a joined or cut part turns it into a plain part in the commit below
+            // (PrepareBooleanResultForFaceEdit). A recipe that cannot be baked that way (an edge
+            // treatment pair, a longer graph) is refused here, before anything lands (Fable review 4).
+            if(!request.bakeSavedCut&&request.operation==OrdinaryTransformOperation::Scale&&geometryChanges
+                &&_document->IsBooleanResultLabel(request.label)
+                &&!_document->CanBakeBooleanResultForFaceEdit(request.label))
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if(record.previous.retained.value&&!IsCylindricalCutOperation(request.operation)
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
