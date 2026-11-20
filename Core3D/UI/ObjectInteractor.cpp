@@ -2123,7 +2123,9 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 					: Standard_False);
 				// R2-N02: a joined part reopened from a file is a plain solid.
 				// Its plain deep copy can fail the strict BRep check its source
-				// passes; the two fallbacks below then copy it another way. A
+				// passes; the fallback below then copies it through the engine's
+				// exact binary form as new, independent topology, curves and
+				// surfaces (no copy shares geometry with its source). A
 				// copy that still fails the check is refused (Fable review 4):
 				// no unchecked solid is ever stored.
 				bool copyValid = source.representation
@@ -2133,23 +2135,8 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 					|| source.representation
 						!= OcctGeometryRepresentation::BRep
 					|| IsTopologicallyValid(source.presentation->Shape());
-				// R2-N02 (run editor-20261120-100554-5052, step 503): the
-				// deep copy of a valid reopened joined part can fail the
-				// check its source passes. Copy its faces and edges again
-				// over the source's own (unchanged, shared) curves and
-				// surfaces, which keeps the source's validity.
-				if (!copyValid && sourceValid) {
-					shapeCopy.Perform(source.presentation->Shape(),
-						Standard_False, Standard_False);
-					copyValid = shapeCopy.IsDone()
-						&& !shapeCopy.Shape().IsNull()
-						&& IsTopologicallyValid(shapeCopy.Shape());
-#if DEBUG
-					if (copyValid) g_duplicatePlainBits |= 64; // shared-geometry copy
-#endif
-				}
-				// R2-N02 (run editor-20261120-105844-56587: the shared-geometry
-				// copy failed too, step 503 again). The reopened part was read
+				// R2-N02 (runs editor-20261120-100554-5052 and -105844-56587,
+				// step 503: the plain deep copy fails). The reopened part was read
 				// from its file in the engine's binary form and passes there, so
 				// make the copy the same way: write the source's exact shape and
 				// read it back as new, independent topology. Faces correspond by
