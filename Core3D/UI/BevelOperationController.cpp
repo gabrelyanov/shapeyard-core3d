@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <iomanip>
@@ -76,6 +77,9 @@ struct BevelPreviewWorkerRequest {
         BevelOperationController::kMaxResultTopologyNodes;
     Standard_Size maximumResultSolids =
         BevelOperationController::kMaxResultSolids;
+    //! K11 (CTO 19 Nov 18:39): 0.1 mm in stored units, the step the HintLine
+    //! shows a named size in; 0 when the part's size is unknown.
+    Standard_Real namedSizeStep = 0.0;
 };
 
 struct BevelPreviewWorkerResult {
@@ -638,6 +642,12 @@ Standard_Boolean PlainBevelBuildsAt(
 //! *theLargestFitting (stored units; 0 when none was found). The search runs
 //! only when theLargestFitting is given (a round on one part), only after a
 //! refusal, never on a preview that works, and is cancellable like a preview.
+//! CTO 19 Nov 18:39 (Fable read of 5783a2a9): (b) the halvings stop once
+//! about a second has passed since the refusal and keep the best size found
+//! so far; (a) the size the HintLine shows is that size floored to
+//! theNamedSizeStep (0.1 mm), so that floored size is built once and named
+//! only if it builds; else one step down is tried (if time is left); else no
+//! size is named. With no step known the tested size is returned as before.
 BevelFailureKind ClassifyFailedPlainBevel(
     const BevelPreviewWorkerSource& theSource,
     const Standard_Real theDistance,
@@ -647,11 +657,17 @@ BevelFailureKind ClassifyFailedPlainBevel(
     const Standard_Size theSolidsBefore,
     const Standard_Size theMaximumNodes,
     const Standard_Size theMaximumSolids,
-    Standard_Real* theLargestFitting) noexcept
+    Standard_Real* theLargestFitting,
+    const Standard_Real theNamedSizeStep = 0.0) noexcept
 {
     if (theLargestFitting != nullptr) {
         *theLargestFitting = 0.0;
     }
+    const auto aDeadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(1000);
+    const auto aTimeLeft = [&aDeadline]() {
+        return std::chrono::steady_clock::now() < aDeadline;
+    };
     try {
         const Standard_Real aProbe = theDistance * 0.25;
         if (!PlainBevelBuildsAt(theSource, aProbe, theIsChamfer,
@@ -666,7 +682,8 @@ BevelFailureKind ClassifyFailedPlainBevel(
         Standard_Real aRefused = theDistance;
         for (int aStep = 0; aStep < 6; ++aStep) {
             if (theCancellation == nullptr
-                || theCancellation->load(std::memory_order_relaxed)) {
+                || theCancellation->load(std::memory_order_relaxed)
+                || !aTimeLeft()) {
                 break;
             }
             const Standard_Real aMiddle = 0.5 * (aFits + aRefused);
@@ -678,7 +695,31 @@ BevelFailureKind ClassifyFailedPlainBevel(
                 aRefused = aMiddle;
             }
         }
-        *theLargestFitting = aFits;
+        if (!(theNamedSizeStep > Precision::Confusion())
+            || !std::isfinite(theNamedSizeStep)) {
+            *theLargestFitting = aFits;
+            return BevelFailureKind::RadiusRefused;
+        }
+        // The size as the HintLine shows it: aFits floored to whole steps.
+        Standard_Real aShown =
+            std::floor(aFits / theNamedSizeStep + 1.0e-6) * theNamedSizeStep;
+        for (int aTry = 0; aTry < 2; ++aTry) {
+            if (aShown < theNamedSizeStep * (1.0 - 1.0e-6)
+                || theCancellation == nullptr
+                || theCancellation->load(std::memory_order_relaxed)
+                || (aTry > 0 && !aTimeLeft())) {
+                break;
+            }
+            if (std::abs(aShown - aFits)
+                    <= 1.0e-9 * std::max(Standard_Real(1.0), aFits)
+                || PlainBevelBuildsAt(theSource, aShown, theIsChamfer,
+                    theCancellation, theNodesBefore, theSolidsBefore,
+                    theMaximumNodes, theMaximumSolids)) {
+                *theLargestFitting = aShown;
+                return BevelFailureKind::RadiusRefused;
+            }
+            aShown -= theNamedSizeStep;
+        }
         return BevelFailureKind::RadiusRefused;
     } catch (...) {
         if (theLargestFitting != nullptr) {
@@ -1028,7 +1069,7 @@ private:
                                     aNodesBefore, aSolidsBefore,
                                     theRequest.maximumResultTopologyNodes,
                                     theRequest.maximumResultSolids,
-                                    aLargest);
+                                    aLargest, theRequest.namedSizeStep);
                             }
                             aResult.failureKind =
                                 BevelFailureKind::RadiusRefused;
@@ -1039,7 +1080,7 @@ private:
                                 aNodesBefore, aSolidsBefore,
                                 theRequest.maximumResultTopologyNodes,
                                 theRequest.maximumResultSolids,
-                                aLargest);
+                                aLargest, theRequest.namedSizeStep);
                         }
                         return aResult;
                     }
@@ -1073,7 +1114,8 @@ private:
                             theRequest.maximumResultSolids,
                             !isChamfer && theRequest.sources.size() == 1
                                 ? &aResult.largestFittingValue
-                                : nullptr);
+                                : nullptr,
+                            theRequest.namedSizeStep);
                     }
                     return aResult;
                 }
@@ -1705,6 +1747,15 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
         aRequest.fingerprint = aFingerprint;
         aRequest.retainedAdapter = myRetainedAdapter;
         aRequest.cancellation = std::make_shared<std::atomic_bool>(false);
+        {
+            // K11 (CTO 19 Nov 18:39): 0.1 mm as the person sees the part.
+            const Standard_Real aMetersPerUnit = bevelMetersPerUnit();
+            const Standard_Real aStep = std::isfinite(aMetersPerUnit)
+                    && aMetersPerUnit > 0.0
+                ? 0.0001 / aMetersPerUnit : 0.0;
+            aRequest.namedSizeStep = std::isfinite(aStep) && aStep > 0.0
+                ? aStep : 0.0;
+        }
 #ifdef DEBUG
         aRequest.maximumResultTopologyNodes =
             myDebugMaximumResultTopologyNodes;

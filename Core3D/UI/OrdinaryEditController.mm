@@ -2231,7 +2231,11 @@ OrdinaryEditResult OrdinaryEditController::reconcileVisibilityImpl() noexcept {
         }
         _committed = candidate;
         _state = OrdinaryEditState::RepairPending;
-        if (!_host.repairVisibility(ledger, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
+        // A failed in-place repair falls back to a full redraw of the closed
+        // document (as transforms do); only when both fail does the outcome
+        // stay unknown, so Show/Hide alone can no longer lock the editor.
+        if (!_host.repairVisibility(ledger, candidate)
+            && !_host.rebuildVisibility(ledger, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
         for (const auto& record : ledger.records) {
             if (!captureMatches(candidate ? record.candidate : record.previous)) {
                 _state = OrdinaryEditState::OutcomeUnknown;
