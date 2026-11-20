@@ -3878,19 +3878,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             manipulatorType =
                 PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray;
             break;
-        default: {
-            // Was assert(false): a tool with no engine twin closed the app.
-            // Now the engine keeps its tool and the screen is redrawn.
-            static BOOL loggedUnknownTool = NO;
-            if (!loggedUnknownTool) {
-                loggedUnknownTool = YES;
-                NSLog(@"Core3D setGizmoType: no engine tool for %ld; tool kept",
-                    (long)type);
-            }
-            [self checkSelections];
-            [self requestRender];
-            return;
-        }
+        default:
+            assert(false);
+            break;
     }
     _viewer->getObjectInteractor()->setManipulatorType(manipulatorType);
 	if (_viewer->getObjectInteractor()->getManipulatorType()
@@ -3999,16 +3989,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 }
 
 - (void)setChamfer:(CGFloat)value {
-    // Was assert(): a Bevel value that arrives after Bevel closed (a late
-    // slider event) closed the app. Now the value is ignored.
-    if ([self getGizmoType] != PrimitiveGizmoTypeChamfer) {
-        static BOOL loggedLateBevelValue = NO;
-        if (!loggedLateBevelValue) {
-            loggedLateBevelValue = YES;
-            NSLog(@"Core3D setChamfer: Bevel is not the tool; value ignored");
-        }
-        return;
-    }
+    assert([self getGizmoType] == PrimitiveGizmoTypeChamfer);
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
         [rawOwner core3d_setVisibleRawR2BevelValue:value];
@@ -7872,17 +7853,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         case ExportTypeStep:
             pathExtension = @"step";
             break;
-        default: {
-            // Was assert(false): an unknown export type closed the app. Now
-            // the export returns no file, which the app reports as failed.
-            static BOOL loggedUnknownExportName = NO;
-            if (!loggedUnknownExportName) {
-                loggedUnknownExportName = YES;
-                NSLog(@"[Export] no file type for export type %ld; nothing written",
-                    (long)exportType);
-            }
-            return nil;
-        }
+        default:
+            assert(false);
+            break;
     }
 
     NSString *exportFilename = [NSUUID.UUID.UUIDString
@@ -7919,17 +7892,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         case ExportTypeStep:
             _viewer->getShapeInteractor()->exportToStep(exportPath);
             break;
-        default: {
-            // Was assert(false): see the file-name switch above.
-            static BOOL loggedUnknownExportWriter = NO;
-            if (!loggedUnknownExportWriter) {
-                loggedUnknownExportWriter = YES;
-                NSLog(@"[Export] no writer for export type %ld; nothing written",
-                    (long)exportType);
-            }
-            removeExportArtifacts();
-            return nil;
-        }
+        default:
+            assert(false);
+            break;
     }
 
 
