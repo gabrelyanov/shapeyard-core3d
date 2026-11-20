@@ -730,15 +730,53 @@ ChamferInput ChamferInputWithoutFlatSeams(
     }
     try {
         OCC_CATCH_SIGNALS
+        // Fable engine review 6 P2 (CTO 20 Nov 18:40): only the selected seams
+        // go. Every edge the person did not select is kept, so no faces merge
+        // across it (a Split line or an unselected seam stays), and so is every
+        // vertex of such an edge, so it is never fused with a neighbour.
+        TopTools_MapOfShape aSelected;
+        for (const TopoDS_Edge& anEdge : theEdges) {
+            aSelected.Add(anEdge);
+        }
+        TopTools_IndexedMapOfShape anOriginalEdges;
+        TopExp::MapShapes(theShape, TopAbs_EDGE, anOriginalEdges);
+        TopTools_MapOfShape aKeep;
+        for (Standard_Integer anIndex = 1;
+             anIndex <= anOriginalEdges.Extent(); ++anIndex) {
+            const TopoDS_Shape& anOriginal = anOriginalEdges(anIndex);
+            if (aSelected.Contains(anOriginal)) {
+                continue;
+            }
+            aKeep.Add(anOriginal);
+            for (TopExp_Explorer aVertex(anOriginal, TopAbs_VERTEX);
+                 aVertex.More(); aVertex.Next()) {
+                aKeep.Add(aVertex.Current());
+            }
+        }
         ShapeUpgrade_UnifySameDomain aUnify(
             theShape, Standard_True, Standard_True, Standard_False);
         aUnify.AllowInternalEdges(Standard_False);
         aUnify.SetAngularTolerance(kFlatSeamAngularTolerance);
+        aUnify.KeepShapes(aKeep);
         aUnify.Build();
         const TopoDS_Shape aMerged = aUnify.Shape();
         if (aMerged.IsNull()
             || !BRepCheck_Analyzer(aMerged, Standard_True).IsValid()) {
             return anInput;
+        }
+        // Fable engine review 6 P3: the merge only removes seams, so the solid
+        // must hold the same volume; anything else and the merge is not used.
+        {
+            GProp_GProps aBefore;
+            GProp_GProps anAfter;
+            BRepGProp::VolumeProperties(theShape, aBefore);
+            BRepGProp::VolumeProperties(aMerged, anAfter);
+            const Standard_Real aSource = std::abs(aBefore.Mass());
+            if (!(aSource > 0.0)
+                || !(std::abs(std::abs(anAfter.Mass()) - aSource)
+                     <= 1.0e-9 * aSource)) {
+                return anInput;
+            }
         }
         TopTools_IndexedMapOfShape aMergedEdges;
         TopExp::MapShapes(aMerged, TopAbs_EDGE, aMergedEdges);
@@ -784,13 +822,9 @@ ChamferInput ChamferInputWithoutFlatSeams(
         }
         // Bevel what was selected: a merged edge that also grew out of an
         // edge the person did not select (one piece of a split edge chosen
-        // in Edge mode) would bevel the unselected piece too.
-        TopTools_MapOfShape aSelected;
-        for (const TopoDS_Edge& anEdge : theEdges) {
-            aSelected.Add(anEdge);
-        }
-        TopTools_IndexedMapOfShape anOriginalEdges;
-        TopExp::MapShapes(theShape, TopAbs_EDGE, anOriginalEdges);
+        // in Edge mode) would bevel the unselected piece too. With every
+        // unselected edge and its vertices kept this cannot happen any more;
+        // the test stays as a guard on the kernel's history.
         for (Standard_Integer anIndex = 1;
              anIndex <= anOriginalEdges.Extent(); ++anIndex) {
             const TopoDS_Shape& anOriginal = anOriginalEdges(anIndex);
