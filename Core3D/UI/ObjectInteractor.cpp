@@ -3064,7 +3064,8 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             for (const auto& anchor : anchors) proposals.push_back(anchor.Transformed(raw));
             Bnd_Box reach;
             for (const auto& proposed : proposals) reach.Add(proposed);
-            struct Target { std::string identifier; TopoDS_Shape world; Bnd_Box nearby; };
+            struct Target { std::string identifier; TopoDS_Shape world; Bnd_Box nearby;
+                std::optional<GeometrySnapTarget> snap; };
             std::vector<Target> targets;
             AIS_ListOfInteractive displayed;
             myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
@@ -3122,14 +3123,18 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     inPlay.push_back(proposed);
             }
             if (inPlay.size() > 64) return;
+            // Each reachable part's corners, edges, faces and their boxes are
+            // gathered once and reused for every moving corner of this drag
+            // step, so a corner skips the edges and faces it cannot reach.
+            for (auto& target : targets) target.snap = PrepareGeometrySnapTarget(target.world);
             gp_Vec correction;
             for (const auto& target : targets) {
                 for (const auto& proposed : inPlay) {
-                    if (target.nearby.IsOut(proposed)) continue;
+                    if (!target.snap || target.nearby.IsOut(proposed)) continue;
                     unsigned kinds = AllGeometrySnapKinds;
                     std::optional<GeometrySnapResult> hit;
                     for (int attempt = 0; attempt < 3; ++attempt) {
-                        hit = SnapPointToGeometry(target.world,proposed,
+                        hit = SnapPointToGeometry(*target.snap,proposed,
                             _geometrySnappingTolerance,kinds,axis);
                         if (!hit || hit->distance > Precision::Confusion()) break;
                         // Contact along the drag direction is not a positional
