@@ -1955,8 +1955,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 pattern_recipe_clone::Source sweepLoft;
                 // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is
                 // copied as a plain solid; the source keeps its record.
-                const bool savedCutCopiedPlain = retained_solid::HasRecord(label)
-                    && myDoc->CanBakeSavedCutForFaceEdit(label);
+                // R2-N02 (CTO 20 Nov 01:10): so is an ordinary joined part.
+                const bool savedCutCopiedPlain = (retained_solid::HasRecord(label)
+                        && myDoc->CanBakeSavedCutForFaceEdit(label))
+                    || (composite_recipe::HasRecord(label)
+                        && myDoc->CanBakeBooleanResultForFaceEdit(label));
                 if (!profile::Read(doc, label, savedProfile)
                     || !myDoc->CaptureObjectNameStateForLabel(label, name)
                     || !pattern_recipe_clone::Capture(doc, label, sweepLoft,
