@@ -6877,6 +6877,18 @@ Core3DViewer::commitTransformInspectorPosition(
         _objectInteractor, _shapeInteractor, theRequest, _ordinaryEditController,std::move(placementPermit)).result;
 }
 
+bool Core3DViewer::restoreTransformInspectorDisplayedAngles(
+    const std::string& entity, const std::string& definition,
+    const TransformInspectorVector3& angles,
+    const TransformInspectorQuaternion& quaternion) noexcept
+{
+    if (hasUnresolvedOrdinaryEdit() || _transformInspectorMeasurementController == nullptr) {
+        return false;
+    }
+    return _transformInspectorMeasurementController->restoreDisplayedAngles(
+        entity, definition, angles, quaternion);
+}
+
 void Core3DViewer::cancelTransformInspectorMeasurement() noexcept
 {
     if (_transformInspectorMeasurementController != nullptr) {
@@ -11433,6 +11445,88 @@ bool Core3DViewer::repairVisibility(const OrdinaryVisibilityLedger& ledger, bool
 #endif
         return true;
     } catch (...) { return false; }
+}
+
+bool Core3DViewer::rebuildVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept {
+    // R2-O01 (treasure chest): Show of a hidden group failed its in-place
+    // repair on every retry, so the editor stayed in recovery and Home could
+    // not save. Same bounded fallback as rebuildTransform: redraw the closed
+    // document, then prove every ledger object is drawn exactly as saved.
+    if (![NSThread isMainThread] || !_ordinaryEditController
+        || _ordinaryEditController->state() != OrdinaryEditState::RepairPending
+        || !_objectInteractor || !_shapeInteractor || myDoc.IsNull() || myContext.IsNull()
+        || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        || _shapeInteractor->getSelectionMode() != ledger.selectionMode
+        || ledger.selectionMode != ShapeSelectionMode::WholeShape
+        || ledger.records.empty() || ledger.records.size() > 1024) { return false; }
+#ifdef DEBUG
+    // Tests: a failed full redraw too keeps the outcome unknown until a retry.
+    if (_debugOrdinaryRedrawFailures > 0) { --_debugOrdinaryRedrawFailures; return false; }
+#endif
+    AIS_ListOfInteractive previousPresentations;
+    bool touchedDisplay = false;
+    try {
+        OCC_CATCH_SIGNALS
+        const auto document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()) { return false; }
+        // The caller has proven the closed result; recheck it before drawing.
+        for (const auto& record : ledger.records) {
+            const auto& expected = committed ? record.candidate : record.previous;
+            OcctObjectVisibilityState actual;
+            if (!myDoc->CaptureObjectVisibilityStateForLabel(expected.object.object.label, actual)
+                || !actual.IsEqual(expected)) { return false; }
+        }
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, previousPresentations);
+        touchedDisplay = true;
+        // The redraw replaces every presentation: the gizmo lets go of the old
+        // handles now and the same parts are selected again afterwards.
+        _objectInteractor->detachManipulator(false);
+        myContext->ClearDetected(Standard_False);
+        clearContext();
+#ifdef DEBUG
+        ++_debugOrdinaryRedrawAttempts;
+#endif
+        if (traverseDocument(document)) {
+            throw Standard_Failure("Unable to rebuild ordinary visibility presentations");
+        }
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        if (displayed.Extent() > 50000) { throw Standard_Failure("Visibility redraw budget exceeded"); }
+        for (const auto& record : ledger.records) {
+            const auto& expected = committed ? record.candidate : record.previous;
+            int matches = 0;
+            for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+                const auto shape = Handle(AIS_Shape)::DownCast(it.Value());
+                if (shape.IsNull() || !myDoc->ShapeLabel(shape).IsEqual(expected.object.object.label)) { continue; }
+                if (++matches > 1 || !myDoc->IsPresentationEditable(shape)) {
+                    throw Standard_Failure("Ambiguous visibility redraw object");
+                }
+            }
+            if (matches != (expected.IsEffectivelyVisible() ? 1 : 0)) {
+                throw Standard_Failure("Visibility redraw does not match the saved state");
+            }
+        }
+        if (!_shapeInteractor->selectionModeAuthorityIsExact()
+            || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+            || !_objectInteractor->reselectAfterOrdinaryVisibilityRedraw(ledger, committed)) {
+            throw Standard_Failure("Unable to restore visibility redraw selection");
+        }
+        myContext->UpdateCurrentViewer();
+        return true;
+    } catch (...) {}
+    if (!touchedDisplay) { return false; }
+    // Put the retained handles back; the controller stays RepairPending, so a
+    // partial restoration is never published.
+    try {
+        clearContext();
+        for (AIS_ListIteratorOfListOfInteractive it(previousPresentations); it.More(); it.Next()) {
+            if (!Handle(AIS_Shape)::DownCast(it.Value()).IsNull()) {
+                myContext->Display(it.Value(), Standard_False);
+            }
+        }
+        myContext->UpdateCurrentViewer();
+    } catch (...) {}
+    return false;
 }
 
 OrdinaryEditResult Core3DViewer::setObjectVisibilityFromBrowser(

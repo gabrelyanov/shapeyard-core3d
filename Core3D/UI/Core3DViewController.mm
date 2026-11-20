@@ -22916,6 +22916,26 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
     }
 }
 
+- (BOOL)restoreTransformInspectorDisplayedRotation:(simd_double3)degrees
+    forSnapshot:(Core3DTransformInspectorSnapshot *)snapshot {
+    if (![NSThread isMainThread] || snapshot == nil
+        || snapshot.state != Core3DTransformInspectorStateReady
+        || snapshot.entityIdentifier == nil || snapshot.definitionIdentifier == nil
+        || GLController == nil || GLController.viewer == nullptr) {
+        return NO;
+    }
+    try {
+        const simd_double4 q = snapshot.quaternionXYZW;
+        return GLController.viewer->restoreTransformInspectorDisplayedAngles(
+            std::string(snapshot.entityIdentifier.UTF8String),
+            std::string(snapshot.definitionIdentifier.UTF8String),
+            core3d::TransformInspectorVector3{degrees.x, degrees.y, degrees.z},
+            core3d::TransformInspectorQuaternion{q.x, q.y, q.z, q.w}) ? YES : NO;
+    } catch (...) {
+        return NO;
+    }
+}
+
 - (void)cancelTransformInspectorSnapshotRequest {
     if (![NSThread isMainThread]
         || GLController == nil || GLController.viewer == nullptr) {

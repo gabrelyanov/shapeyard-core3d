@@ -236,6 +236,15 @@ public:
     //! Invalidate the current generation and suppress its completion. Exact
     //! AddOptimal work already inside OCCT may finish and populate the cache.
     void cancelPendingMeasurement() noexcept;
+    //! K25: hand back the angles a person typed for this part in an earlier
+    //! session (the app keeps them with the project). They are kept only when
+    //! they make exactly `quaternion` (the part's turn in the caller's snapshot),
+    //! and capture shows them only while the stored turn still equals that turn.
+    //! Presentation only: no document, history or file change. Main thread.
+    bool restoreDisplayedAngles(const std::string& entity,
+        const std::string& definition,
+        const TransformInspectorVector3& angles,
+        const TransformInspectorQuaternion& quaternion) noexcept;
     //! Idempotent lifecycle endpoint used before releasing interactors/context.
     void shutdown() noexcept;
 
