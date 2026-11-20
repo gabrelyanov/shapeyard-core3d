@@ -6653,26 +6653,7 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
         if (changed && myDoc == document && document->Document() == nativeDocument) {
             const HistoryRedrawCheckedBits keepCheckedBits(nativeDocument);
             result.documentRedrawn = redrawDocument();
-            if (result.documentRedrawn) {
-                restoreHistorySelection();
-                // Scale keeps no operation ledger, but the redraw rebuilds the tools from the
-                // stateless list and drops it to None: the part stayed selected with no handles,
-                // and Delete and Duplicate went grey (round 3 S5-F3; Move kept its tool). Once
-                // the exact selection is back, give it Scale again and attach the handles.
-                if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeScale && _objectInteractor
-                    && _objectInteractor->getManipulatorType()
-                        == PrimitiveManipulatorType::PrimitiveGizmoTypeNone
-                    && _objectInteractor->isSelected()) {
-                    _objectInteractor->setManipulatorType(
-                        PrimitiveManipulatorType::PrimitiveGizmoTypeScale);
-                    if (_objectInteractor->getManipulatorType()
-                            == PrimitiveManipulatorType::PrimitiveGizmoTypeScale)
-                        restoreHistorySelection();
-                    if (!_objectInteractor->isManipulatorAttached())
-                        _objectInteractor->setManipulatorType(
-                            PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
-                }
-            }
+            if (result.documentRedrawn) restoreHistorySelection();
         }
     } else {
         // An extra Undo at the beginning must not forget selected parts that
