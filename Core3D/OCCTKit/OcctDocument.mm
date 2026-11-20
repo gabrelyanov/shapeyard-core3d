@@ -13824,7 +13824,9 @@ Standard_Boolean OcctDocument::BuildThroughHole(
         // byte-identical; building the hole can touch tolerances.
         // App Store 5.34.1 and earlier stored a Union/Subtract result as a
         // compound around its one solid; a hole goes into that solid.
-        const TopoDS_Shape source = SingleSolidOf(DetachedCopy(XCAFDoc_ShapeTool::GetShape(label)));
+        // The plain copy can fail the exact check on a valid part (a cube with a joined rivet,
+        // Fable review 3 item 3): WorkingCopy then uses the file copy.
+        const TopoDS_Shape source = SingleSolidOf(WorkingCopy(XCAFDoc_ShapeTool::GetShape(label)));
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
             || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
         return DrillRoundHole(source, start, direction, radius, depth, output, refusal);
@@ -14197,7 +14199,7 @@ Standard_Boolean OcctDocument::HoleEditSource(const TDF_Label& label, TopoDS_Sha
             }
         }
         const TopoDS_Shape stored = XCAFDoc_ShapeTool::GetShape(label);
-        source = SingleSolidOf(verified ? DetachedCopy(stored) : stored);
+        source = SingleSolidOf(verified ? WorkingCopy(stored) : stored);
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
             || (verified && !BRepCheck_Analyzer(source, Standard_True).IsValid())) {
             source.Nullify();
