@@ -14755,6 +14755,57 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     } catch (...) { return @{@"error": @"fixture-exception"}; }
 }
 
++ (NSDictionary<NSString *, id> *)debugGeometrySnapPrepareTimingForNodes:(NSInteger)nodes {
+    if (nodes < 1 || nodes > 65536) return @{@"error": @"fixture-input"};
+    try {
+        std::vector<TopoDS_Shape> parts;
+        std::size_t made = 0;
+        for (int part = 0; made < static_cast<std::size_t>(nodes); ++part) {
+            const double cx = 25.0 * (part % 16), cy = 25.0 * (part / 16);
+            BRepBuilderAPI_MakePolygon outline;
+            for (int side = 0; side < 32; ++side) {
+                const double angle = side * 2 * M_PI / 32;
+                outline.Add(gp_Pnt(cx + 10 * std::cos(angle),cy + 10 * std::sin(angle),0));
+            }
+            outline.Close();
+            BRepBuilderAPI_MakeFace face(outline.Wire());
+            if (!outline.IsDone() || !face.IsDone()) return @{@"error": @"fixture-shape"};
+            const auto prism = BRepPrimAPI_MakePrism(face.Face(),gp_Vec(0,0,5)).Shape();
+            TopTools_IndexedMapOfShape topology;
+            TopExp::MapShapes(prism,topology);
+            made += static_cast<std::size_t>(topology.Extent());
+            parts.push_back(prism);
+        }
+        gp_Trsf transform;
+        transform.SetTranslationPart(gp_Vec(1,2,3));
+        double fastest = std::numeric_limits<double>::infinity();
+        double fastestPrepare = std::numeric_limits<double>::infinity();
+        std::size_t counted = 0, prepared = 0;
+        for (int pass = 0; pass < 3; ++pass) {
+            double prepareSeconds = 0;
+            counted = 0; prepared = 0;
+            const auto start = std::chrono::steady_clock::now();
+            for (const auto& shape : parts) {
+                BRepBuilderAPI_Transform located(shape,transform,Standard_False);
+                if (!located.IsDone() || located.Shape().IsNull()) return @{@"error": @"fixture-locate"};
+                Bnd_Box nearby;
+                BRepBndLib::Add(located.Shape(),nearby);
+                TopTools_IndexedMapOfShape topology;
+                TopExp::MapShapes(shape,topology);
+                counted += static_cast<std::size_t>(topology.Extent());
+                const auto before = std::chrono::steady_clock::now();
+                const auto snap = core3d::PrepareGeometrySnapTarget(located.Shape());
+                prepareSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - before).count();
+                if (snap && !nearby.IsVoid()) ++prepared;
+            }
+            fastest = std::min(fastest,std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+            fastestPrepare = std::min(fastestPrepare,prepareSeconds);
+        }
+        return @{@"parts": @(parts.size()), @"prepared": @(prepared), @"nodes": @(counted),
+                 @"seconds": @(fastest), @"prepareSeconds": @(fastestPrepare)};
+    } catch (...) { return @{@"error": @"fixture-exception"}; }
+}
+
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData {
     return Core3DCreateDebugBinXCAFFixture(
         @"located-free-shape-fixture",
