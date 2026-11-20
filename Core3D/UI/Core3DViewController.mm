@@ -17984,6 +17984,21 @@ extern "C" int Core3DDebugMeshCopyRejectStage;
             static_cast<Standard_Integer>(steps));
 }
 
+- (void)retireModelingPlanHistory:(Core3DModelingPlanHistory *)history {
+    if (![history isKindOfClass:Core3DModelingPlanHistory.class]) return;
+    try { OcctDocument::RetireModelingPlanHistory(history->_historyWitness); } catch (...) {}
+    history->_historyWitness.reset();
+    history->_historyDocument.Nullify();
+    history->_historyViewer.reset();
+}
+
+- (NSInteger)pendingModelingPlanHistorySteps:(Core3DModelingPlanHistory *)history {
+    if (![self core3d_ownsModelingPlanHistory:history]) return -1;
+    try {
+        return history->_historyDocument->PendingModelingPlanHistorySteps(history->_historyWitness);
+    } catch (...) { return -1; }
+}
+
 - (BOOL)discardModelingPlanHistory:(Core3DModelingPlanHistory *)history {
     if (![self isModelingPlanHistoryCurrent:history]) return NO;
     try {

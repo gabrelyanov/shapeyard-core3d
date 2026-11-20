@@ -6649,15 +6649,20 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
         const Handle(TDocStd_Document) nativeDocument = document->Document();
         // AI disposal rechecks its exact history after synchronous presentation
         // work and immediately before invoking the document's ordinary Undo.
-        if (stillCurrent && !stillCurrent()) return result;
-        const bool changed = direction == NativeHistoryDirection::Undo
-            ? document->undo() : document->redo();
-        result.outcome = changed ? NativeHistoryOutcome::HistoryChanged
-                                 : NativeHistoryOutcome::HistoryFailed;
-        if (changed && myDoc == document && document->Document() == nativeDocument) {
-            const HistoryRedrawCheckedBits keepCheckedBits(nativeDocument);
-            result.documentRedrawn = redrawDocument();
-            if (result.documentRedrawn) restoreHistorySelection();
+        // Fable review 7, A2: when that recheck fails nothing is undone, but the
+        // manipulator was already detached and the selection prepared, so the
+        // common ending below still restores the Boolean tool and asks for the
+        // selection refresh and a render (outcome stays NoHistory).
+        if (!stillCurrent || stillCurrent()) {
+            const bool changed = direction == NativeHistoryDirection::Undo
+                ? document->undo() : document->redo();
+            result.outcome = changed ? NativeHistoryOutcome::HistoryChanged
+                                     : NativeHistoryOutcome::HistoryFailed;
+            if (changed && myDoc == document && document->Document() == nativeDocument) {
+                const HistoryRedrawCheckedBits keepCheckedBits(nativeDocument);
+                result.documentRedrawn = redrawDocument();
+                if (result.documentRedrawn) restoreHistorySelection();
+            }
         }
     } else {
         // An extra Undo at the beginning must not forget selected parts that

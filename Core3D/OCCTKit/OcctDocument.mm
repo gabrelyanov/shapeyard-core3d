@@ -31845,6 +31845,7 @@ class OcctModelingPlanHistory {
     Handle(TDocStd_Document) document;
     std::vector<Handle(TDF_Delta)> originalUndos, undos, redos;
     bool retired = false;
+    bool planStepDropped = false; // The Undo limit dropped one of this plan's own steps.
 };
 
 namespace {
@@ -31859,6 +31860,27 @@ bool SameModelingHistory(const TDF_DeltaList& list,
         if (delta.IsNull() || delta != *item++) return false;
     }
     return true;
+}
+// Fable review 7, A1: at the Undo limit OCAF drops the OLDEST delta for each
+// new commit, so the head of the list moves. The newest part of what the plan
+// saw must still be exactly the start of today's list (same delta objects),
+// followed only by new deltas. Returns the number of new deltas (and how many
+// old ones were dropped), or -1 when the list is not such an extension. A drop
+// is admitted only when the list is exactly at the limit.
+Standard_Integer ModelingHistoryAppended(const std::vector<Handle(TDF_Delta)>& expected,
+                                         const std::vector<Handle(TDF_Delta)>& now,
+                                         Standard_Integer limit, std::size_t& dropped) {
+    dropped = 0;
+    for (const auto& delta : now) if (delta.IsNull()) return -1;
+    if (expected.empty()) return static_cast<Standard_Integer>(now.size());
+    const auto newest = std::find(now.rbegin(), now.rend(), expected.back());
+    if (newest == now.rend()) return -1;
+    const std::size_t kept = static_cast<std::size_t>(now.rend() - newest); // through expected.back()
+    if (kept > expected.size()) return -1;
+    dropped = expected.size() - kept;
+    if (dropped > 0 && (limit <= 0 || now.size() != static_cast<std::size_t>(limit))) return -1;
+    if (!std::equal(expected.begin() + dropped, expected.end(), now.begin())) return -1;
+    return static_cast<Standard_Integer>(now.size() - kept);
 }
 }
 
@@ -31900,12 +31922,42 @@ bool OcctDocument::AcceptModelingPlanHistory(
             || NativeBooleanOwnerBlocksOtherWork() || HasUnresolvedTreatmentHistoryCompanion()
             || committedSteps < 1 || committedSteps > 128 || !myOcafDoc->GetRedos().IsEmpty()) return false;
         const auto now = ModelingHistoryDeltas(myOcafDoc->GetUndos());
-        if (now.size() != history->undos.size() + committedSteps
-            || !std::equal(history->undos.begin(), history->undos.end(), now.begin())) return false;
+        std::size_t dropped = 0;
+        if (ModelingHistoryAppended(history->undos, now, myOcafDoc->GetUndoLimit(), dropped)
+            != committedSteps) return false;
+        // The deltas the limit dropped are gone for good: the cleanup can only
+        // return to the oldest state still in the list. If a dropped delta was
+        // one of this plan's own steps, no cleanup can restore the start.
+        if (dropped > history->originalUndos.size()) history->planStepDropped = true;
+        history->originalUndos.erase(history->originalUndos.begin(),
+            history->originalUndos.begin() + std::min(dropped, history->originalUndos.size()));
         history->undos = now;
         history->redos.clear();
         return true;
     } catch (...) { return false; }
+}
+
+void OcctDocument::RetireModelingPlanHistory(
+    const std::shared_ptr<OcctModelingPlanHistory>& history) noexcept {
+    if (!history) return;
+    history->retired = true;
+    history->owner = nullptr;
+    history->document.Nullify();
+    std::vector<Handle(TDF_Delta)>().swap(history->originalUndos);
+    std::vector<Handle(TDF_Delta)>().swap(history->undos);
+    std::vector<Handle(TDF_Delta)>().swap(history->redos);
+}
+
+Standard_Integer OcctDocument::PendingModelingPlanHistorySteps(
+    const std::shared_ptr<OcctModelingPlanHistory>& history) const noexcept {
+    try {
+        if (![NSThread isMainThread] || !history || history->retired || history->owner != this
+            || myOcafDoc.IsNull() || history->document != myOcafDoc || myOcafDoc->HasOpenCommand()
+            || !myOcafDoc->GetRedos().IsEmpty()) return -1;
+        std::size_t dropped = 0;
+        return ModelingHistoryAppended(history->undos, ModelingHistoryDeltas(myOcafDoc->GetUndos()),
+            myOcafDoc->GetUndoLimit(), dropped);
+    } catch (...) { return -1; }
 }
 
 bool OcctDocument::DiscardModelingPlanHistory(
@@ -31915,7 +31967,7 @@ bool OcctDocument::DiscardModelingPlanHistory(
         if (!IsModelingPlanHistoryCurrent(history) || !undoVerified) return false;
         history->retired = true; // Single-use, including reentrant notifications or failed Undo.
         if (history->undos == history->originalUndos) return true; // Preserve preexisting user Redo.
-        if (!history->redos.empty()) return false;
+        if (!history->redos.empty() || history->planStepDropped) return false;
         auto remaining = history->undos;
         std::vector<Handle(TDF_Delta)> inverses;
         const auto unchangedOwner = [&] {
