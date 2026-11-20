@@ -32,6 +32,14 @@
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_Line.hxx>
 #include <Geom2d_Conic.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <Geom_OffsetCurve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2d_OffsetCurve.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_OffsetSurface.hxx>
+#include <Geom_SurfaceOfLinearExtrusion.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_ElementarySurface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
@@ -364,9 +372,127 @@ namespace core3d {
 				&& buffer.size() < kMaximumExtrusionWorkingShapeBytes;
 		}
 
+		// BinTools rebuilds every gp_Dir / gp_Dir2d it reads and re-normalises it,
+		// which can change the last bit of a slanted direction. These restore the
+		// detached copy's frames by value from the source, through trimmed and
+		// offset wrappers, so the raw V3 proof can pass. A type mismatch (or a
+		// shared handle) is a refusal; unknown leaf types are left to the proof.
+		Standard_Boolean RestoreDetachedCurveFrame(
+			const Handle(Geom_Curve)& original,
+			const Handle(Geom_Curve)& copied,
+			Standard_Integer depth = 0) {
+			if (original.IsNull() && copied.IsNull()) return Standard_True;
+			if (original.IsNull() || copied.IsNull() || copied == original
+				|| copied->DynamicType() != original->DynamicType()
+				|| depth > 8) {
+				return Standard_False;
+			}
+			if (!Handle(Geom_Line)::DownCast(original).IsNull()) {
+				const Handle(Geom_Line) line = Handle(Geom_Line)::DownCast(original);
+				Handle(Geom_Line)::DownCast(copied)->SetPosition(line->Position());
+			} else if (!Handle(Geom_Conic)::DownCast(original).IsNull()) {
+				const Handle(Geom_Conic) conic = Handle(Geom_Conic)::DownCast(original);
+				Handle(Geom_Conic)::DownCast(copied)->SetPosition(conic->Position());
+			} else if (!Handle(Geom_TrimmedCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom_TrimmedCurve) trimmed = Handle(Geom_TrimmedCurve)::DownCast(original);
+				return RestoreDetachedCurveFrame(
+					trimmed->BasisCurve(),
+					Handle(Geom_TrimmedCurve)::DownCast(copied)->BasisCurve(),
+					depth + 1);
+			} else if (!Handle(Geom_OffsetCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom_OffsetCurve) offset = Handle(Geom_OffsetCurve)::DownCast(original);
+				const Handle(Geom_OffsetCurve) copiedOffset =
+					Handle(Geom_OffsetCurve)::DownCast(copied);
+				copiedOffset->SetDirection(offset->Direction());
+				return RestoreDetachedCurveFrame(
+					offset->BasisCurve(), copiedOffset->BasisCurve(), depth + 1);
+			}
+			return Standard_True;
+		}
+
+		Standard_Boolean RestoreDetachedCurve2dFrame(
+			const Handle(Geom2d_Curve)& original,
+			const Handle(Geom2d_Curve)& copied,
+			Standard_Integer depth = 0) {
+			if (original.IsNull() && copied.IsNull()) return Standard_True;
+			if (original.IsNull() || copied.IsNull() || copied == original
+				|| copied->DynamicType() != original->DynamicType()
+				|| depth > 8) {
+				return Standard_False;
+			}
+			if (!Handle(Geom2d_Line)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_Line) line = Handle(Geom2d_Line)::DownCast(original);
+				Handle(Geom2d_Line)::DownCast(copied)->SetPosition(line->Position());
+			} else if (!Handle(Geom2d_Conic)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_Conic) conic = Handle(Geom2d_Conic)::DownCast(original);
+				Handle(Geom2d_Conic)::DownCast(copied)->SetAxis(conic->Position());
+			} else if (!Handle(Geom2d_TrimmedCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_TrimmedCurve) trimmed = Handle(Geom2d_TrimmedCurve)::DownCast(original);
+				return RestoreDetachedCurve2dFrame(
+					trimmed->BasisCurve(),
+					Handle(Geom2d_TrimmedCurve)::DownCast(copied)->BasisCurve(),
+					depth + 1);
+			} else if (!Handle(Geom2d_OffsetCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_OffsetCurve) offset = Handle(Geom2d_OffsetCurve)::DownCast(original);
+				return RestoreDetachedCurve2dFrame(
+					offset->BasisCurve(),
+					Handle(Geom2d_OffsetCurve)::DownCast(copied)->BasisCurve(),
+					depth + 1);
+			}
+			return Standard_True;
+		}
+
+		Standard_Boolean RestoreDetachedSurfaceFrame(
+			const Handle(Geom_Surface)& original,
+			const Handle(Geom_Surface)& copied,
+			Standard_Integer depth = 0) {
+			if (original.IsNull() && copied.IsNull()) return Standard_True;
+			if (original.IsNull() || copied.IsNull() || copied == original
+				|| copied->DynamicType() != original->DynamicType()
+				|| depth > 8) {
+				return Standard_False;
+			}
+			if (!Handle(Geom_ElementarySurface)::DownCast(original).IsNull()) {
+				const Handle(Geom_ElementarySurface) elementary = Handle(Geom_ElementarySurface)::DownCast(original);
+				Handle(Geom_ElementarySurface)::DownCast(copied)
+					->SetPosition(elementary->Position());
+			} else if (!Handle(Geom_RectangularTrimmedSurface)::DownCast(original).IsNull()) {
+				const Handle(Geom_RectangularTrimmedSurface) trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(original);
+				return RestoreDetachedSurfaceFrame(
+					trimmed->BasisSurface(),
+					Handle(Geom_RectangularTrimmedSurface)::DownCast(copied)
+						->BasisSurface(),
+					depth + 1);
+			} else if (!Handle(Geom_OffsetSurface)::DownCast(original).IsNull()) {
+				const Handle(Geom_OffsetSurface) offset = Handle(Geom_OffsetSurface)::DownCast(original);
+				return RestoreDetachedSurfaceFrame(
+					offset->BasisSurface(),
+					Handle(Geom_OffsetSurface)::DownCast(copied)->BasisSurface(),
+					depth + 1);
+			} else if (!Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(original).IsNull()) {
+				const Handle(Geom_SurfaceOfLinearExtrusion) extrusion = Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(original);
+				const Handle(Geom_SurfaceOfLinearExtrusion) copiedExtrusion =
+					Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(copied);
+				copiedExtrusion->SetDirection(extrusion->Direction());
+				return RestoreDetachedCurveFrame(
+					extrusion->BasisCurve(), copiedExtrusion->BasisCurve(),
+					depth + 1);
+			} else if (!Handle(Geom_SurfaceOfRevolution)::DownCast(original).IsNull()) {
+				const Handle(Geom_SurfaceOfRevolution) revolution = Handle(Geom_SurfaceOfRevolution)::DownCast(original);
+				const Handle(Geom_SurfaceOfRevolution) copiedRevolution =
+					Handle(Geom_SurfaceOfRevolution)::DownCast(copied);
+				copiedRevolution->SetAxis(revolution->Axis());
+				return RestoreDetachedCurveFrame(
+					revolution->BasisCurve(), copiedRevolution->BasisCurve(),
+					depth + 1);
+			}
+			return Standard_True;
+		}
+
 		// Debug evidence only: names the V3 section where the detached copy first
 		// differs from the source (71 locations, 72 2D curves, 73 3D curves,
-		// 74 polygons, 75 surfaces, 76 triangulations, 77 shapes, 78 length).
+		// 74 polygons, 75 surfaces, 76 triangulations, 77 shapes, 78 length;
+		// 72x/73x/75x add the type number of the record that differs).
 		Standard_Integer ExtrusionCommitmentMismatchStage(
 			const ExtrusionGeometryBuffer& source,
 			const ExtrusionGeometryBuffer& working) {
@@ -391,6 +517,17 @@ namespace core3d {
 					&& (best == std::string::npos || at > best)) {
 					best = at;
 					stage = 71 + index;
+				}
+			}
+			// In the 2D curve, 3D curve and surface tables each record starts
+			// on its own line with its type number: report 7xx = section, type.
+			if (stage == 72 || stage == 73 || stage == 75) {
+				const std::size_t lineStart = prefix.rfind('\n');
+				if (lineStart != std::string::npos && lineStart + 1 < source.size()) {
+					const char type = source.data()[lineStart + 1];
+					if (type >= '1' && type <= '9') {
+						stage = stage * 10 + (type - '0');
+					}
 				}
 			}
 			return stage;
@@ -562,18 +699,30 @@ namespace core3d {
                 for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
                     TopLoc_Location sourceLocation, workingLocation;
                     Standard_Real first = 0, last = 0;
-                    const auto original = Handle(Geom_Line)::DownCast(
-                        BRep_Tool::Curve(TopoDS::Edge(sourceEdges(index)), sourceLocation, first, last));
+                    const Handle(Geom_Curve) original =
+                        BRep_Tool::Curve(TopoDS::Edge(sourceEdges(index)), sourceLocation, first, last);
                     if (original.IsNull()) continue;
-                    const auto copied = Handle(Geom_Line)::DownCast(
-                        BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last));
-                    if (copied.IsNull() || copied == original) {
+                    const Handle(Geom_Curve) copied =
+                        BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last);
+                    if (!RestoreDetachedCurveFrame(original, copied)) {
                         workingSource.Nullify();
                         workingFace.Nullify();
                         failureStage = 67;
                         return Standard_False;
                     }
-                    copied->SetPosition(original->Position());
+                }
+                for (Standard_Integer index = 1; index <= sourceFaces.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    const Handle(Geom_Surface) original = BRep_Tool::Surface(
+                        TopoDS::Face(sourceFaces(index)), sourceLocation);
+                    if (original.IsNull()) continue;
+                    if (!RestoreDetachedSurfaceFrame(original, BRep_Tool::Surface(
+                            TopoDS::Face(workingFaces(index)), workingLocation))) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 66;
+                        return Standard_False;
+                    }
                 }
                 for (Standard_Integer index = 1; index <= sourceFaces.Extent(); ++index) {
                     const TopoDS_Face& sourceFace = TopoDS::Face(sourceFaces(index));
@@ -598,19 +747,12 @@ namespace core3d {
                         if (original.IsNull() || !sourceStored) continue;
                         const Handle(Geom2d_Curve) copied = BRep_Tool::CurveOnSurface(
                             workingFaceEdge, detachedFace, first, last, &workingStored);
-                        if (copied.IsNull() || !workingStored || copied == original
-                            || copied->DynamicType() != original->DynamicType()) {
+                        if (!workingStored
+                            || !RestoreDetachedCurve2dFrame(original, copied)) {
                             workingSource.Nullify();
                             workingFace.Nullify();
                             failureStage = 69;
                             return Standard_False;
-                        }
-                        const Handle(Geom2d_Line) line = Handle(Geom2d_Line)::DownCast(original);
-                        const Handle(Geom2d_Conic) conic = Handle(Geom2d_Conic)::DownCast(original);
-                        if (!line.IsNull()) {
-                            Handle(Geom2d_Line)::DownCast(copied)->SetPosition(line->Position());
-                        } else if (!conic.IsNull()) {
-                            Handle(Geom2d_Conic)::DownCast(copied)->SetAxis(conic->Position());
                         }
                     }
                     if (sourceEdge.More() || workingEdge.More()) {
