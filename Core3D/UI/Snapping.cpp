@@ -127,7 +127,17 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
 std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
     const GeometrySnapTarget& prepared, const gp_Pnt& point, double tolerance,
     unsigned kinds, const std::optional<gp_Dir>& axis) noexcept {
+    return SnapPointToGeometry(prepared,point,tolerance,kinds,axis,nullptr);
+}
+
+std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
+    const GeometrySnapTarget& prepared, const gp_Pnt& point, double tolerance,
+    unsigned kinds, const std::optional<gp_Dir>& axis, const GeometrySnapPieces* only) noexcept {
     const TopoDS_Shape& target = prepared.shape;
+    // A piece the caller's budget left out is not measured (corners always are).
+    const auto leftOut = [only](std::vector<int> GeometrySnapPieces::* list, int index) {
+        return only && !std::binary_search((only->*list).begin(),(only->*list).end(),index);
+    };
     const auto finitePoint = [](const gp_Pnt& p) {
         return std::isfinite(p.X()) && std::isfinite(p.Y()) && std::isfinite(p.Z());
     };
@@ -293,7 +303,8 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
         if (enabled(GeometrySnapKind::EdgeMidpoint) || enabled(GeometrySnapKind::Edge)) {
             for (int index = 1; index <= edges.Extent(); ++index) {
                 const auto edge = TopoDS::Edge(edges(index));
-                if (BRep_Tool::Degenerated(edge) || outOfReach(prepared.edgeBoxes,index)) continue;
+                if (BRep_Tool::Degenerated(edge) || outOfReach(prepared.edgeBoxes,index)
+                    || leftOut(&GeometrySnapPieces::edges,index)) continue;
                 if (enabled(GeometrySnapKind::EdgeMidpoint)) {
                     using Midpoint = GeometrySnapCache::Midpoint;
                     Midpoint state = Midpoint::Unknown;
@@ -332,7 +343,7 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
         }
         if (enabled(GeometrySnapKind::Face)) {
             for (int index = 1; index <= faces.Extent(); ++index)
-                if (!outOfReach(prepared.faceBoxes,index))
+                if (!outOfReach(prepared.faceBoxes,index) && !leftOut(&GeometrySnapPieces::faces,index))
                     closest(faces(index),GeometrySnapKind::Face,index);
         }
         return best;
