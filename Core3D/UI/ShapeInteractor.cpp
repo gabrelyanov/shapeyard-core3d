@@ -364,6 +364,38 @@ namespace core3d {
 				&& buffer.size() < kMaximumExtrusionWorkingShapeBytes;
 		}
 
+		// Debug evidence only: names the V3 section where the detached copy first
+		// differs from the source (71 locations, 72 2D curves, 73 3D curves,
+		// 74 polygons, 75 surfaces, 76 triangulations, 77 shapes, 78 length).
+		Standard_Integer ExtrusionCommitmentMismatchStage(
+			const ExtrusionGeometryBuffer& source,
+			const ExtrusionGeometryBuffer& working) {
+			const std::size_t length = std::min(source.size(), working.size());
+			std::size_t mismatch = 0;
+			while (mismatch < length
+				&& source.data()[mismatch] == working.data()[mismatch]) {
+				++mismatch;
+			}
+			if (mismatch == length) {
+				return 78;
+			}
+			const std::string prefix(source.data(), mismatch);
+			const char* names[] = {
+				"\nLocations", "\nCurve2ds", "\nCurves", "\nPolygon", "\nSurfaces",
+				"\nTriangulations", "\nTShapes"};
+			Standard_Integer stage = 77;
+			std::size_t best = std::string::npos;
+			for (Standard_Integer index = 0; index < 7; ++index) {
+				const std::size_t at = prefix.rfind(names[index]);
+				if (at != std::string::npos
+					&& (best == std::string::npos || at > best)) {
+					best = at;
+					stage = 71 + index;
+				}
+			}
+			return stage;
+		}
+
 		Standard_Boolean DetachExtrusionSource(
 			const TopoDS_Shape& source,
 			const TopoDS_Face& selectedFace,
@@ -415,7 +447,7 @@ namespace core3d {
 				if (!writer.good() || transfer.size() == 0
 					|| transfer.size()
 						>= kMaximumExtrusionWorkingShapeBytes) {
-					failureStage = 11;
+					failureStage = 61;
 					return Standard_False;
 				}
 				transfer.prepareToRead();
@@ -425,7 +457,7 @@ namespace core3d {
 				if (!reader.good() || workingSource.IsNull()
 					|| workingSource.IsSame(source)) {
 					workingSource.Nullify();
-					failureStage = 11;
+					failureStage = 62;
 					return Standard_False;
 				}
 
@@ -439,7 +471,7 @@ namespace core3d {
 					|| workingCount != sourceCount
 					|| workingSolidCount != sourceSolidCount) {
 					workingSource.Nullify();
-					failureStage = 11;
+					failureStage = 63;
 					return Standard_False;
 				}
 				TopTools_IndexedMapOfShape workingFaces;
@@ -473,7 +505,7 @@ namespace core3d {
                 if (sourceEdges.Extent() != workingEdges.Extent()) {
                     workingSource.Nullify();
                     workingFace.Nullify();
-                    failureStage = 11;
+                    failureStage = 64;
                     return Standard_False;
                 }
                 for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
@@ -488,7 +520,7 @@ namespace core3d {
                         || copied->DynamicType() != original->DynamicType()) {
                         workingSource.Nullify();
                         workingFace.Nullify();
-                        failureStage = 11;
+                        failureStage = 65;
                         return Standard_False;
                     }
                     copied->SetPosition(original->Position());
@@ -513,7 +545,7 @@ namespace core3d {
                         || copied->DynamicType() != original->DynamicType()) {
                         workingSource.Nullify();
                         workingFace.Nullify();
-                        failureStage = 11;
+                        failureStage = 66;
                         return Standard_False;
                     }
                     copied->SetPosition(original->Position());
@@ -538,7 +570,7 @@ namespace core3d {
                     if (copied.IsNull() || copied == original) {
                         workingSource.Nullify();
                         workingFace.Nullify();
-                        failureStage = 11;
+                        failureStage = 67;
                         return Standard_False;
                     }
                     copied->SetPosition(original->Position());
@@ -555,7 +587,7 @@ namespace core3d {
                         if (sourceFaceEdge.Orientation() != workingFaceEdge.Orientation()) {
                             workingSource.Nullify();
                             workingFace.Nullify();
-                            failureStage = 11;
+                            failureStage = 68;
                             return Standard_False;
                         }
                         Standard_Real first = 0, last = 0;
@@ -570,7 +602,7 @@ namespace core3d {
                             || copied->DynamicType() != original->DynamicType()) {
                             workingSource.Nullify();
                             workingFace.Nullify();
-                            failureStage = 11;
+                            failureStage = 69;
                             return Standard_False;
                         }
                         const Handle(Geom2d_Line) line = Handle(Geom2d_Line)::DownCast(original);
@@ -584,7 +616,7 @@ namespace core3d {
                     if (sourceEdge.More() || workingEdge.More()) {
                         workingSource.Nullify();
                         workingFace.Nullify();
-                        failureStage = 11;
+                        failureStage = 70;
                         return Standard_False;
                     }
                 }
@@ -674,14 +706,15 @@ namespace core3d {
 #endif
 					workingSource.Nullify();
 					workingFace.Nullify();
-					failureStage = 11;
+					failureStage = ExtrusionCommitmentMismatchStage(
+						sourceCommitment, workingCommitment);
 					return Standard_False;
 				}
 				return Standard_True;
 			} catch (...) {
 				workingSource.Nullify();
 				workingFace.Nullify();
-				failureStage = 11;
+				failureStage = 79;
 				return Standard_False;
 			}
 		}
