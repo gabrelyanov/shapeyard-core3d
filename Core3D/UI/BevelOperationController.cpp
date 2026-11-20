@@ -5,6 +5,7 @@
 
 #include "BevelOperationController.hpp"
 #include "../OCCTKit/FilletFailureClassifier.hxx"
+#include "PlaneFrameSettle.hpp"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -1300,6 +1301,14 @@ private:
                         return aResult;
                     }
                     aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
+                    // A slanted face's plane frame can flip between two
+                    // last-digit versions on every save, so the part never
+                    // reads back as written. Settle it here (a last-bit nudge
+                    // on this worker's own copy, as Push-pull does) so the
+                    // bevelled part saves and reopens to the same bytes.
+                    if (!aCandidate.IsNull()) {
+                        (void)plane_frames::SettlePlaneFramesForFile(aCandidate);
+                    }
                 } else {
                     BRepFilletAPI_MakeFillet aBuilder(aSource.shape);
                     for (const TopoDS_Edge& anEdge : aSource.edges) {
