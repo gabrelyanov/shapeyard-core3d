@@ -1327,6 +1327,16 @@ private:
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
+                        // P1 (Fable engine review 6): no value works when the
+                        // seam could not be merged on a painted part; say so.
+                        if (!aSource.mayMergeFlatSeams
+                            && ChamferEdgesWithoutFlatSeams(
+                                   aSource.shape, aSource.edges).size()
+                                != aSource.edges.size()) {
+                            aResult.failureKind =
+                                BevelFailureKind::FlatSeamOnPaintedPart;
+                            return aResult;
+                        }
                         aResult.failureKind = ClassifyFailedPlainChamfer(
                             aSource, aDistance, theRequest.cancellation,
                             aNodesBefore, aSolidsBefore,
