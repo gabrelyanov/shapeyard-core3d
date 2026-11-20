@@ -2777,6 +2777,44 @@ bool Core3DViewer::showHolePreview(const std::string& entity, const gp_Pnt& worl
     }catch(...){refusal="invalid-result";return false;}
 }
 
+bool Core3DViewer::showRampPreview(const std::string& entity, const TopoDS_Shape& localShape) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||localShape.IsNull())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        if(!_rampPreview.IsNull()){myContext->Remove(_rampPreview,Standard_False);_rampPreview.Nullify();}
+        if(_rampPreviewTarget!=presentation){
+            if(!_rampPreviewTarget.IsNull())
+                myContext->SetTransparency(_rampPreviewTarget,_rampPreviewTargetTransparency,Standard_False);
+            _rampPreviewTarget=presentation;
+            _rampPreviewTargetTransparency=presentation->Transparency();
+            myContext->SetTransparency(presentation,1.0,Standard_False);
+        }
+        Handle(AIS_Shape) preview=new AIS_Shape(localShape);
+        preview->SetLocalTransformation(presentation->LocalTransformation());
+        myDoc->LoadObjectMeterial(label,preview);
+        myContext->Display(preview,AIS_Shaded,-1,Standard_False);
+        myContext->Deactivate(preview);
+        _rampPreview=preview;
+        myContext->UpdateCurrentViewer();
+        return true;
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::clearRampPreview() noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(!_rampPreview.IsNull())myContext->Remove(_rampPreview,Standard_False);
+        if(!_rampPreviewTarget.IsNull())
+            myContext->SetTransparency(_rampPreviewTarget,_rampPreviewTargetTransparency,Standard_False);
+        _rampPreview.Nullify();_rampPreviewTarget.Nullify();_rampPreviewTargetTransparency=0.0;
+        myContext->UpdateCurrentViewer();
+        return true;
+    }catch(...){return false;}
+}
+
 bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& worldPoint,
     const gp_Dir& worldDirection, double radius, double depth, std::string& refusal) noexcept {
     refusal="unsupported-source";

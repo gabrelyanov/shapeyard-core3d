@@ -2876,7 +2876,16 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if (carriesFaceColours && record.requested.faceColourMap)
                 paintedFaces = _document->ResizedFaceColours(record.requested.shape,
                     *record.requested.faceColourMap, paintedFaces);
-            if ((record.requested.bakeSavedCut
+            // A joined or cut part keeps the recipe of the two parts it was made of; a new size
+            // makes it a plain part of that size, in this same step (Undo brings the recipe back).
+            // Before, the recipe still named the old shape and the next save was refused: lost work
+            // (ai lane 20 Nov: width of a reopened Cut 20 -> 22 mm, Join 60 -> 66 mm).
+            const bool bakesBooleanRecipe = !record.requested.bakeSavedCut
+                && !featureStaged && !treatmentStagedR2
+                && record.requested.operation == OrdinaryTransformOperation::Scale
+                && !record.previous.shape.IsEqual(record.requested.shape)
+                && _document->IsBooleanResultLabel(record.previous.label);
+            if (((record.requested.bakeSavedCut || bakesBooleanRecipe)
                     && !_document->PrepareBooleanResultForFaceEdit(record.previous.label))
                 || (!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
                     && (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion

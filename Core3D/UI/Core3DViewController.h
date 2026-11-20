@@ -1572,6 +1572,14 @@ __attribute__((objc_subclassing_restricted))
 //! many of them got a new surface mesh from that redraw. Changes no recipe.
 - (NSDictionary<NSString *, NSNumber *> *)debugRedisplayAllPartsCountingRemeshedFaces
     NS_SWIFT_NAME(debugRedisplayAllPartsCountingRemeshedFaces());
+//! DEBUG probe (Fable 19 Nov F3, after build 8): does every face's current mesh fit its
+//! geometry? For each document face with a mesh, the box of its mesh nodes is compared with
+//! the exact box of the face (no mesh used): nodes may not leave it by more than the face
+//! tolerance, and may fall short of it by at most the mesh's own deflection plus tolerance.
+//! Returns @{faces, meshed, misfit, worstExcess}. `shift` > 0 evaluates every mesh as if it
+//! were moved that far along X (no mesh is changed): it proves the comparison sees a stale mesh.
+- (NSDictionary<NSString *, NSNumber *> *)debugDisplayMeshFitsGeometryWithShift:(double)shift
+    NS_SWIFT_NAME(debugDisplayMeshFitsGeometry(shift:));
 //! B2-only values/observation seam. `expected` is an independently authored
 //! complete Profile value; the real entity is detached and observed separately.
 //! No accessibility attribute, witness, edit authority or matcher success is

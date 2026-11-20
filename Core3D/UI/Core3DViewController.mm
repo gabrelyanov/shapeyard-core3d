@@ -248,6 +248,7 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <AIS_ListOfInteractive.hxx>
 #include <BRep_TFace.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
 #include <AIS_Shape.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -23476,6 +23477,79 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
         NSInteger remeshed = 0;
         for (std::size_t i = 0; i < after.size(); ++i) if (after[i].get() != before[i].get()) ++remeshed;
         return @{@"faces": @(after.size()), @"remeshed": @(remeshed), @"displayed": @(displayed.Size())};
+    } catch (...) { return @{}; }
+}
+- (NSDictionary<NSString *, NSNumber *> *)debugDisplayMeshFitsGeometryWithShift:(double)shift {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer) return @{};
+    try {
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) return @{};
+        NSInteger faces = 0, meshed = 0, misfit = 0;
+        double worstExcess = -1.0e300, worstOutside = 0.0, worstShort = 0.0, worstTolerance = 0.0, worstDeflection = 0.0;
+        for (const auto& tshape : Core3DDebugDocumentFaceShapes(document->Document())) {
+            ++faces;
+            const Handle(BRep_TFace) tface = Handle(BRep_TFace)::DownCast(tshape);
+            if (tface.IsNull()) continue;
+            const Handle(Poly_Triangulation) mesh = tface->ActiveTriangulation();
+            if (mesh.IsNull() || mesh->NbNodes() < 1) continue;
+            ++meshed;
+            // Mesh nodes and surface are both in the face's own (TShape) frame.
+            TopoDS_Face face;
+            face.TShape(tshape);
+            Bnd_Box exact;
+            BRepBndLib::AddOptimal(face, exact, Standard_False, Standard_False);
+            if (exact.IsVoid()) { ++misfit; continue; }
+            Bnd_Box nodes;
+            for (Standard_Integer n = 1; n <= mesh->NbNodes(); ++n) {
+                gp_Pnt p = mesh->Node(n);
+                p.SetX(p.X() + shift);
+                nodes.Add(p);
+            }
+            Standard_Real e[6], k[6];
+            exact.Get(e[0], e[1], e[2], e[3], e[4], e[5]);
+            nodes.Get(k[0], k[1], k[2], k[3], k[4], k[5]);
+            // Boundary nodes lie on the face's edges, which may sit off the surface by their
+            // own tolerance: allow the largest of the face, edge and vertex tolerances.
+            const double tolerance = std::max({double(tface->Tolerance()),
+                double(BRep_Tool::MaxTolerance(face, TopAbs_EDGE)),
+                double(BRep_Tool::MaxTolerance(face, TopAbs_VERTEX))}) + 1.0e-6;
+            // A flat face's mesh reports deflection 0, yet its curved boundary is drawn by edge
+            // polygons that cut each arc by their own deflection: take the largest of them.
+            double deflection = std::max(0.0, double(mesh->Deflection()));
+            {
+                TopLoc_Location location;
+                const Handle(Poly_Triangulation)& faceMesh = BRep_Tool::Triangulation(face, location);
+                for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More() && !faceMesh.IsNull(); edge.Next()) {
+                    const Handle(Poly_PolygonOnTriangulation)& polygon =
+                        BRep_Tool::PolygonOnTriangulation(TopoDS::Edge(edge.Current()), faceMesh, location);
+                    if (!polygon.IsNull()) deflection = std::max(deflection, double(polygon->Deflection()));
+                }
+            }
+            // Outside the exact box only the tolerance is allowed, plus 1/10000 of the face's size:
+            // a stretched face's mesh nodes were seen 0.012 mm outside a 240 mm part (20 Nov), while
+            // a mesh left behind by an edit is off by millimetres.
+            const double slack = 1.0e-4 * std::sqrt(exact.SquareExtent());
+            double outside = -1.0e300, shortOf = -1.0e300;
+            for (int axis = 0; axis < 3; ++axis) {
+                outside = std::max(outside, std::max(e[axis] - k[axis], k[axis + 3] - e[axis + 3]) - tolerance - slack);
+                // Short of the exact box: a mesh may cut a curve by its own deflection.
+                shortOf = std::max(shortOf, std::max(k[axis] - e[axis], e[axis + 3] - k[axis + 3]) - deflection - tolerance);
+            }
+            const double excess = std::max(outside, shortOf);
+            if (excess > 0.0) ++misfit;
+            if (excess > worstExcess) {
+                worstExcess = excess;
+                worstOutside = outside;
+                worstShort = shortOf;
+                worstTolerance = tolerance;
+                worstDeflection = deflection;
+            }
+        }
+        return @{@"faces": @(faces), @"meshed": @(meshed), @"misfit": @(misfit),
+                 @"worstExcess": @(meshed > 0 ? worstExcess : 0.0),
+                 @"worstOutside": @(meshed > 0 ? worstOutside : 0.0),
+                 @"worstShort": @(meshed > 0 ? worstShort : 0.0),
+                 @"worstTolerance": @(worstTolerance), @"worstDeflection": @(worstDeflection)};
     } catch (...) { return @{}; }
 }
 

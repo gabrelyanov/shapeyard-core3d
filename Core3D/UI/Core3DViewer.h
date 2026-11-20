@@ -591,6 +591,12 @@ namespace core3d {
     bool showHolePreview(const std::string& entity, const gp_Pnt& worldPoint,
         const gp_Dir& worldDirection, double radius, double depth,
         std::string& refusal) noexcept;
+    //! Ramp strip: show a shape (in the part's own coordinates) over the part while the part itself is
+    //! drawn fully see-through; the part stays displayed and its picked edge stays selected, so the
+    //! open Ramp is not disturbed. clearRampPreview() puts the part's look back.
+    bool showRampPreview(const std::string& entity, const TopoDS_Shape& localShape) noexcept;
+    bool clearRampPreview() noexcept;
+    bool hasRampPreview() const noexcept { return !_rampPreview.IsNull(); }
     //! Baked Join / Cut / Overlap (0 union, 1 subtract, 2 intersect) of two
     //! parts: one Undo step, no originals kept. Redraws on success.
     bool applyBakedBoolean(const std::string& targetEntity, const std::string& toolEntity,
@@ -1274,6 +1280,9 @@ namespace core3d {
             std::vector<TDF_Label> moreLabels;
         };
         std::shared_ptr<BooleanPairPreview> _booleanPairPreview;
+        Handle(AIS_Shape) _rampPreview;
+        Handle(AIS_Shape) _rampPreviewTarget;
+        double _rampPreviewTargetTransparency = 0.0;
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
         // Main-owned, single-use continuation sidecar for the legacy captured-
         // anchor API. Work itself lives in the frozen P1 header; this map lets
