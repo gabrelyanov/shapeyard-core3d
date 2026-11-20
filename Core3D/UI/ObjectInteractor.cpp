@@ -2148,8 +2148,54 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 					if (copyValid) g_duplicatePlainBits |= 64; // shared-geometry copy
 #endif
 				}
-				if (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()
-					|| shapeCopy.Shape().IsPartner(
+				// R2-N02 (run editor-20261120-105844-56587: the shared-geometry
+				// copy failed too, step 503 again). The reopened part was read
+				// from its file in the engine's binary form and passes there, so
+				// make the copy the same way: write the source's exact shape and
+				// read it back as new, independent topology. Faces correspond by
+				// their first-occurrence index (the binary form keeps the order).
+				TopoDS_Shape roundTripShape;
+				TopTools_IndexedMapOfShape roundTripSourceFaces;
+				TopTools_IndexedMapOfShape roundTripCopiedFaces;
+				if (!copyValid && sourceValid) {
+					try {
+						retained_edge_treatment::detail::GeometryBuffer buffer;
+						std::ostream writer(&buffer);
+						BinTools::Write(source.presentation->Shape(), writer,
+							Standard_False, Standard_False,
+							BinTools_FormatVersion_VERSION_4);
+						if (writer.good() && buffer.size() > 0) {
+							buffer.read();
+							std::istream reader(&buffer);
+							TopoDS_Shape restored;
+							BinTools::Read(restored, reader);
+							if (reader.good() && !restored.IsNull()
+								&& restored.ShapeType()
+									== source.presentation->Shape().ShapeType()
+								&& !restored.IsPartner(source.presentation->Shape())
+								&& IsTopologicallyValid(restored)) {
+								TopExp::MapShapes(source.presentation->Shape(),
+									TopAbs_FACE, roundTripSourceFaces);
+								TopExp::MapShapes(restored, TopAbs_FACE,
+									roundTripCopiedFaces);
+								if (roundTripSourceFaces.Extent() > 0
+									&& roundTripSourceFaces.Extent()
+										== roundTripCopiedFaces.Extent()) {
+									roundTripShape = restored;
+									copyValid = true;
+#if DEBUG
+									g_duplicatePlainBits |= 128; // binary round-trip copy
+#endif
+								}
+							}
+						}
+					} catch (...) {}
+				}
+				const bool useRoundTrip = !roundTripShape.IsNull();
+				const TopoDS_Shape copiedShape = useRoundTrip
+					? roundTripShape : shapeCopy.Shape();
+				if ((!useRoundTrip && !shapeCopy.IsDone()) || copiedShape.IsNull()
+					|| copiedShape.IsPartner(
 						source.presentation->Shape())
 					|| (!copyValid && sourceValid)
 					|| (source.representation
@@ -2159,8 +2205,8 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 #if DEBUG
 					// R2-N02 readout: 501 not done/null, 502 partner, 503 copy
 					// invalid while the source is valid, 504 mesh restore.
-					g_duplicateLastStep = (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()) ? 501
-						: shapeCopy.Shape().IsPartner(source.presentation->Shape()) ? 502
+					g_duplicateLastStep = ((!useRoundTrip && !shapeCopy.IsDone()) || copiedShape.IsNull()) ? 501
+						: copiedShape.IsPartner(source.presentation->Shape()) ? 502
 						: (!copyValid && sourceValid) ? 503 : 504;
 #endif
 					return;
@@ -2171,7 +2217,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 CORE3D_DUPLICATE_STEP(51);
 				// Duplicates must remain capable of drawing authored face
                 // materials immediately, before history rebuilds a CafShapePrs.
-                Handle(AIS_Shape) copy = new AIS_ColoredShape(shapeCopy.Shape());
+                Handle(AIS_Shape) copy = new AIS_ColoredShape(copiedShape);
                 const gp_Trsf sourceTransform = source.presentation->LocalTransformation();
                 if (source.sweepLoft.family
                         == pattern_recipe_clone::Family::AnalyticBoolean
@@ -2201,7 +2247,12 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                         profile::MaximumLabels, duplicate.originalFaceFinishes)) return;
                 CORE3D_DUPLICATE_STEP(53);
                 for (const auto& finish : duplicate.originalFaceFinishes) {
-                    const auto copiedFace = shapeCopy.ModifiedShape(finish.face);
+                    const int roundTripIndex = useRoundTrip
+                        ? roundTripSourceFaces.FindIndex(finish.face) : 0;
+                    if (useRoundTrip && roundTripIndex <= 0) return;
+                    const TopoDS_Shape copiedFace = useRoundTrip
+                        ? roundTripCopiedFaces(roundTripIndex)
+                        : shapeCopy.ModifiedShape(finish.face);
                     if (copiedFace.IsNull() || copiedFace.ShapeType() != TopAbs_FACE
                         || copiedFace.IsPartner(finish.face)) return;
                     bool found = false;
