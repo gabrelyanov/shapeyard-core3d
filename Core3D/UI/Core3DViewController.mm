@@ -5528,6 +5528,12 @@ core3d_visibleRawR2RoundFailureObservation {
 }
 
 namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::string g_booleanCaptureLastRefusal; }
+namespace core3d { extern int g_duplicateLastStep; extern int g_duplicatePlainBits; extern std::string g_bakeSavedCutRefusal; }
+// DEBUG/test readout only (R2-N02): the last step Duplicate reached, the copy-plain bits, the bake refusal.
+- (NSString *)core3d_lastDuplicateStep {
+    return [NSString stringWithFormat:@"%d_%d_%s", core3d::g_duplicateLastStep,
+            core3d::g_duplicatePlainBits, core3d::g_bakeSavedCutRefusal.c_str()];
+}
 // DEBUG/test readout only (Join/Cut tap trace): input and check of the last refused opening.
 - (NSString *)core3d_lastBooleanCaptureRefusal {
     return [NSString stringWithUTF8String:core3d::g_booleanCaptureLastRefusal.c_str()] ?: @"";

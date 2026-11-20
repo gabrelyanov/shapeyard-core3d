@@ -72,6 +72,15 @@
 #include <utility>
 
 namespace core3d {
+// DEBUG/test readout only (R2-N02): the last step Duplicate reached before it
+// returned (0 = it made its copy), and why a source was or was not copied plain.
+int g_duplicateLastStep = 0;
+int g_duplicatePlainBits = 0;
+#if DEBUG
+#define CORE3D_DUPLICATE_STEP(n) (::core3d::g_duplicateLastStep = (n))
+#else
+#define CORE3D_DUPLICATE_STEP(n) ((void)0)
+#endif
 	namespace {
 Standard_Boolean CaptureDuplicateFaceFinishes(
     const Handle(OcctDocument)& theOwner,
@@ -1865,9 +1874,12 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         // source-bound draft. The complete typed path below remains unreachable
         // from the public Duplicate action while this is false.
         static constexpr bool kAdmitAnalyticBooleanDuplicate = false;
+        CORE3D_DUPLICATE_STEP(1);
         if (blocksForOrdinaryEdit()) { return; }
+        CORE3D_DUPLICATE_STEP(2);
         auto doc = myDoc->ChangeDocument();
 		if (doc.IsNull()) { return; }
+        CORE3D_DUPLICATE_STEP(3);
 		if (_duplicateOwnsDocumentCommand
 			|| !_pendingDuplicateResults.empty()) {
 			DuplicateDocumentState state =
@@ -1890,7 +1902,9 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 			}
 			return;
 		}
+        CORE3D_DUPLICATE_STEP(4);
 		if (doc->HasOpenCommand()) { return; }
+        CORE3D_DUPLICATE_STEP(5);
         
         struct DuplicateSource {
             Handle(AIS_Shape) presentation;
@@ -1940,6 +1954,16 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 || !storedShape.IsEqual(shape->Shape())
 				|| referenceAxisState
 					== OcctReferenceAxisReadState::Invalid) {
+#if DEBUG
+                g_duplicateLastStep = (selected.IsNull() || shape.IsNull() || shape->Shape().IsNull()) ? 10
+                    : !myDoc->IsPresentationEditable(selected) ? 11
+                    : label.IsNull() ? 12
+                    : !myDoc->IsEditableFreeSimpleDefinitionLabel(label) ? 13
+                    : !IsObjectModelingRepresentation(representation) ? 14
+                    : storedShape.IsNull() ? 16
+                    : !storedShape.IsEqual(shape->Shape()) ? 17
+                    : referenceAxisState == OcctReferenceAxisReadState::Invalid ? 18 : 15;
+#endif
                 return;
             }
             bool isDuplicateLabel = false;
@@ -1960,15 +1984,27 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                         && myDoc->CanBakeSavedCutForFaceEdit(label))
                     || (composite_recipe::HasRecord(label)
                         && myDoc->CanBakeBooleanResultForFaceEdit(label));
-                if (!profile::Read(doc, label, savedProfile)
-                    || !myDoc->CaptureObjectNameStateForLabel(label, name)
-                    || !pattern_recipe_clone::Capture(doc, label, sweepLoft,
+#if DEBUG
+                g_duplicatePlainBits = (retained_solid::HasRecord(label) ? 1 : 0)
+                    | (myDoc->CanBakeSavedCutForFaceEdit(label) ? 2 : 0)
+                    | (composite_recipe::HasRecord(label) ? 4 : 0)
+                    | (myDoc->CanBakeBooleanResultForFaceEdit(label) ? 8 : 0)
+                    | (savedCutCopiedPlain ? 16 : 0);
+#endif
+                CORE3D_DUPLICATE_STEP(21);
+                if (!profile::Read(doc, label, savedProfile)) { return; }
+                CORE3D_DUPLICATE_STEP(22);
+                if (!myDoc->CaptureObjectNameStateForLabel(label, name)) { return; }
+                CORE3D_DUPLICATE_STEP(23);
+                if (!pattern_recipe_clone::Capture(doc, label, sweepLoft,
                         savedCutCopiedPlain)) { return; }
+                CORE3D_DUPLICATE_STEP(24);
 				sources.push_back({shape, label, destinationRepresentation,
                     referenceAxisState, referenceAxis, savedProfile, name, storedShape,
                     savedProfile.IsCurrent(doc, label), sweepLoft, savedCutCopiedPlain});
             }
         }
+        CORE3D_DUPLICATE_STEP(30);
         if (sources.empty()) { return; }
 		std::vector<TDF_Label> sourceLabels;
 		sourceLabels.reserve(sources.size());
@@ -1981,9 +2017,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             duplicationRequests.push_back({source.label, 1U, false, true, false, true, false,
                                             kAdmitAnalyticBooleanDuplicate, true,
                                             source.savedCutCopiedPlain});
+        CORE3D_DUPLICATE_STEP(31);
 		if (!myDoc->CanDuplicateGeometryDefinitions(duplicationRequests)) {
 			return;
 		}
+        CORE3D_DUPLICATE_STEP(32);
         OcctSavedGroupState groupBefore;
         if (!myDoc->CaptureSavedGroups(groupBefore)) { return; }
         const auto fullySelected = [&](const OcctSavedGroup& group) {
@@ -1995,6 +2033,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         const auto copiedGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), fullySelected);
         if (activeGroups + copiedGroups > 128) { return; }
 
+        CORE3D_DUPLICATE_STEP(40);
         Bnd_Box overallBox;
         try {
             for (const DuplicateSource& source : sources) {
@@ -2050,6 +2089,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         gp_Trsf worldDisplacement;
         worldDisplacement.SetTranslation(aDisplacement);
         
+        CORE3D_DUPLICATE_STEP(50);
 		std::vector<DuplicatePendingResult> duplicates;
         core3d::retained_edge_treatment::ReplayBudget treatmentBudget;
 		try {
@@ -2175,8 +2215,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                         duplicate.preparedEnclosureBinding = retainedCopy.Shape();
                     }
                 }
+                CORE3D_DUPLICATE_STEP(55);
                 if (source.sweepLoft.family
                         == pattern_recipe_clone::Family::AnalyticBoolean) {
+                    CORE3D_DUPLICATE_STEP(56);
                     if (!kAdmitAnalyticBooleanDuplicate) return;
                     // Preparation needs AddShape's freshly issued owner IDs and
                     // therefore occurs inside the same owned command below.
@@ -2184,6 +2226,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     const std::string sweepLoftIdentifier = source.sweepLoft.family
                         == pattern_recipe_clone::Family::None
                         ? std::string() : OcctDocument::NewProfileIdentifier();
+                    CORE3D_DUPLICATE_STEP(57);
                     if (!pattern_recipe_clone::Prepare(source.sweepLoft, copy->Shape(),
                             sweepLoftIdentifier, std::nullopt,
                             duplicate.preparedSweepLoft)) return;
@@ -2197,6 +2240,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         duplicates.front().groups.emplace();
         duplicates.front().groups->previous = groupBefore;
 		_pendingDuplicateResults = std::move(duplicates);
+        CORE3D_DUPLICATE_STEP(60);
 
 		const auto retainRetryableOrUnknown = [&]() noexcept {
 			if (abortOwnedDuplicateCommand()
@@ -2498,6 +2542,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 			return;
 		}
 
+        CORE3D_DUPLICATE_STEP(70);
 		DuplicateDocumentState documentState =
 			inspectPendingDuplicateResults();
 		if (documentState == DuplicateDocumentState::OpenCommand) {
@@ -2507,6 +2552,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 		}
 		if (documentState == DuplicateDocumentState::AllCommitted) {
 			(void)finishCommittedDuplicate();
+            CORE3D_DUPLICATE_STEP(0);
 			return;
 		}
 		if (documentState == DuplicateDocumentState::None) {

@@ -12,6 +12,7 @@
 #include "GLViewController+Trick.h"
 #include "Snapping.hpp"
 
+namespace core3d { extern int g_duplicateLastStep; } // R2-N02 readout (ObjectInteractor.cpp)
 namespace {
 
 Core3DModelingPreviewStatus Core3DUnavailableModelingStatus(
@@ -484,6 +485,9 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     if (![NSThread isMainThread] || GLController == nil) {
         return;
     }
+#if DEBUG
+    core3d::g_duplicateLastStep = 91; // R2-N02 readout: refused before the engine was asked.
+#endif
     if (GLController.viewer != nullptr && GLController.viewer->hasUnresolvedOrdinaryEdit()) { return; }
     const BOOL recoveryPending = [GLController hasUnresolvedDuplicate];
     if (!recoveryPending) {
@@ -492,15 +496,24 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
             || _currentSelectionType != PrimitiveSelectionTypeShape
             || [GLController getSelectionType]
                 != PrimitiveSelectionTypeShape) {
+#if DEBUG
+            core3d::g_duplicateLastStep = 92;
+#endif
             return;
         }
         [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
         if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
             || [GLController getGizmoType]
                 != PrimitiveGizmoTypeMoveRotate) {
+#if DEBUG
+            core3d::g_duplicateLastStep = 93;
+#endif
             return;
         }
     }
+#if DEBUG
+    core3d::g_duplicateLastStep = 94; // GLController's own guards.
+#endif
     [GLController duplicateSelected];
     // GL synchronously republishes the exact post-attempt selection. This is
     // also the production recovery path when committed-result presentation
