@@ -28,9 +28,27 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAdaptor_Curve.hxx>
 #include <Geom_Conic.hxx>
+#include <Geom_Line.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_Conic.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <Geom_OffsetCurve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2d_OffsetCurve.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_OffsetSurface.hxx>
+#include <Geom_SurfaceOfLinearExtrusion.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_ElementarySurface.hxx>
+#include <Geom_Plane.hxx>
+#include "PlaneFrameSettle.hpp"
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepFeat_SplitShape.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -57,6 +75,8 @@
 #include <Standard_ErrorHandler.hxx>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <cstdlib>
 #include <cfloat>
 #include <cstdio>
 #include <istream>
@@ -356,6 +376,167 @@ namespace core3d {
 				&& buffer.size() < kMaximumExtrusionWorkingShapeBytes;
 		}
 
+		// BinTools rebuilds every gp_Dir / gp_Dir2d it reads and re-normalises it,
+		// which can change the last bit of a slanted direction. These restore the
+		// detached copy's frames by value from the source, through trimmed and
+		// offset wrappers, so the raw V3 proof can pass. A type mismatch (or a
+		// shared handle) is a refusal; unknown leaf types are left to the proof.
+		Standard_Boolean RestoreDetachedCurveFrame(
+			const Handle(Geom_Curve)& original,
+			const Handle(Geom_Curve)& copied,
+			Standard_Integer depth = 0) {
+			if (original.IsNull() && copied.IsNull()) return Standard_True;
+			if (original.IsNull() || copied.IsNull() || copied == original
+				|| copied->DynamicType() != original->DynamicType()
+				|| depth > 8) {
+				return Standard_False;
+			}
+			if (!Handle(Geom_Line)::DownCast(original).IsNull()) {
+				const Handle(Geom_Line) line = Handle(Geom_Line)::DownCast(original);
+				Handle(Geom_Line)::DownCast(copied)->SetPosition(line->Position());
+			} else if (!Handle(Geom_Conic)::DownCast(original).IsNull()) {
+				const Handle(Geom_Conic) conic = Handle(Geom_Conic)::DownCast(original);
+				Handle(Geom_Conic)::DownCast(copied)->SetPosition(conic->Position());
+			} else if (!Handle(Geom_TrimmedCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom_TrimmedCurve) trimmed = Handle(Geom_TrimmedCurve)::DownCast(original);
+				return RestoreDetachedCurveFrame(
+					trimmed->BasisCurve(),
+					Handle(Geom_TrimmedCurve)::DownCast(copied)->BasisCurve(),
+					depth + 1);
+			} else if (!Handle(Geom_OffsetCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom_OffsetCurve) offset = Handle(Geom_OffsetCurve)::DownCast(original);
+				const Handle(Geom_OffsetCurve) copiedOffset =
+					Handle(Geom_OffsetCurve)::DownCast(copied);
+				copiedOffset->SetDirection(offset->Direction());
+				return RestoreDetachedCurveFrame(
+					offset->BasisCurve(), copiedOffset->BasisCurve(), depth + 1);
+			}
+			return Standard_True;
+		}
+
+		Standard_Boolean RestoreDetachedCurve2dFrame(
+			const Handle(Geom2d_Curve)& original,
+			const Handle(Geom2d_Curve)& copied,
+			Standard_Integer depth = 0) {
+			if (original.IsNull() && copied.IsNull()) return Standard_True;
+			if (original.IsNull() || copied.IsNull() || copied == original
+				|| copied->DynamicType() != original->DynamicType()
+				|| depth > 8) {
+				return Standard_False;
+			}
+			if (!Handle(Geom2d_Line)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_Line) line = Handle(Geom2d_Line)::DownCast(original);
+				Handle(Geom2d_Line)::DownCast(copied)->SetPosition(line->Position());
+			} else if (!Handle(Geom2d_Conic)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_Conic) conic = Handle(Geom2d_Conic)::DownCast(original);
+				Handle(Geom2d_Conic)::DownCast(copied)->SetAxis(conic->Position());
+			} else if (!Handle(Geom2d_TrimmedCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_TrimmedCurve) trimmed = Handle(Geom2d_TrimmedCurve)::DownCast(original);
+				return RestoreDetachedCurve2dFrame(
+					trimmed->BasisCurve(),
+					Handle(Geom2d_TrimmedCurve)::DownCast(copied)->BasisCurve(),
+					depth + 1);
+			} else if (!Handle(Geom2d_OffsetCurve)::DownCast(original).IsNull()) {
+				const Handle(Geom2d_OffsetCurve) offset = Handle(Geom2d_OffsetCurve)::DownCast(original);
+				return RestoreDetachedCurve2dFrame(
+					offset->BasisCurve(),
+					Handle(Geom2d_OffsetCurve)::DownCast(copied)->BasisCurve(),
+					depth + 1);
+			}
+			return Standard_True;
+		}
+
+		Standard_Boolean RestoreDetachedSurfaceFrame(
+			const Handle(Geom_Surface)& original,
+			const Handle(Geom_Surface)& copied,
+			Standard_Integer depth = 0) {
+			if (original.IsNull() && copied.IsNull()) return Standard_True;
+			if (original.IsNull() || copied.IsNull() || copied == original
+				|| copied->DynamicType() != original->DynamicType()
+				|| depth > 8) {
+				return Standard_False;
+			}
+			if (!Handle(Geom_ElementarySurface)::DownCast(original).IsNull()) {
+				const Handle(Geom_ElementarySurface) elementary = Handle(Geom_ElementarySurface)::DownCast(original);
+				Handle(Geom_ElementarySurface)::DownCast(copied)
+					->SetPosition(elementary->Position());
+			} else if (!Handle(Geom_RectangularTrimmedSurface)::DownCast(original).IsNull()) {
+				const Handle(Geom_RectangularTrimmedSurface) trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(original);
+				return RestoreDetachedSurfaceFrame(
+					trimmed->BasisSurface(),
+					Handle(Geom_RectangularTrimmedSurface)::DownCast(copied)
+						->BasisSurface(),
+					depth + 1);
+			} else if (!Handle(Geom_OffsetSurface)::DownCast(original).IsNull()) {
+				const Handle(Geom_OffsetSurface) offset = Handle(Geom_OffsetSurface)::DownCast(original);
+				return RestoreDetachedSurfaceFrame(
+					offset->BasisSurface(),
+					Handle(Geom_OffsetSurface)::DownCast(copied)->BasisSurface(),
+					depth + 1);
+			} else if (!Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(original).IsNull()) {
+				const Handle(Geom_SurfaceOfLinearExtrusion) extrusion = Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(original);
+				const Handle(Geom_SurfaceOfLinearExtrusion) copiedExtrusion =
+					Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(copied);
+				copiedExtrusion->SetDirection(extrusion->Direction());
+				return RestoreDetachedCurveFrame(
+					extrusion->BasisCurve(), copiedExtrusion->BasisCurve(),
+					depth + 1);
+			} else if (!Handle(Geom_SurfaceOfRevolution)::DownCast(original).IsNull()) {
+				const Handle(Geom_SurfaceOfRevolution) revolution = Handle(Geom_SurfaceOfRevolution)::DownCast(original);
+				const Handle(Geom_SurfaceOfRevolution) copiedRevolution =
+					Handle(Geom_SurfaceOfRevolution)::DownCast(copied);
+				copiedRevolution->SetAxis(revolution->Axis());
+				return RestoreDetachedCurveFrame(
+					revolution->BasisCurve(), copiedRevolution->BasisCurve(),
+					depth + 1);
+			}
+			return Standard_True;
+		}
+
+		// Debug evidence only: names the V3 section where the detached copy first
+		// differs from the source (71 locations, 72 2D curves, 73 3D curves,
+		// 74 polygons, 75 surfaces, 76 triangulations, 77 shapes, 78 length;
+		// 72x/73x/75x add the type number of the record that differs).
+		Standard_Integer ExtrusionCommitmentMismatchStage(
+			const ExtrusionGeometryBuffer& source,
+			const ExtrusionGeometryBuffer& working) {
+			const std::size_t length = std::min(source.size(), working.size());
+			std::size_t mismatch = 0;
+			while (mismatch < length
+				&& source.data()[mismatch] == working.data()[mismatch]) {
+				++mismatch;
+			}
+			if (mismatch == length) {
+				return 78;
+			}
+			const std::string prefix(source.data(), mismatch);
+			const char* names[] = {
+				"\nLocations", "\nCurve2ds", "\nCurves", "\nPolygon", "\nSurfaces",
+				"\nTriangulations", "\nTShapes"};
+			Standard_Integer stage = 77;
+			std::size_t best = std::string::npos;
+			for (Standard_Integer index = 0; index < 7; ++index) {
+				const std::size_t at = prefix.rfind(names[index]);
+				if (at != std::string::npos
+					&& (best == std::string::npos || at > best)) {
+					best = at;
+					stage = 71 + index;
+				}
+			}
+			// In the 2D curve, 3D curve and surface tables each record starts
+			// on its own line with its type number: report 7xx = section, type.
+			if (stage == 72 || stage == 73 || stage == 75) {
+				const std::size_t lineStart = prefix.rfind('\n');
+				if (lineStart != std::string::npos && lineStart + 1 < source.size()) {
+					const char type = source.data()[lineStart + 1];
+					if (type >= '1' && type <= '9') {
+						stage = stage * 10 + (type - '0');
+					}
+				}
+			}
+			return stage;
+		}
+
 		Standard_Boolean DetachExtrusionSource(
 			const TopoDS_Shape& source,
 			const TopoDS_Face& selectedFace,
@@ -407,7 +588,7 @@ namespace core3d {
 				if (!writer.good() || transfer.size() == 0
 					|| transfer.size()
 						>= kMaximumExtrusionWorkingShapeBytes) {
-					failureStage = 11;
+					failureStage = 61;
 					return Standard_False;
 				}
 				transfer.prepareToRead();
@@ -417,7 +598,7 @@ namespace core3d {
 				if (!reader.good() || workingSource.IsNull()
 					|| workingSource.IsSame(source)) {
 					workingSource.Nullify();
-					failureStage = 11;
+					failureStage = 62;
 					return Standard_False;
 				}
 
@@ -431,7 +612,7 @@ namespace core3d {
 					|| workingCount != sourceCount
 					|| workingSolidCount != sourceSolidCount) {
 					workingSource.Nullify();
-					failureStage = 11;
+					failureStage = 63;
 					return Standard_False;
 				}
 				TopTools_IndexedMapOfShape workingFaces;
@@ -465,7 +646,7 @@ namespace core3d {
                 if (sourceEdges.Extent() != workingEdges.Extent()) {
                     workingSource.Nullify();
                     workingFace.Nullify();
-                    failureStage = 11;
+                    failureStage = 64;
                     return Standard_False;
                 }
                 for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
@@ -480,7 +661,7 @@ namespace core3d {
                         || copied->DynamicType() != original->DynamicType()) {
                         workingSource.Nullify();
                         workingFace.Nullify();
-                        failureStage = 11;
+                        failureStage = 65;
                         return Standard_False;
                     }
                     copied->SetPosition(original->Position());
@@ -505,10 +686,85 @@ namespace core3d {
                         || copied->DynamicType() != original->DynamicType()) {
                         workingSource.Nullify();
                         workingFace.Nullify();
-                        failureStage = 11;
+                        failureStage = 66;
                         return Standard_False;
                     }
                     copied->SetPosition(original->Position());
+                }
+
+                // A flat Bevel leaves slanted straight edges. BinTools rebuilds a
+                // line's gp_Dir (3D) and every pcurve's gp_Dir2d / gp_Ax22d from
+                // stored components and re-normalises them, which can change the
+                // last bit (flat-bevelled box, 20 Nov: Push-pull refused here).
+                // Restore 3D lines and the 2D lines/conics on each face by value,
+                // pairing faces by index and edges by the identical traversal
+                // order of the mirrored topology. Bounded by the census above;
+                // the raw V3 comparison below still proves every byte.
+                for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    Standard_Real first = 0, last = 0;
+                    const Handle(Geom_Curve) original =
+                        BRep_Tool::Curve(TopoDS::Edge(sourceEdges(index)), sourceLocation, first, last);
+                    if (original.IsNull()) continue;
+                    const Handle(Geom_Curve) copied =
+                        BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last);
+                    if (!RestoreDetachedCurveFrame(original, copied)) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 67;
+                        return Standard_False;
+                    }
+                }
+                for (Standard_Integer index = 1; index <= sourceFaces.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    const Handle(Geom_Surface) original = BRep_Tool::Surface(
+                        TopoDS::Face(sourceFaces(index)), sourceLocation);
+                    if (original.IsNull()) continue;
+                    if (!RestoreDetachedSurfaceFrame(original, BRep_Tool::Surface(
+                            TopoDS::Face(workingFaces(index)), workingLocation))) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 66;
+                        return Standard_False;
+                    }
+                }
+                for (Standard_Integer index = 1; index <= sourceFaces.Extent(); ++index) {
+                    const TopoDS_Face& sourceFace = TopoDS::Face(sourceFaces(index));
+                    const TopoDS_Face& detachedFace = TopoDS::Face(workingFaces(index));
+                    TopExp_Explorer sourceEdge(sourceFace, TopAbs_EDGE);
+                    TopExp_Explorer workingEdge(detachedFace, TopAbs_EDGE);
+                    for (; sourceEdge.More() && workingEdge.More();
+                         sourceEdge.Next(), workingEdge.Next()) {
+                        const TopoDS_Edge& sourceFaceEdge = TopoDS::Edge(sourceEdge.Current());
+                        const TopoDS_Edge& workingFaceEdge = TopoDS::Edge(workingEdge.Current());
+                        if (sourceFaceEdge.Orientation() != workingFaceEdge.Orientation()) {
+                            workingSource.Nullify();
+                            workingFace.Nullify();
+                            failureStage = 68;
+                            return Standard_False;
+                        }
+                        Standard_Real first = 0, last = 0;
+                        Standard_Boolean sourceStored = Standard_False;
+                        Standard_Boolean workingStored = Standard_False;
+                        const Handle(Geom2d_Curve) original = BRep_Tool::CurveOnSurface(
+                            sourceFaceEdge, sourceFace, first, last, &sourceStored);
+                        if (original.IsNull() || !sourceStored) continue;
+                        const Handle(Geom2d_Curve) copied = BRep_Tool::CurveOnSurface(
+                            workingFaceEdge, detachedFace, first, last, &workingStored);
+                        if (!workingStored
+                            || !RestoreDetachedCurve2dFrame(original, copied)) {
+                            workingSource.Nullify();
+                            workingFace.Nullify();
+                            failureStage = 69;
+                            return Standard_False;
+                        }
+                    }
+                    if (sourceEdge.More() || workingEdge.More()) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 70;
+                        return Standard_False;
+                    }
                 }
 
 				ExtrusionGeometryBuffer sourceCommitment;
@@ -524,6 +780,53 @@ namespace core3d {
 						sourceCommitment.data()
 							+ sourceCommitment.size(),
 						workingCommitment.data())) {
+					// A flat Bevel leaves slanted straight edges whose directions
+					// BinTools re-normalises, so the binary copy above can differ
+					// in the last bit (flat-bevelled box, 20 Nov: Push-pull refused
+					// at this stage). Then a geometry copy (BRepBuilderAPI_Copy
+					// duplicates every curve and surface by value) is tried; it is
+					// taken only if it passes the same byte-for-byte proof.
+					{
+						TopoDS_Shape copied;
+						{
+							BRepBuilderAPI_Copy copier(
+								source, Standard_True, Standard_False);
+							copied = copier.Shape();
+						}
+						Standard_Size copiedCount = 0;
+						Standard_Size copiedSolidCount = 0;
+						TopTools_IndexedMapOfShape copiedFaces;
+						if (!copied.IsNull()) {
+							TopExp::MapShapes(copied, TopAbs_FACE, copiedFaces);
+						}
+						ExtrusionGeometryBuffer copiedCommitment;
+						if (!copied.IsNull() && !copied.IsSame(source)
+							&& CountBoundedTopology(copied,
+								kMaximumExtrusionSourceSubshapes,
+								copiedCount, copiedSolidCount)
+							&& copiedCount == sourceCount
+							&& copiedSolidCount == sourceSolidCount
+							&& copiedFaces.Extent() == sourceFaces.Extent()
+							&& WriteExtrusionGeometryCommitment(
+								copied, copiedCommitment)
+							&& copiedCommitment.size() == sourceCommitment.size()
+							&& std::equal(
+								sourceCommitment.data(),
+								sourceCommitment.data()
+									+ sourceCommitment.size(),
+								copiedCommitment.data())) {
+							const TopoDS_Face copiedFace = TopoDS::Face(
+								copiedFaces.FindKey(selectedFaceIndex));
+							if (!copiedFace.IsNull()
+								&& !copiedFace.IsSame(selectedFace)
+								&& copiedFace.Orientation()
+									== selectedFace.Orientation()) {
+								workingSource = copied;
+								workingFace = copiedFace;
+								return Standard_True;
+							}
+						}
+					}
 #if DEBUG
                     const auto length = std::min(sourceCommitment.size(), workingCommitment.size());
                     std::size_t mismatch = 0;
@@ -549,14 +852,15 @@ namespace core3d {
 #endif
 					workingSource.Nullify();
 					workingFace.Nullify();
-					failureStage = 11;
+					failureStage = ExtrusionCommitmentMismatchStage(
+						sourceCommitment, workingCommitment);
 					return Standard_False;
 				}
 				return Standard_True;
 			} catch (...) {
 				workingSource.Nullify();
 				workingFace.Nullify();
-				failureStage = 11;
+				failureStage = 79;
 				return Standard_False;
 			}
 		}
@@ -849,33 +1153,74 @@ namespace core3d {
 			}
 		}
 
+		// Slanted plane frames are settled for the file in PlaneFrameSettle.hpp
+		// (shared with the flat Bevel).
+		using plane_frames::SettlePlaneFramesForFile;
+
 		// The saved file holds shapes in the binary format, and a few values come
 		// back from it changed only in sign (a -0 direction component reads as 0),
 		// which changes a face's fingerprint after a reopen. Keep the result exactly
 		// as the file will: round trip until the bytes no longer change.
-		Standard_Boolean FileStableResult(TopoDS_Shape& shape) noexcept {
+		// A slanted face (flat Bevel) can need more than three round trips before
+		// its frames stop moving; allow eight. When the bytes never settle, `why`
+		// names it for the debug state: 3000 + the V3 section/type where the last
+		// two passes differ (7x/7xx as in ExtrusionCommitmentMismatchStage), 4000 +
+		// the same when the passes repeat an earlier state (a cycle: no fixed
+		// point), 3001 read gave nothing, 3002 write failed, 3003 exception.
+		Standard_Boolean FileStableResult(
+			TopoDS_Shape& shape, Standard_Integer& why) noexcept {
+			why = 0;
 			try {
 				std::string currentBytes;
 				{
 					std::ostringstream writer;
 					BinTools::Write(shape, writer);
-					if (!writer.good()) return Standard_False;
+					if (!writer.good()) { why = 3002; return Standard_False; }
 					currentBytes = writer.str();
 				}
-				for (int pass = 0; pass < 3; ++pass) {
+				std::vector<std::string> seen{currentBytes};
+				TopoDS_Shape previous = shape;
+				Standard_Boolean settled = Standard_False;
+				for (int pass = 0; pass < 8; ++pass) {
 					std::istringstream reader(currentBytes);
 					TopoDS_Shape back;
 					BinTools::Read(back, reader);
-					if (back.IsNull()) return Standard_False;
+					if (back.IsNull()) { why = 3001; return Standard_False; }
 					std::ostringstream writer;
 					BinTools::Write(back, writer);
-					if (!writer.good()) return Standard_False;
+					if (!writer.good()) { why = 3002; return Standard_False; }
+					previous = shape;
 					shape = back;
 					if (writer.str() == currentBytes) return Standard_True;
 					currentBytes = writer.str();
+					if (std::find(seen.begin(), seen.end(), currentBytes) != seen.end()) {
+						// A cycle: settle the flipping plane frames once, start over.
+						if (!settled) {
+							settled = Standard_True;
+							if (SettlePlaneFramesForFile(shape) == 0) {
+								std::ostringstream again;
+								BinTools::Write(shape, again);
+								if (!again.good()) { why = 3002; return Standard_False; }
+								currentBytes = again.str();
+								seen.assign(1, currentBytes);
+								pass = -1;
+								continue;
+							}
+						}
+						why = 4000;
+						break;
+					}
+					seen.push_back(currentBytes);
+				}
+				if (why == 0) why = 3000;
+				ExtrusionGeometryBuffer before, after;
+				if (WriteExtrusionGeometryCommitment(previous, before)
+					&& WriteExtrusionGeometryCommitment(shape, after)) {
+					why += ExtrusionCommitmentMismatchStage(before, after);
 				}
 				return Standard_False;
 			} catch (...) {
+				why = 3003;
 				return Standard_False;
 			}
 		}
@@ -941,6 +1286,95 @@ namespace core3d {
 				if (!isProtrusion) {
 					outward.Reverse();
 				}
+				// BRepFeat's local prism refuses a face whose neighbours meet it at a
+				// slant (the top of a box bevelled flat on every edge, 20 Nov: "a
+				// tool that refuses" is a founder-priority fault). Only when it
+				// refused, the same prism is built on its own and joined to the
+				// solid (pull) or cut from it (push); the result must be one valid
+				// solid that gained (pull) or lost (push) material, else it refuses.
+				const auto booleanCandidate = [&]() -> Standard_Boolean {
+					try {
+						OCC_CATCH_SIGNALS
+						const TopoDS_Face base = TopoDS::Face(
+							workingFace.Oriented(TopAbs_FORWARD));
+						BRepPrimAPI_MakePrism prism(
+							base, gp_Vec(outward) * magnitude,
+							Standard_True, Standard_True);
+						if (!prism.IsDone() || prism.Shape().IsNull()) {
+							return Standard_False;
+						}
+						TopoDS_Shape tool = prism.Shape();
+						GProp_GProps toolProps;
+						BRepGProp::VolumeProperties(tool, toolProps);
+						if (!std::isfinite(toolProps.Mass())
+							|| std::abs(toolProps.Mass()) <= Precision::Confusion()) {
+							return Standard_False;
+						}
+						if (toolProps.Mass() < 0.0) {
+							tool.Reverse();
+						}
+						TopoDS_Shape raw;
+						if (isProtrusion) {
+							BRepAlgoAPI_Fuse join(workingSource, tool);
+							if (!join.IsDone() || join.HasErrors()) {
+								return Standard_False;
+							}
+							raw = join.Shape();
+						} else {
+							BRepAlgoAPI_Cut cut(workingSource, tool);
+							if (!cut.IsDone() || cut.HasErrors()) {
+								return Standard_False;
+							}
+							raw = cut.Shape();
+						}
+						TopoDS_Shape solid;
+						for (TopExp_Explorer each(raw, TopAbs_SOLID);
+							 each.More(); each.Next()) {
+							if (!solid.IsNull()) {
+								return Standard_False;	// more than one solid
+							}
+							solid = each.Current();
+						}
+						Standard_Size count = 0;
+						Standard_Size solids = 0;
+						if (solid.IsNull()
+							|| !CountBoundedTopology(solid,
+								kMaximumExtrusionSourceSubshapes, count, solids)
+							|| solids != 1
+							|| !BRepCheck_Analyzer(solid, Standard_True).IsValid()) {
+							return Standard_False;
+						}
+						GProp_GProps before;
+						GProp_GProps after;
+						BRepGProp::VolumeProperties(workingSource, before);
+						BRepGProp::VolumeProperties(solid, after);
+						const Standard_Real change = after.Mass() - before.Mass();
+						if (!std::isfinite(change)
+							|| (isProtrusion ? change : -change)
+								<= Precision::Confusion()) {
+							return Standard_False;	// nothing was added or taken
+						}
+						candidate = solid;
+						candidateSubshapeCount = count;
+						candidateSolidCount = solids;
+						return Standard_True;
+					} catch (...) {
+						return Standard_False;
+					}
+				};
+				const auto refusedByFeature =
+					[&](const Standard_Integer stage) -> Standard_Boolean {
+					failureStage = stage;
+					candidate.Nullify();
+					if (!booleanCandidate()) {
+						candidate.Nullify();
+						candidateSubshapeCount = 0;
+						candidateSolidCount = 0;
+						return Standard_False;
+					}
+					failureStage = 0;
+					return Standard_True;
+				};
 				BRepFeat_MakePrism feature(
 					workingSource,
 					workingFace,
@@ -959,13 +1393,11 @@ namespace core3d {
 				}
 				#endif
 				if (!feature.IsDone()) {
-					failureStage = 3;
-					return Standard_False;
+					return refusedByFeature(3);
 				}
 				const TopoDS_Shape rawCandidate = feature.Shape();
 				if (rawCandidate.IsNull()) {
-					failureStage = 4;
-					return Standard_False;
+					return refusedByFeature(4);
 				}
 				candidateShapeType = static_cast<Standard_Integer>(
 					rawCandidate.ShapeType());
@@ -999,12 +1431,10 @@ namespace core3d {
 					}
 					if (rawDirectChildCount != 1 || candidate.IsNull()
 						|| candidate.ShapeType() != TopAbs_SOLID) {
-						failureStage = 5;
-						return Standard_False;
+						return refusedByFeature(5);
 					}
 				} else {
-					failureStage = 5;
-					return Standard_False;
+					return refusedByFeature(5);
 				}
 				if (!CountBoundedTopology(
 						candidate,
@@ -1015,8 +1445,7 @@ namespace core3d {
 					return Standard_False;
 				}
 				if (candidateSolidCount != 1) {
-					failureStage = 7;
-					return Standard_False;
+					return refusedByFeature(7);
 				}
 				// BRepFeat_Form reuses one mutable scratch list for both history
 				// accessors. Snapshot each answer before invoking the next one.
@@ -1029,8 +1458,7 @@ namespace core3d {
 					|| candidate.IsEqual(workingSource)
 					|| (!historyHasModified && !historyHasGenerated
 						&& !historyFaceDeleted)) {
-					failureStage = 8;
-					return Standard_False;
+					return refusedByFeature(8);
 				}
 				// A pulled face leaves each side as two faces in one plane (the old
 				// side and the new strip above it); Bevel then failed on that seam
@@ -1917,9 +2345,12 @@ namespace core3d {
 				return Standard_False;
 			}
 
-			if (!FileStableResult(candidateShape)) {
+			Standard_Integer fileStableWhy = 0;
+			if (!FileStableResult(candidateShape, fileStableWhy)) {
 #ifdef DEBUG
-				_lastExtrusionFailureStage = 30;	// the result does not read back the same
+				// The result does not read back the same: 30 before 20 Nov;
+				// now 3000-4999 say where and how (see FileStableResult).
+				_lastExtrusionFailureStage = fileStableWhy != 0 ? fileStableWhy : 30;
 #endif
 				restoreExtrusionOriginalPresentation();
 				myContext->UpdateCurrentViewer();
