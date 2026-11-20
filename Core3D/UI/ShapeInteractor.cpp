@@ -1153,29 +1153,52 @@ namespace core3d {
 		// back from it changed only in sign (a -0 direction component reads as 0),
 		// which changes a face's fingerprint after a reopen. Keep the result exactly
 		// as the file will: round trip until the bytes no longer change.
-		Standard_Boolean FileStableResult(TopoDS_Shape& shape) noexcept {
+		// A slanted face (flat Bevel) can need more than three round trips before
+		// its frames stop moving; allow eight. When the bytes never settle, `why`
+		// names it for the debug state: 3000 + the V3 section/type where the last
+		// two passes differ (7x/7xx as in ExtrusionCommitmentMismatchStage), 4000 +
+		// the same when the passes repeat an earlier state (a cycle: no fixed
+		// point), 3001 read gave nothing, 3002 write failed, 3003 exception.
+		Standard_Boolean FileStableResult(
+			TopoDS_Shape& shape, Standard_Integer& why) noexcept {
+			why = 0;
 			try {
 				std::string currentBytes;
 				{
 					std::ostringstream writer;
 					BinTools::Write(shape, writer);
-					if (!writer.good()) return Standard_False;
+					if (!writer.good()) { why = 3002; return Standard_False; }
 					currentBytes = writer.str();
 				}
-				for (int pass = 0; pass < 3; ++pass) {
+				std::vector<std::string> seen{currentBytes};
+				TopoDS_Shape previous = shape;
+				for (int pass = 0; pass < 8; ++pass) {
 					std::istringstream reader(currentBytes);
 					TopoDS_Shape back;
 					BinTools::Read(back, reader);
-					if (back.IsNull()) return Standard_False;
+					if (back.IsNull()) { why = 3001; return Standard_False; }
 					std::ostringstream writer;
 					BinTools::Write(back, writer);
-					if (!writer.good()) return Standard_False;
+					if (!writer.good()) { why = 3002; return Standard_False; }
+					previous = shape;
 					shape = back;
 					if (writer.str() == currentBytes) return Standard_True;
 					currentBytes = writer.str();
+					if (std::find(seen.begin(), seen.end(), currentBytes) != seen.end()) {
+						why = 4000;
+						break;
+					}
+					seen.push_back(currentBytes);
+				}
+				if (why == 0) why = 3000;
+				ExtrusionGeometryBuffer before, after;
+				if (WriteExtrusionGeometryCommitment(previous, before)
+					&& WriteExtrusionGeometryCommitment(shape, after)) {
+					why += ExtrusionCommitmentMismatchStage(before, after);
 				}
 				return Standard_False;
 			} catch (...) {
+				why = 3003;
 				return Standard_False;
 			}
 		}
@@ -2300,9 +2323,12 @@ namespace core3d {
 				return Standard_False;
 			}
 
-			if (!FileStableResult(candidateShape)) {
+			Standard_Integer fileStableWhy = 0;
+			if (!FileStableResult(candidateShape, fileStableWhy)) {
 #ifdef DEBUG
-				_lastExtrusionFailureStage = 30;	// the result does not read back the same
+				// The result does not read back the same: 30 before 20 Nov;
+				// now 3000-4999 say where and how (see FileStableResult).
+				_lastExtrusionFailureStage = fileStableWhy != 0 ? fileStableWhy : 30;
 #endif
 				restoreExtrusionOriginalPresentation();
 				myContext->UpdateCurrentViewer();
