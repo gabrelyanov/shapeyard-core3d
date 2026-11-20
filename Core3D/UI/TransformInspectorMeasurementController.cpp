@@ -2450,6 +2450,14 @@ TransformInspectorMeasurementController::capture(
         aMeasurement.state =
             TransformInspectorMeasurementState::Measuring;
         myImpl->pendingMeasurement.state = aMeasurement.state;
+        // Only the floor box for a new turn is read: the own box is known,
+        // so By numbers keeps showing it instead of "Measuring" (M2).
+        if (aKnownOwnBounds.has_value()
+            && TryApplyBounds(*aKnownOwnBounds, aMeasurement)) {
+            aMeasurement.hasFloorDimensions = false;
+            aMeasurement.floorDimensions = {};
+            aMeasurement.hasKnownDimensionsWhileMeasuring = true;
+        }
         return aMeasurement;
     } catch (...) {
         myCompletion = {};
