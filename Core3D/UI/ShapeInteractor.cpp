@@ -31,6 +31,10 @@
 #include <Geom_ElementarySurface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepFeat_SplitShape.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -524,6 +528,53 @@ namespace core3d {
 						sourceCommitment.data()
 							+ sourceCommitment.size(),
 						workingCommitment.data())) {
+					// A flat Bevel leaves slanted straight edges whose directions
+					// BinTools re-normalises, so the binary copy above can differ
+					// in the last bit (flat-bevelled box, 20 Nov: Push-pull refused
+					// at this stage). Then a geometry copy (BRepBuilderAPI_Copy
+					// duplicates every curve and surface by value) is tried; it is
+					// taken only if it passes the same byte-for-byte proof.
+					{
+						TopoDS_Shape copied;
+						{
+							BRepBuilderAPI_Copy copier(
+								source, Standard_True, Standard_False);
+							copied = copier.Shape();
+						}
+						Standard_Size copiedCount = 0;
+						Standard_Size copiedSolidCount = 0;
+						TopTools_IndexedMapOfShape copiedFaces;
+						if (!copied.IsNull()) {
+							TopExp::MapShapes(copied, TopAbs_FACE, copiedFaces);
+						}
+						ExtrusionGeometryBuffer copiedCommitment;
+						if (!copied.IsNull() && !copied.IsSame(source)
+							&& CountBoundedTopology(copied,
+								kMaximumExtrusionSourceSubshapes,
+								copiedCount, copiedSolidCount)
+							&& copiedCount == sourceCount
+							&& copiedSolidCount == sourceSolidCount
+							&& copiedFaces.Extent() == sourceFaces.Extent()
+							&& WriteExtrusionGeometryCommitment(
+								copied, copiedCommitment)
+							&& copiedCommitment.size() == sourceCommitment.size()
+							&& std::equal(
+								sourceCommitment.data(),
+								sourceCommitment.data()
+									+ sourceCommitment.size(),
+								copiedCommitment.data())) {
+							const TopoDS_Face copiedFace = TopoDS::Face(
+								copiedFaces.FindKey(selectedFaceIndex));
+							if (!copiedFace.IsNull()
+								&& !copiedFace.IsSame(selectedFace)
+								&& copiedFace.Orientation()
+									== selectedFace.Orientation()) {
+								workingSource = copied;
+								workingFace = copiedFace;
+								return Standard_True;
+							}
+						}
+					}
 #if DEBUG
                     const auto length = std::min(sourceCommitment.size(), workingCommitment.size());
                     std::size_t mismatch = 0;
@@ -941,6 +992,95 @@ namespace core3d {
 				if (!isProtrusion) {
 					outward.Reverse();
 				}
+				// BRepFeat's local prism refuses a face whose neighbours meet it at a
+				// slant (the top of a box bevelled flat on every edge, 20 Nov: "a
+				// tool that refuses" is a founder-priority fault). Only when it
+				// refused, the same prism is built on its own and joined to the
+				// solid (pull) or cut from it (push); the result must be one valid
+				// solid that gained (pull) or lost (push) material, else it refuses.
+				const auto booleanCandidate = [&]() -> Standard_Boolean {
+					try {
+						OCC_CATCH_SIGNALS
+						const TopoDS_Face base = TopoDS::Face(
+							workingFace.Oriented(TopAbs_FORWARD));
+						BRepPrimAPI_MakePrism prism(
+							base, gp_Vec(outward) * magnitude,
+							Standard_True, Standard_True);
+						if (!prism.IsDone() || prism.Shape().IsNull()) {
+							return Standard_False;
+						}
+						TopoDS_Shape tool = prism.Shape();
+						GProp_GProps toolProps;
+						BRepGProp::VolumeProperties(tool, toolProps);
+						if (!std::isfinite(toolProps.Mass())
+							|| std::abs(toolProps.Mass()) <= Precision::Confusion()) {
+							return Standard_False;
+						}
+						if (toolProps.Mass() < 0.0) {
+							tool.Reverse();
+						}
+						TopoDS_Shape raw;
+						if (isProtrusion) {
+							BRepAlgoAPI_Fuse join(workingSource, tool);
+							if (!join.IsDone() || join.HasErrors()) {
+								return Standard_False;
+							}
+							raw = join.Shape();
+						} else {
+							BRepAlgoAPI_Cut cut(workingSource, tool);
+							if (!cut.IsDone() || cut.HasErrors()) {
+								return Standard_False;
+							}
+							raw = cut.Shape();
+						}
+						TopoDS_Shape solid;
+						for (TopExp_Explorer each(raw, TopAbs_SOLID);
+							 each.More(); each.Next()) {
+							if (!solid.IsNull()) {
+								return Standard_False;	// more than one solid
+							}
+							solid = each.Current();
+						}
+						Standard_Size count = 0;
+						Standard_Size solids = 0;
+						if (solid.IsNull()
+							|| !CountBoundedTopology(solid,
+								kMaximumExtrusionSourceSubshapes, count, solids)
+							|| solids != 1
+							|| !BRepCheck_Analyzer(solid, Standard_True).IsValid()) {
+							return Standard_False;
+						}
+						GProp_GProps before;
+						GProp_GProps after;
+						BRepGProp::VolumeProperties(workingSource, before);
+						BRepGProp::VolumeProperties(solid, after);
+						const Standard_Real change = after.Mass() - before.Mass();
+						if (!std::isfinite(change)
+							|| (isProtrusion ? change : -change)
+								<= Precision::Confusion()) {
+							return Standard_False;	// nothing was added or taken
+						}
+						candidate = solid;
+						candidateSubshapeCount = count;
+						candidateSolidCount = solids;
+						return Standard_True;
+					} catch (...) {
+						return Standard_False;
+					}
+				};
+				const auto refusedByFeature =
+					[&](const Standard_Integer stage) -> Standard_Boolean {
+					failureStage = stage;
+					candidate.Nullify();
+					if (!booleanCandidate()) {
+						candidate.Nullify();
+						candidateSubshapeCount = 0;
+						candidateSolidCount = 0;
+						return Standard_False;
+					}
+					failureStage = 0;
+					return Standard_True;
+				};
 				BRepFeat_MakePrism feature(
 					workingSource,
 					workingFace,
@@ -959,13 +1099,11 @@ namespace core3d {
 				}
 				#endif
 				if (!feature.IsDone()) {
-					failureStage = 3;
-					return Standard_False;
+					return refusedByFeature(3);
 				}
 				const TopoDS_Shape rawCandidate = feature.Shape();
 				if (rawCandidate.IsNull()) {
-					failureStage = 4;
-					return Standard_False;
+					return refusedByFeature(4);
 				}
 				candidateShapeType = static_cast<Standard_Integer>(
 					rawCandidate.ShapeType());
@@ -999,12 +1137,10 @@ namespace core3d {
 					}
 					if (rawDirectChildCount != 1 || candidate.IsNull()
 						|| candidate.ShapeType() != TopAbs_SOLID) {
-						failureStage = 5;
-						return Standard_False;
+						return refusedByFeature(5);
 					}
 				} else {
-					failureStage = 5;
-					return Standard_False;
+					return refusedByFeature(5);
 				}
 				if (!CountBoundedTopology(
 						candidate,
@@ -1015,8 +1151,7 @@ namespace core3d {
 					return Standard_False;
 				}
 				if (candidateSolidCount != 1) {
-					failureStage = 7;
-					return Standard_False;
+					return refusedByFeature(7);
 				}
 				// BRepFeat_Form reuses one mutable scratch list for both history
 				// accessors. Snapshot each answer before invoking the next one.
@@ -1029,8 +1164,7 @@ namespace core3d {
 					|| candidate.IsEqual(workingSource)
 					|| (!historyHasModified && !historyHasGenerated
 						&& !historyFaceDeleted)) {
-					failureStage = 8;
-					return Standard_False;
+					return refusedByFeature(8);
 				}
 				// A pulled face leaves each side as two faces in one plane (the old
 				// side and the new strip above it); Bevel then failed on that seam
