@@ -16519,6 +16519,35 @@ extern "C" int Core3DDebugMeshCopyRejectStage;
                                     fillingRect:fillingRect];
 }
 
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)rect
+                        viewFromCenter:(simd_double3)viewFromCenter
+                                    up:(simd_double3)up {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return NO;
+    }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1.0 || size.height < 1.0
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        return NO;
+    }
+    const double from[3] = {viewFromCenter.x, viewFromCenter.y, viewFromCenter.z};
+    const double upward[3] = {up.x, up.y, up.z};
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
+            nullptr, false, from, upward)) {
+        return NO;
+    }
+    [GLController requestRender];
+    [self viewDidInvalidateSceneSnapshot];
+    return YES;
+}
+
 - (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)rect {
