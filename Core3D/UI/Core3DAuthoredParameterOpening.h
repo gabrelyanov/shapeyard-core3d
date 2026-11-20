@@ -526,6 +526,12 @@ __attribute__((objc_subclassing_restricted))
     radius:(double)radius depth:(double)depth
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(showHolePreview(entity:pointX:y:z:directionX:y:z:radius:depth:refusal:));
+//! Ramp strip: show a shape (exact BRep text in the part's own coordinates, as the Ramp candidate
+//! carries it) over the part, which is drawn see-through and keeps its selection; clearRampPreview
+//! puts the part's look back. Nothing in the document changes.
+- (BOOL)showRampPreviewOnEntity:(NSString *)entity brepBytes:(NSData *)bytes
+    NS_SWIFT_NAME(showRampPreview(entity:brepBytes:));
+- (BOOL)clearRampPreview NS_SWIFT_NAME(clearRampPreview());
 //! Hole on any solid part (world coordinates, document units): a cylinder of
 //! `radius` from the point along the direction, through the part when
 //! `depth` <= 0, else `depth` deep. One Undo step. On refusal `refusal` gets
