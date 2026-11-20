@@ -318,7 +318,15 @@ inline GeomFillBuildResult BuildGeomFillSweep(const bounded_curve::Definition& c
         SpatialSweepDiagnostic(diagnostic, preliminary.produced() ? "geomfill.preliminary-proof.ok" : "geomfill.preliminary-proof.refused");
 #endif
         if(!preliminary.produced()){output.status=GeomFillBuildStatus::ProofRefused;return output;}
-        const double frameTolerance=FrameTolerance(R);auto bishopOnly=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),0,0,frameTolerance,&cancelled);
+        double frameTolerance=FrameTolerance(R);auto bishopOnly=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),0,0,frameTolerance,&cancelled);
+        // Round 3 S6-F2: the 1e-8 rad cap in FrameTolerance runs out of the 4096-leaf budget on an
+        // ordinary 3D guide (the Path's U with one end lifted 7 mm needs 5980 leaves, lifted 30 mm
+        // 11146), and the tube was refused as "try a gentler guide". An open tube that the cap refuses
+        // is transported again at the positional bound the receipt is written against,
+        // PositionalEpsilonMM/(32 R) (transport error <= 1/32 of the 1 um budget; 163 and 302 leaves).
+        // Every guide the cap accepts keeps its exact table, so every tube built before is unchanged.
+        // Closed tubes keep the cap: their creation witness and admission use FrameTolerance too.
+        if(!bishopOnly&&definition.closure==ClosureKind::OpenFlatCaps&&!cancelled.load()){const double positional=PositionalEpsilonMM/(32*R);if(Finite(positional)&&positional>frameTolerance){frameTolerance=positional;bishopOnly=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),0,0,frameTolerance,&cancelled);}}
 #if DEBUG
         SpatialSweepDiagnostic(diagnostic, bishopOnly ? "geomfill.transport-1.ok" : "geomfill.transport-1.refused");
 #endif
