@@ -3057,7 +3057,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     || TransformDiffers(persisted,start)) return;
                 TopTools_IndexedMapOfShape vertices;
                 TopExp::MapShapes(cached->second,TopAbs_VERTEX,vertices);
-                if (vertices.Extent() == 0 || anchors.size() + vertices.Extent() > 64) return;
+                // Corners are gathered up to 1024 (the cost of this pass);
+                // only the corners that can reach a part count against the
+                // 64 in play below, so a round lid or a gear still snaps.
+                if (vertices.Extent() == 0 || anchors.size() + vertices.Extent() > 1024) return;
                 for (int i = 1; i <= vertices.Extent(); ++i)
                     anchors.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))).Transformed(start));
             }
@@ -3072,6 +3075,8 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             std::vector<gp_Pnt> proposals;
             proposals.reserve(anchors.size());
             for (const auto& anchor : anchors) proposals.push_back(anchor.Transformed(raw));
+            Bnd_Box reach;
+            for (const auto& proposed : proposals) reach.Add(proposed);
             struct Target { std::string identifier; TopoDS_Shape world; Bnd_Box nearby; };
             std::vector<Target> targets;
             AIS_ListOfInteractive displayed;
@@ -3106,6 +3111,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 BRepBndLib::Add(located.Shape(),nearby);
                 if (nearby.IsVoid() || nearby.IsOpen()) return;
                 nearby.Enlarge(_geometrySnappingTolerance);
+                if (nearby.IsOut(reach)) continue;
                 // Same test as the per-anchor skip below: a part no moved
                 // corner can reach yields no hit, so it is left out unseen.
                 if (std::all_of(proposals.begin(),proposals.end(),
@@ -3120,9 +3126,18 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b) {
                 return a.identifier < b.identifier;
             });
+            // Corners in play: those inside a reachable part's box. At most 64,
+            // as before, so a drag step stays bounded (64 corners x 64 parts).
+            std::vector<gp_Pnt> inPlay;
+            for (const auto& proposed : proposals) {
+                if (std::any_of(targets.begin(),targets.end(),
+                        [&proposed](const Target& t) { return !t.nearby.IsOut(proposed); }))
+                    inPlay.push_back(proposed);
+            }
+            if (inPlay.size() > 64) return;
             gp_Vec correction;
             for (const auto& target : targets) {
-                for (const auto& proposed : proposals) {
+                for (const auto& proposed : inPlay) {
                     if (target.nearby.IsOut(proposed)) continue;
                     unsigned kinds = AllGeometrySnapKinds;
                     std::optional<GeometrySnapResult> hit;
