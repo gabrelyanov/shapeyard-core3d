@@ -1241,6 +1241,10 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(isModelingPlanHistoryAtTip(_:));
 - (BOOL)acceptModelingPlanHistory:(Core3DModelingPlanHistory *)history committedSteps:(NSInteger)steps
     NS_SWIFT_NAME(acceptModelingPlanHistory(_:committedSteps:));
+//! New native commits since the witness was last accepted; -1 when the history is
+//! not such an extension. Correct at the Undo limit, where the depth stays equal.
+- (NSInteger)pendingModelingPlanHistorySteps:(Core3DModelingPlanHistory *)history
+    NS_SWIFT_NAME(pendingModelingPlanHistorySteps(_:));
 - (BOOL)discardModelingPlanHistory:(Core3DModelingPlanHistory *)history;
 //! Authoritative OCAF history depth used by the production AI apply path.
 - (NSInteger)documentUndoCount;

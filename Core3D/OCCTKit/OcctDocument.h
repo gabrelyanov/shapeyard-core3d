@@ -2660,6 +2660,11 @@ public:
     bool IsModelingPlanHistoryAtTip(const std::shared_ptr<OcctModelingPlanHistory>&) const noexcept;
     bool AcceptModelingPlanHistory(const std::shared_ptr<OcctModelingPlanHistory>&,
                                   Standard_Integer committedSteps) noexcept;
+    // New deltas after the last accepted state (-1 when the history is not
+    // such an extension). Unlike a depth difference it stays right at the
+    // Undo limit, where each commit drops the oldest step.
+    Standard_Integer PendingModelingPlanHistorySteps(
+        const std::shared_ptr<OcctModelingPlanHistory>&) const noexcept;
     bool DiscardModelingPlanHistory(const std::shared_ptr<OcctModelingPlanHistory>&,
         const std::function<bool(const std::function<bool()>&)>& undoVerified) noexcept;
     

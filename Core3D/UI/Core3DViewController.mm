@@ -17984,6 +17984,13 @@ extern "C" int Core3DDebugMeshCopyRejectStage;
             static_cast<Standard_Integer>(steps));
 }
 
+- (NSInteger)pendingModelingPlanHistorySteps:(Core3DModelingPlanHistory *)history {
+    if (![self core3d_ownsModelingPlanHistory:history]) return -1;
+    try {
+        return history->_historyDocument->PendingModelingPlanHistorySteps(history->_historyWitness);
+    } catch (...) { return -1; }
+}
+
 - (BOOL)discardModelingPlanHistory:(Core3DModelingPlanHistory *)history {
     if (![self isModelingPlanHistoryCurrent:history]) return NO;
     try {
