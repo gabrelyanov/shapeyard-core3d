@@ -2126,13 +2126,28 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 				// keeps the fused tolerances). The copy is the same geometry,
 				// so it may be exactly as valid as its source, never less:
 				// refuse only when the copy fails a check its source passes.
-				const bool copyValid = source.representation
+				bool copyValid = source.representation
 						!= OcctGeometryRepresentation::BRep
 					|| IsTopologicallyValid(shapeCopy.Shape());
 				const bool sourceValid = copyValid
 					|| source.representation
 						!= OcctGeometryRepresentation::BRep
 					|| IsTopologicallyValid(source.presentation->Shape());
+				// R2-N02 (run editor-20261120-100554-5052, step 503): the
+				// deep copy of a valid reopened joined part can fail the
+				// check its source passes. Copy its faces and edges again
+				// over the source's own (unchanged, shared) curves and
+				// surfaces, which keeps the source's validity.
+				if (!copyValid && sourceValid) {
+					shapeCopy.Perform(source.presentation->Shape(),
+						Standard_False, Standard_False);
+					copyValid = shapeCopy.IsDone()
+						&& !shapeCopy.Shape().IsNull()
+						&& IsTopologicallyValid(shapeCopy.Shape());
+#if DEBUG
+					if (copyValid) g_duplicatePlainBits |= 64; // shared-geometry copy
+#endif
+				}
 				if (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()
 					|| shapeCopy.Shape().IsPartner(
 						source.presentation->Shape())
