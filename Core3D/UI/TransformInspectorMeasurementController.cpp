@@ -1749,6 +1749,39 @@ cancelPendingMeasurement() noexcept
     }
 }
 
+bool TransformInspectorMeasurementController::restoreDisplayedAngles(
+    const std::string& entity, const std::string& definition,
+    const TransformInspectorVector3& angles,
+    const TransformInspectorQuaternion& quaternion) noexcept
+{
+    constexpr double kMaximumDegrees = 1'000'000.0;
+    if (myStopped || myImpl == nullptr || myDoc.IsNull()
+        || entity.empty() || definition.empty()
+        || !std::isfinite(angles.x) || !std::isfinite(angles.y)
+        || !std::isfinite(angles.z)
+        || std::abs(angles.x) > kMaximumDegrees
+        || std::abs(angles.y) > kMaximumDegrees
+        || std::abs(angles.z) > kMaximumDegrees) {
+        return false;
+    }
+    try {
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        if (aDocument.IsNull()) {
+            return false;
+        }
+        // Bind the cache to the open document first, so the next capture of
+        // this document keeps the restored spelling instead of clearing it.
+        myImpl->clearCacheForDocument(aDocument);
+        if (!Impl::anglesMatchRotation(angles, quaternion)) {
+            return false;
+        }
+        myImpl->rememberAngles(entity, definition, angles, quaternion);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 void TransformInspectorMeasurementController::shutdown() noexcept
 {
     if (myStopped) {

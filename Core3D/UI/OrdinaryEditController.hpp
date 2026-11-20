@@ -480,6 +480,10 @@ public:
     virtual bool admitNames(OrdinaryNameLedger&) noexcept { return false; }
     virtual bool admitVisibility(OrdinaryVisibilityLedger&) noexcept { return false; }
     virtual bool repairVisibility(const OrdinaryVisibilityLedger&, bool) noexcept { return false; }
+    //! R2-O01 way out: when repairVisibility fails, one bounded full redraw of
+    //! the closed document. It writes no OCAF; it returns true only when every
+    //! ledger object is drawn exactly as its saved visibility says.
+    virtual bool rebuildVisibility(const OrdinaryVisibilityLedger&, bool) noexcept { return false; }
     virtual bool repairNames(const OrdinaryNameLedger&, bool) noexcept { return false; }
     virtual bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept = 0;
     //! One bounded full redraw per reconciliation attempt. Only presentation

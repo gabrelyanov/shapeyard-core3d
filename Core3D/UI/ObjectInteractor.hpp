@@ -109,6 +109,10 @@ namespace core3d {
         bool captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept;
         bool captureOrdinaryVisibilityAuthority(OrdinaryVisibilityLedger& ledger) const noexcept;
         bool repairOrdinaryVisibilityPresentation(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept;
+        //! After a full redraw (new presentation handles): select the ledger's
+        //! still-visible selected objects again and re-attach the gizmo, as
+        //! repairOrdinaryVisibilityPresentation does when a Hide drops some.
+        bool reselectAfterOrdinaryVisibilityRedraw(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept;
         bool repairCommittedMeshCopyPresentation(const OrdinaryCreationLedger& ledger) noexcept;
         bool captureOrdinaryNameAuthority(OrdinaryNameLedger& ledger) const noexcept;
         bool verifyOrdinaryNameAuthority(const OrdinaryNameLedger& ledger) const noexcept;
