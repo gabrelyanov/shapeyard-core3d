@@ -2121,18 +2121,38 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 						== OcctGeometryRepresentation::TriangleMesh
 					? Standard_True
 					: Standard_False);
+				// R2-N02: a joined part reopened from a file is a plain solid
+				// whose exact result may not pass the strict BRep check (Join
+				// keeps the fused tolerances). The copy is the same geometry,
+				// so it may be exactly as valid as its source, never less:
+				// refuse only when the copy fails a check its source passes.
+				const bool copyValid = source.representation
+						!= OcctGeometryRepresentation::BRep
+					|| IsTopologicallyValid(shapeCopy.Shape());
+				const bool sourceValid = copyValid
+					|| source.representation
+						!= OcctGeometryRepresentation::BRep
+					|| IsTopologicallyValid(source.presentation->Shape());
 				if (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()
 					|| shapeCopy.Shape().IsPartner(
 						source.presentation->Shape())
-					|| (source.representation
-							== OcctGeometryRepresentation::BRep
-						&& !IsTopologicallyValid(shapeCopy.Shape()))
+					|| (!copyValid && sourceValid)
 					|| (source.representation
 							== OcctGeometryRepresentation::TriangleMesh
 						&& !RestoreTriangleMeshCopyParameters(
 							source.presentation->Shape(), shapeCopy))) {
+#if DEBUG
+					// R2-N02 readout: 501 not done/null, 502 partner, 503 copy
+					// invalid while the source is valid, 504 mesh restore.
+					g_duplicateLastStep = (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()) ? 501
+						: shapeCopy.Shape().IsPartner(source.presentation->Shape()) ? 502
+						: (!copyValid && sourceValid) ? 503 : 504;
+#endif
 					return;
 				}
+#if DEBUG
+				if (!copyValid) g_duplicatePlainBits |= 32; // copied an equally-invalid source
+#endif
                 CORE3D_DUPLICATE_STEP(51);
 				// Duplicates must remain capable of drawing authored face
                 // materials immediately, before history rebuilds a CafShapePrs.
