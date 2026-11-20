@@ -951,6 +951,10 @@ namespace core3d {
         //! Suppress any pending transform-inspector completion. Exact worker
         //! work already inside OCCT may still populate its bounded cache.
         void cancelTransformInspectorMeasurement() noexcept;
+        //! K25: angles typed in an earlier session (see the controller).
+        bool restoreTransformInspectorDisplayedAngles(const std::string& entity,
+            const std::string& definition, const TransformInspectorVector3& angles,
+            const TransformInspectorQuaternion& quaternion) noexcept;
         TransformInspectorMeasurementPerformanceState
             transformInspectorMeasurementPerformanceState() const noexcept;
         //! Adds every part of an app-created import document at `path` as one creation (fault 3).

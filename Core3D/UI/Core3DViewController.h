@@ -1599,6 +1599,15 @@ __attribute__((objc_subclassing_restricted))
 - (void)cancelTransformInspectorSnapshotRequest
     NS_SWIFT_NAME(cancelTransformInspectorSnapshotRequest());
 
+//! K25: hand back the By numbers angles a person typed for the snapshot's part
+//! in an earlier session (the app keeps them with the project). YES only when
+//! they make exactly the snapshot's turn; the next snapshot then shows and edits
+//! from them while the part's stored turn stays that turn. Presentation only:
+//! no document, history or file change. Main-thread only.
+- (BOOL)restoreTransformInspectorDisplayedRotation:(simd_double3)degrees
+    forSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(restoreTransformInspectorDisplayedRotation(_:for:));
+
 //! Measure tool: the shortest distance between the selected edges or faces,
 //! in raw model units, world space. A full-circle edge (a hole rim) counts as
 //! its centre point. Main-thread only, read-only (no document, selection or

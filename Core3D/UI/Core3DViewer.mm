@@ -6873,6 +6873,18 @@ Core3DViewer::commitTransformInspectorPosition(
         _objectInteractor, _shapeInteractor, theRequest, _ordinaryEditController,std::move(placementPermit)).result;
 }
 
+bool Core3DViewer::restoreTransformInspectorDisplayedAngles(
+    const std::string& entity, const std::string& definition,
+    const TransformInspectorVector3& angles,
+    const TransformInspectorQuaternion& quaternion) noexcept
+{
+    if (hasUnresolvedOrdinaryEdit() || _transformInspectorMeasurementController == nullptr) {
+        return false;
+    }
+    return _transformInspectorMeasurementController->restoreDisplayedAngles(
+        entity, definition, angles, quaternion);
+}
+
 void Core3DViewer::cancelTransformInspectorMeasurement() noexcept
 {
     if (_transformInspectorMeasurementController != nullptr) {
