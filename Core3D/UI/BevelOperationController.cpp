@@ -2604,9 +2604,13 @@ BevelOperationController::failureObservation() const noexcept
 {
     // Round owns the full classification. A plain Bevel reports only the
     // bounded size refusal (ClassifyFailedPlainChamfer) so the screen can say
-    // the amount is too large; every other Bevel failure stays unclassified.
+    // the amount is too large, and the seam on a painted part that no amount
+    // can cross (Fable engine review 6 P1); every other Bevel failure stays
+    // unclassified.
     if (myRoundOwned
-        || myFailureObservation.kind == BevelFailureKind::RadiusRefused) {
+        || myFailureObservation.kind == BevelFailureKind::RadiusRefused
+        || myFailureObservation.kind
+            == BevelFailureKind::FlatSeamOnPaintedPart) {
         return myFailureObservation;
     }
     return BevelFailureObservation{myGeneration, BevelFailureKind::None};
