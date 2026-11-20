@@ -2699,61 +2699,151 @@ void ImportOBJ(
         }
     }
 
+    // Round 5 lamp S8-F2 (20 Nov 2026): one editable part per OBJ group, in
+    // file order, each with its own name, so the app's own two-part export
+    // (Cube + Cylinder) comes back as two objects instead of one.
+    struct OBJPart {
+        std::size_t firstTriangle = 0;
+        std::size_t triangleCount = 0;
+        TCollection_ExtendedString name;
+    };
+    const std::size_t triangleTotal = indexCount / 3;
+    NSArray<NSNumber *> *partCounts = decoded.partTriangleCounts ?: @[];
+    NSArray<NSString *> *partNames = decoded.partNames ?: @[];
+    std::vector<OBJPart> parts;
+    if (partCounts.count == 0) {
+        parts.push_back(OBJPart{0, triangleTotal, TCollection_ExtendedString()});
+    } else {
+        if (partNames.count != partCounts.count) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                "The OBJ decoder returned invalid part lists.");
+        }
+        if (partCounts.count > core3d::limits::kMaximumLeafPresentations) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorResourceLimit,
+                "This OBJ has more than 2,048 parts, the most one project can hold.");
+        }
+        std::size_t first = 0;
+        for (NSUInteger part = 0; part < partCounts.count; ++part) {
+            const unsigned long long count = partCounts[part].unsignedLongLongValue;
+            if (count == 0 || count > triangleTotal - first) {
+                throw NativeImportFailure(
+                    Core3DNativeImportErrorReadFailed,
+                    "The OBJ decoder returned invalid part lists.");
+            }
+            NSString *partName = partNames[part];
+            const char *utf8 = [partName isKindOfClass:[NSString class]]
+                ? partName.UTF8String
+                : nullptr;
+            parts.push_back(OBJPart{
+                first, static_cast<std::size_t>(count),
+                utf8 == nullptr || *utf8 == '\0'
+                    ? TCollection_ExtendedString()
+                    : TCollection_ExtendedString(utf8, Standard_True)});
+            first += static_cast<std::size_t>(count);
+        }
+        if (first != triangleTotal) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                "The OBJ decoder returned invalid part lists.");
+        }
+    }
+
     document->InitDoc();
     if (document->Document().IsNull() || document->Document()->HasOpenCommand()) {
         throw NativeImportFailure(
             Core3DNativeImportErrorInternalFailure,
             "The private import document could not be created.");
     }
-    Handle(Poly_Triangulation) mesh = new Poly_Triangulation(
-        static_cast<Standard_Integer>(vertexCount),
-        static_cast<Standard_Integer>(indexCount / 3),
-        Standard_False, Standard_True);
-    for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
-        mesh->SetNode(static_cast<Standard_Integer>(vertex + 1), points[vertex]);
-        mesh->SetNormal(static_cast<Standard_Integer>(vertex + 1), normals[vertex]);
-    }
-    for (std::size_t triangle = 0; triangle < indexCount / 3; ++triangle) {
-        ThrowIfCancelled(state);
-        const std::uint32_t a = indices[triangle * 3];
-        const std::uint32_t b = indices[triangle * 3 + 1];
-        const std::uint32_t c = indices[triangle * 3 + 2];
-        if (a == b || b == c || a == c) {
-            throw NativeImportFailure(
-                Core3DNativeImportErrorReadFailed,
-                "The OBJ contains a collapsed or degenerate triangle.");
-        }
-        const gp_Vec cross = gp_Vec(points[a], points[b]).Crossed(
-            gp_Vec(points[a], points[c]));
-        if (!std::isfinite(cross.SquareMagnitude())
-            || cross.SquareMagnitude() <= 1.0e-24) {
-            throw NativeImportFailure(
-                Core3DNativeImportErrorReadFailed,
-                "The OBJ contains a collapsed or degenerate triangle.");
-        }
-        mesh->SetTriangle(
-            static_cast<Standard_Integer>(triangle + 1),
-            Poly_Triangle(
-                static_cast<Standard_Integer>(a + 1),
-                static_cast<Standard_Integer>(b + 1),
-                static_cast<Standard_Integer>(c + 1)));
-    }
-    mesh->UpdateCachedMinMax();
-    TopoDS_Face face;
-    BRep_Builder builder;
-    builder.MakeFace(face, mesh);
     Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(
         document->Document()->Main());
-    const TDF_Label label = shapes->AddShape(face, Standard_False);
-    if (label.IsNull() || !document->MarkImportedTriangleMeshDefinitions()) {
+    std::vector<TDF_Label> partLabels;
+    partLabels.reserve(parts.size());
+    // Each part keeps only the vertices its own triangles use, in the file's
+    // vertex order (a one-part file keeps the decoder's numbering exactly),
+    // so a part is an independent mesh of its own.
+    std::vector<std::uint32_t> localIndex(vertexCount, 0);
+    std::vector<std::uint32_t> partVertices;
+    for (const OBJPart& part : parts) {
+        ThrowIfCancelled(state);
+        partVertices.clear();
+        for (std::size_t corner = part.firstTriangle * 3;
+             corner < (part.firstTriangle + part.triangleCount) * 3; ++corner) {
+            const std::uint32_t vertex = indices[corner];
+            if (localIndex[vertex] == 0) {
+                partVertices.push_back(vertex);
+                localIndex[vertex] = 1;
+            }
+        }
+        std::sort(partVertices.begin(), partVertices.end());
+        for (std::size_t local = 0; local < partVertices.size(); ++local) {
+            localIndex[partVertices[local]] = static_cast<std::uint32_t>(local + 1);
+        }
+        Handle(Poly_Triangulation) mesh = new Poly_Triangulation(
+            static_cast<Standard_Integer>(partVertices.size()),
+            static_cast<Standard_Integer>(part.triangleCount),
+            Standard_False, Standard_True);
+        for (std::size_t local = 0; local < partVertices.size(); ++local) {
+            mesh->SetNode(static_cast<Standard_Integer>(local + 1),
+                          points[partVertices[local]]);
+            mesh->SetNormal(static_cast<Standard_Integer>(local + 1),
+                            normals[partVertices[local]]);
+        }
+        for (std::size_t triangle = 0; triangle < part.triangleCount; ++triangle) {
+            ThrowIfCancelled(state);
+            const std::size_t at = (part.firstTriangle + triangle) * 3;
+            const std::uint32_t a = indices[at];
+            const std::uint32_t b = indices[at + 1];
+            const std::uint32_t c = indices[at + 2];
+            if (a == b || b == c || a == c) {
+                throw NativeImportFailure(
+                    Core3DNativeImportErrorReadFailed,
+                    "The OBJ contains a collapsed or degenerate triangle.");
+            }
+            const gp_Vec cross = gp_Vec(points[a], points[b]).Crossed(
+                gp_Vec(points[a], points[c]));
+            if (!std::isfinite(cross.SquareMagnitude())
+                || cross.SquareMagnitude() <= 1.0e-24) {
+                throw NativeImportFailure(
+                    Core3DNativeImportErrorReadFailed,
+                    "The OBJ contains a collapsed or degenerate triangle.");
+            }
+            mesh->SetTriangle(
+                static_cast<Standard_Integer>(triangle + 1),
+                Poly_Triangle(
+                    static_cast<Standard_Integer>(localIndex[a]),
+                    static_cast<Standard_Integer>(localIndex[b]),
+                    static_cast<Standard_Integer>(localIndex[c])));
+        }
+        for (const std::uint32_t vertex : partVertices) {
+            localIndex[vertex] = 0;
+        }
+        mesh->UpdateCachedMinMax();
+        TopoDS_Face face;
+        BRep_Builder builder;
+        builder.MakeFace(face, mesh);
+        const TDF_Label label = shapes->AddShape(face, Standard_False);
+        if (label.IsNull()) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorTransferFailed,
+                "The OBJ mesh could not be prepared for editing.");
+        }
+        partLabels.push_back(label);
+        TDataStd_Name::Set(
+            label,
+            part.name.Length() > 0
+                ? part.name
+                : TCollection_ExtendedString("Imported OBJ"));
+    }
+    if (!document->MarkImportedTriangleMeshDefinitions()) {
         throw NativeImportFailure(
             Core3DNativeImportErrorTransferFailed,
             "The OBJ mesh could not be prepared for editing.");
     }
-    TDataStd_Name::Set(label, "Imported OBJ");
     std::size_t leafCount = 0;
     if (ValidateImportedDocument(document, state, false, leafCount)
-            != ImportedDocumentValidation::Valid || leafCount != 1) {
+            != ImportedDocumentValidation::Valid || leafCount != parts.size()) {
         throw NativeImportFailure(
             Core3DNativeImportErrorTransferFailed,
             "The imported OBJ project is structurally invalid.");
@@ -2766,12 +2856,12 @@ void ImportOBJ(
     }
     std::size_t migratedCount = 0;
     if (ValidateImportedDocument(document, state, true, migratedCount)
-            != ImportedDocumentValidation::Valid || migratedCount != 1) {
+            != ImportedDocumentValidation::Valid || migratedCount != parts.size()) {
         throw NativeImportFailure(
             Core3DNativeImportErrorMigrationFailed,
             "The imported OBJ failed editable-project validation.");
     }
-    state->shapeCount = 1;
+    state->shapeCount = parts.size();
 }
 
 void SerializeAndValidate(
@@ -2951,6 +3041,8 @@ NSString *ErrorDescription(const NativeImportResult& result) {
 @property(nonatomic, readwrite, copy) NSData *indexData;
 @property(nonatomic, readwrite) NSUInteger vertexCount;
 @property(nonatomic, readwrite) NSUInteger indexCount;
+@property(nonatomic, readwrite, copy) NSArray<NSNumber *> *partTriangleCounts;
+@property(nonatomic, readwrite, copy) NSArray<NSString *> *partNames;
 
 @end
 
@@ -2960,12 +3052,28 @@ NSString *ErrorDescription(const NativeImportResult& result) {
                          indexData:(NSData *)indexData
                        vertexCount:(NSUInteger)vertexCount
                         indexCount:(NSUInteger)indexCount {
+    return [self initWithVertexData:vertexData
+                          indexData:indexData
+                        vertexCount:vertexCount
+                         indexCount:indexCount
+                 partTriangleCounts:@[]
+                          partNames:@[]];
+}
+
+- (instancetype)initWithVertexData:(NSData *)vertexData
+                         indexData:(NSData *)indexData
+                       vertexCount:(NSUInteger)vertexCount
+                        indexCount:(NSUInteger)indexCount
+                partTriangleCounts:(NSArray<NSNumber *> *)partTriangleCounts
+                         partNames:(NSArray<NSString *> *)partNames {
     self = [super init];
     if (self) {
         _vertexData = [vertexData copy];
         _indexData = [indexData copy];
         _vertexCount = vertexCount;
         _indexCount = indexCount;
+        _partTriangleCounts = [partTriangleCounts copy] ?: @[];
+        _partNames = [partNames copy] ?: @[];
     }
     return self;
 }
