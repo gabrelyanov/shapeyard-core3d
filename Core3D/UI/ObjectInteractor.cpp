@@ -2907,13 +2907,29 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     anchors.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))).Transformed(start));
             }
             if (anchors.empty()) return;
+            const auto frame = _manipulator->StartPosition();
+            const gp_Dir directions[] = {frame.XDirection(),frame.YDirection(),frame.Direction()};
+            const int axisIndex = _manipulator->ActiveAxisIndex();
+            if (axisIndex < 0 || axisIndex > 2) return;
+            const gp_Dir axis = directions[axisIndex];
+            const gp_Trsf raw = _manipulator->GestureTransformation();
+            if (raw.TranslationPart().Modulus() <= Precision::Confusion()) return;
+            std::vector<gp_Pnt> proposals;
+            proposals.reserve(anchors.size());
+            for (const auto& anchor : anchors) proposals.push_back(anchor.Transformed(raw));
             struct Target { std::string identifier; TopoDS_Shape world; Bnd_Box nearby; };
             std::vector<Target> targets;
             AIS_ListOfInteractive displayed;
             myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
-            std::size_t inspected = 0, nodes = 0;
+            // The snap budget (64 parts in play, 1024 target topology nodes)
+            // counts only the moved parts and the parts a moved corner can
+            // reach at this drag step. Parts out of reach cannot be snapped
+            // to, so they must not switch snapping off in a big model. The
+            // reach test costs one box per displayed part; the census cap
+            // keeps that cost bounded in a huge scene.
+            std::size_t census = 0, inspected = moving.size(), nodes = 0;
             for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
-                if (++inspected > 64) return;
+                if (++census > 1024) return;
                 const auto object = Handle(AIS_Shape)::DownCast(it.Value());
                 if (object.IsNull() || moving.count(object.get())) continue;
                 const auto label = myDoc->ShapeLabel(object);
@@ -2929,32 +2945,29 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     || (!parent.IsNull() && parent->Form() != gp_Identity)
                     || !myDoc->TryObjectTransformForLabel(label,transform)
                     || TransformDiffers(transform,object->LocalTransformation())) return;
-                TopTools_IndexedMapOfShape topology;
-                TopExp::MapShapes(shape,topology);
-                nodes += topology.Extent();
-                if (nodes > 1024) return;
                 BRepBuilderAPI_Transform located(shape,transform,Standard_False);
                 if (!located.IsDone() || located.Shape().IsNull()) return;
                 Bnd_Box nearby;
                 BRepBndLib::Add(located.Shape(),nearby);
                 if (nearby.IsVoid() || nearby.IsOpen()) return;
                 nearby.Enlarge(_geometrySnappingTolerance);
+                // Same test as the per-anchor skip below: a part no moved
+                // corner can reach yields no hit, so it is left out unseen.
+                if (std::all_of(proposals.begin(),proposals.end(),
+                        [&nearby](const gp_Pnt& p) { return nearby.IsOut(p); })) continue;
+                if (++inspected > 64) return;
+                TopTools_IndexedMapOfShape topology;
+                TopExp::MapShapes(shape,topology);
+                nodes += topology.Extent();
+                if (nodes > 1024) return;
                 targets.push_back({identifier,located.Shape(),nearby});
             }
             std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b) {
                 return a.identifier < b.identifier;
             });
-            const auto frame = _manipulator->StartPosition();
-            const gp_Dir directions[] = {frame.XDirection(),frame.YDirection(),frame.Direction()};
-            const int axisIndex = _manipulator->ActiveAxisIndex();
-            if (axisIndex < 0 || axisIndex > 2) return;
-            const gp_Dir axis = directions[axisIndex];
-            const gp_Trsf raw = _manipulator->GestureTransformation();
-            if (raw.TranslationPart().Modulus() <= Precision::Confusion()) return;
             gp_Vec correction;
             for (const auto& target : targets) {
-                for (const auto& anchor : anchors) {
-                    const auto proposed = anchor.Transformed(raw);
+                for (const auto& proposed : proposals) {
                     if (target.nearby.IsOut(proposed)) continue;
                     unsigned kinds = AllGeometrySnapKinds;
                     std::optional<GeometrySnapResult> hit;
