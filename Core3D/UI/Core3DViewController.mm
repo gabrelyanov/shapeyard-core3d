@@ -5716,7 +5716,20 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     for (const auto& style : pending) {
         doc->LoadObjectMeterial(style.root, style.presentation);
         context->Redisplay(style.presentation, Standard_False);
-        auto value = Core3DMakePBRMaterial(style.material, YES, NO, NO, NO, NO, NO);
+        // Round 5 lamp S1-F2: Choose image puts a texture on the picked PART, never on one
+        // face, so the texture rows keep the part's own flags, as before Apply. Hard-coded
+        // "no texture editing" made them say "Imported texture maps are read-only".
+        Core3DPBRMaterial* value = nil;
+        try {
+            value = Core3DMakePBRMaterial(style.material, YES,
+                doc->SupportsBaseColorTextureEditingForLabel(style.root),
+                doc->SupportsEmissiveTextureEditingForLabel(style.root),
+                doc->SupportsMaterialTextureEditingForLabel(style.root, OcctMaterialTextureSlot::MetallicRoughness),
+                doc->SupportsMaterialTextureEditingForLabel(style.root, OcctMaterialTextureSlot::Occlusion),
+                doc->SupportsMaterialTextureEditingForLabel(style.root, OcctMaterialTextureSlot::Normal));
+        } catch (...) {
+            value = Core3DMakePBRMaterial(style.material, YES, NO, NO, NO, NO, NO);
+        }
         if (value) [values addObject:value];
     }
     // Founder test, build 8545: a colour put on a pocket floor showed only after the project
