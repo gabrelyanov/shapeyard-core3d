@@ -139,7 +139,18 @@ supportsNormalTextureEditing:supportsNormalTextureEditing];
 
 - (void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selections {
 
-    assert(_currentGizmoType == [GLController getGizmoType]);
+    // Was assert(): when the app's tool and the engine's tool disagreed (as
+    // after the Undo of a scale-handle drag, round 3 S5-F3) the app closed.
+    // Now it logs once and goes on: this callback only reads the selection,
+    // and skipping it would leave Delete, Duplicate and the colours stale.
+    if (_currentGizmoType != [GLController getGizmoType]) {
+        static BOOL loggedToolMismatch = NO;
+        if (!loggedToolMismatch) {
+            loggedToolMismatch = YES;
+            NSLog(@"Core3D selection: app tool %ld, engine tool %ld; selection still read",
+                (long)_currentGizmoType, (long)[GLController getGizmoType]);
+        }
+    }
     const BOOL duplicateRecoveryPending =
         [GLController hasUnresolvedEdit];
     self.can_apply_material = !duplicateRecoveryPending
