@@ -468,6 +468,15 @@ __attribute__((objc_subclassing_restricted))
                 normalizedViewportRect:(CGRect)normalizedViewportRect
                            fillingRect:(BOOL)fillingRect
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:fillingRect:));
+//! As frameModel(selectedObjectsOnly:normalizedViewportRect:), first turning the
+//! camera to look at the model from `viewFromCenter` (eye minus target) with
+//! `up`. Camera only; NO (previous camera kept) for a zero, non-finite or
+//! parallel pair.
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)normalizedViewportRect
+                        viewFromCenter:(simd_double3)viewFromCenter
+                                    up:(simd_double3)up
+    NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:viewFromCenter:up:));
 //! Focus one visible model occurrence without selecting it. The expected
 //! publication stream, document generation and model revision must still match.
 //! Camera/selection-only changes do not invalidate this read-only request.
