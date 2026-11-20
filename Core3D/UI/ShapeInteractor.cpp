@@ -515,6 +515,72 @@ namespace core3d {
                     copied->SetPosition(original->Position());
                 }
 
+                // A flat Bevel leaves slanted straight edges. BinTools rebuilds a
+                // line's gp_Dir (3D) and every pcurve's gp_Dir2d / gp_Ax22d from
+                // stored components and re-normalises them, which can change the
+                // last bit (flat-bevelled box, 20 Nov: Push-pull refused here).
+                // Restore 3D lines and the 2D lines/conics on each face by value,
+                // pairing faces by index and edges by the identical traversal
+                // order of the mirrored topology. Bounded by the census above;
+                // the raw V3 comparison below still proves every byte.
+                for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    Standard_Real first = 0, last = 0;
+                    const auto original = Handle(Geom_Line)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(sourceEdges(index)), sourceLocation, first, last));
+                    if (original.IsNull()) continue;
+                    const auto copied = Handle(Geom_Line)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last));
+                    if (copied.IsNull() || copied == original) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 11;
+                        return Standard_False;
+                    }
+                    copied->SetPosition(original->Position());
+                }
+                for (Standard_Integer index = 1; index <= sourceFaces.Extent(); ++index) {
+                    const TopoDS_Face& sourceFace = TopoDS::Face(sourceFaces(index));
+                    const TopoDS_Face& detachedFace = TopoDS::Face(workingFaces(index));
+                    TopExp_Explorer sourceEdge(sourceFace, TopAbs_EDGE);
+                    TopExp_Explorer workingEdge(detachedFace, TopAbs_EDGE);
+                    for (; sourceEdge.More() && workingEdge.More();
+                         sourceEdge.Next(), workingEdge.Next()) {
+                        const TopoDS_Edge& sourceFaceEdge = TopoDS::Edge(sourceEdge.Current());
+                        const TopoDS_Edge& workingFaceEdge = TopoDS::Edge(workingEdge.Current());
+                        if (sourceFaceEdge.Orientation() != workingFaceEdge.Orientation()) {
+                            workingSource.Nullify();
+                            workingFace.Nullify();
+                            failureStage = 11;
+                            return Standard_False;
+                        }
+                        Standard_Real first = 0, last = 0;
+                        const Handle(Geom2d_Curve) original =
+                            BRep_Tool::CurveOnSurface(sourceFaceEdge, sourceFace, first, last);
+                        if (original.IsNull()) continue;
+                        const Handle(Geom2d_Curve) copied =
+                            BRep_Tool::CurveOnSurface(workingFaceEdge, detachedFace, first, last);
+                        if (copied.IsNull() || copied == original
+                            || copied->DynamicType() != original->DynamicType()) {
+                            workingSource.Nullify();
+                            workingFace.Nullify();
+                            failureStage = 11;
+                            return Standard_False;
+                        }
+                        if (const auto line = Handle(Geom2d_Line)::DownCast(original)) {
+                            Handle(Geom2d_Line)::DownCast(copied)->SetPosition(line->Position());
+                        } else if (const auto conic = Handle(Geom2d_Conic)::DownCast(original)) {
+                            Handle(Geom2d_Conic)::DownCast(copied)->SetAxis(conic->Position());
+                        }
+                    }
+                    if (sourceEdge.More() || workingEdge.More()) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 11;
+                        return Standard_False;
+                    }
+                }
+
 				ExtrusionGeometryBuffer sourceCommitment;
 				ExtrusionGeometryBuffer workingCommitment;
 				if (!WriteExtrusionGeometryCommitment(
