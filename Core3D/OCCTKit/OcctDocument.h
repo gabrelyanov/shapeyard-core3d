@@ -1070,6 +1070,8 @@ struct OcctGeometryDuplicationRequest
     bool preservesAuthoredFaceMaterials = false;
     // Duplicate only: a part whose standalone saved Hole could be baked is
     // copied as a plain solid; the source keeps its resizable Hole record.
+    // Also an ordinary saved Join/Cut/Overlap (CanBakeBooleanResultForFaceEdit):
+    // the copy is a plain solid of the same shape, the source keeps its recipe.
     bool copiesSavedCutAsPlainSolid = false;
 };
 

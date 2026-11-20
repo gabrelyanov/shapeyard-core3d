@@ -17411,8 +17411,18 @@ Standard_Boolean OcctDocument::CanBakeBooleanResultForFaceEdit(
             || core3d::retained_solid::HasRecord(label)
             || label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
             || RetainedRecipeCoverageForLabel(label)
-                != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
+                != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+#if DEBUG
+            // R2-N02 readout: which clause keeps a joined part from being copied plain.
+            core3d::g_bakeSavedCutRefusal = label.IsNull() || label.Data() != myOcafDoc->GetData() ? "bnolabel"
+                : !IsEditableFreeSimpleDefinitionLabel(label) ? "bnotfreesimple"
+                : HasUnroutedRetainedDependent(label) ? "bdependent"
+                : core3d::retained_solid::HasRecord(label) ? "bretained"
+                : label.IsAttribute(core3d::retained_edge_treatment::AttributeID()) ? "bedge"
+                : "bcoverage" + std::to_string(static_cast<int>(RetainedRecipeCoverageForLabel(label)));
+#endif
             return Standard_False;
+        }
         // Only the Boolean record may be present: a Profile, enclosure, sweep
         // or loft keeps its own replay contract and is never baked here.
         core3d::profile::Record profile;
@@ -17428,6 +17438,16 @@ Standard_Boolean OcctDocument::CanBakeBooleanResultForFaceEdit(
         // removes the record, so an admitted Bevel is never refused at Apply.
         core3d::composite_recipe::Record record;
         OcctScalarAppearanceState appearance;
+#if DEBUG
+        core3d::g_bakeSavedCutRefusal = "brecords";
+        if (core3d::composite_recipe::Read(myOcafDoc, label, record) && record.value && !record.label.IsNull())
+            core3d::g_bakeSavedCutRefusal = record.value->definition.nodes.size() != 3
+                ? "bnodes" + std::to_string(record.value->definition.nodes.size())
+                : !OriginalsFeature(record.value->definition) ? "boriginals"
+                : record.label.IsAttribute(core3d::retained_edge_treatment::AttributeID()) ? "brecordedge"
+                : !PairCaptureOriginalsAppearance(*this, label, appearance) ? "bappearance" : "bok";
+        else core3d::g_bakeSavedCutRefusal = "bnorecord";
+#endif
         return core3d::composite_recipe::Read(myOcafDoc, label, record)
             && record.value && !record.label.IsNull()
             && record.value->definition.nodes.size() == 3
@@ -17553,8 +17573,10 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
 
             core3d::pattern_recipe_clone::Source sourceRecipe;
             const bool plainSavedCutCopy = request.copiesSavedCutAsPlainSolid
-                && core3d::retained_solid::HasRecord(source)
-                && CanBakeSavedCutForFaceEdit(source);
+                && ((core3d::retained_solid::HasRecord(source)
+                        && CanBakeSavedCutForFaceEdit(source))
+                    || (core3d::composite_recipe::HasRecord(source)
+                        && CanBakeBooleanResultForFaceEdit(source)));
             if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe,
                     plainSavedCutCopy)
                 || ((sourceRecipe.family == core3d::pattern_recipe_clone::Family::Sweep
