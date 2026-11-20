@@ -21,6 +21,9 @@
 
 @interface Core3DTransformInspectorSnapshot ()
 
+@property (nonatomic, assign, readwrite) simd_double3 floorDimensions;
+@property (nonatomic, assign, readwrite) BOOL hasFloorDimensions;
+
 - (instancetype)initWithState:(Core3DTransformInspectorState)state
                  selectedCount:(NSUInteger)selectedCount
              requestGeneration:(uint64_t)requestGeneration
@@ -578,7 +581,8 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
             ? Core3DMakeDouble3(measurement.dimensions)
             : zero3;
 
-        return [[Core3DTransformInspectorSnapshot alloc]
+        Core3DTransformInspectorSnapshot *snapshot =
+            [[Core3DTransformInspectorSnapshot alloc]
             initWithState:state
             selectedCount:selectedCount
             requestGeneration:measurement.generation
@@ -609,6 +613,16 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
                 measurement.presentationMatchesDocument
             modelCapabilities:static_cast<Core3DModelCapability>(
                 measurement.modelCapabilities)];
+        if (hasDimensions && measurement.hasFloorDimensions
+            && Core3DIsFinite(measurement.floorDimensions)
+            && measurement.floorDimensions.x >= 0.0
+            && measurement.floorDimensions.y >= 0.0
+            && measurement.floorDimensions.z >= 0.0) {
+            snapshot.floorDimensions =
+                Core3DMakeDouble3(measurement.floorDimensions);
+            snapshot.hasFloorDimensions = YES;
+        }
+        return snapshot;
     } catch (...) {
         return Core3DMakeStateSnapshot(
             Core3DTransformInspectorStateInvalid, 0,
