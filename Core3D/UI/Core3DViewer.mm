@@ -6552,11 +6552,12 @@ private:
 };
 } // namespace
 
-NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection direction)
+NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection direction,
+    const std::function<bool()>& stillCurrent)
 {
     NativeHistoryTransition result;
     if (![NSThread isMainThread] || !_objectInteractor || myDoc.IsNull()
-        || hasUnresolvedEdit()
+        || hasUnresolvedEdit() || (stillCurrent && !stillCurrent())
         || (direction != NativeHistoryDirection::Undo
             && direction != NativeHistoryDirection::Redo)) return result;
     if (_rawR2PreviewPresentation) {
@@ -6646,6 +6647,9 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
     result.outcome = NativeHistoryOutcome::NoHistory;
     if (canChange) {
         const Handle(TDocStd_Document) nativeDocument = document->Document();
+        // AI disposal rechecks its exact history after synchronous presentation
+        // work and immediately before invoking the document's ordinary Undo.
+        if (stillCurrent && !stillCurrent()) return result;
         const bool changed = direction == NativeHistoryDirection::Undo
             ? document->undo() : document->redo();
         result.outcome = changed ? NativeHistoryOutcome::HistoryChanged

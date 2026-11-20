@@ -128,6 +128,11 @@ CORE3D_TRANSFORM_INSPECTOR_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) simd_double3 localBoundsMaximum;
 @property (nonatomic, assign, readonly) simd_double3 dimensions;
 @property (nonatomic, assign, readonly) BOOL hasDimensions;
+//! Measure's floor size: the part as turned, measured along world X, Y and Z,
+//! in the same units as `dimensions`. Only for a turn that is not made of
+//! quarter turns, and only when `hasDimensions`; otherwise NO and zero.
+@property (nonatomic, assign, readonly) simd_double3 floorDimensions;
+@property (nonatomic, assign, readonly) BOOL hasFloorDimensions;
 
 //! True only when the displayed AIS transform still matches the persisted
 //! document transform captured by this request.

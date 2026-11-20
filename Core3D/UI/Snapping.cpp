@@ -9,6 +9,7 @@
 #include "Snapping.hpp"
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -18,10 +19,13 @@
 #include <BRep_Tool.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <GeomAbs_CurveType.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -52,11 +56,46 @@ std::optional<core3d::GeometrySnapTarget> core3d::PrepareGeometrySnapTarget(
         // Boxes from the exact geometry (not a display mesh), which contain
         // the edge or face with its tolerance. Any doubt leaves a box void,
         // and a void box never skips a measurement.
-        const auto boxes = [](const TopTools_IndexedMapOfShape& map, std::vector<Bnd_Box>& out) {
+        // OCCT bounds only these kinds exactly (or by their control points,
+        // which enclose them): lines, circles, ellipses, hyperbolas and
+        // parabolas; planes, cylinders, cones, spheres and tori; Bezier and
+        // B-spline curves and surfaces. Every other kind (a face made by
+        // turning or pulling a curved outline, an offset, anything else) is
+        // bounded from sample points (BndLib_AddSurface.hxx, BndLib_Add3dCurve.hxx),
+        // which can fall short of its outermost bulge; its box stays void, so
+        // a point near that bulge is always measured.
+        // A plane's box is taken from its boundary edges, so those must be
+        // exact too; an edge without its own 3D curve is not trusted.
+        const auto exactEdge = [](const TopoDS_Edge& edge) {
+            double first = 0, last = 0;
+            if (BRep_Tool::Curve(edge,first,last).IsNull()) return false;
+            switch (BRepAdaptor_Curve(edge).GetType()) {
+            case GeomAbs_Line: case GeomAbs_Circle: case GeomAbs_Ellipse: case GeomAbs_Hyperbola:
+            case GeomAbs_Parabola: case GeomAbs_BezierCurve: case GeomAbs_BSplineCurve: return true;
+            default: return false;
+            }
+        };
+        const auto exactlyBounded = [&](const TopoDS_Shape& shape) {
+            if (shape.ShapeType() == TopAbs_EDGE) return exactEdge(TopoDS::Edge(shape));
+            if (shape.ShapeType() != TopAbs_FACE) return false;
+            switch (BRepAdaptor_Surface(TopoDS::Face(shape),Standard_False).GetType()) {
+            case GeomAbs_Plane:
+                for (TopExp_Explorer edge(shape,TopAbs_EDGE); edge.More(); edge.Next())
+                    if (!BRep_Tool::Degenerated(TopoDS::Edge(edge.Current()))
+                        && !exactEdge(TopoDS::Edge(edge.Current()))) return false;
+                return true;
+            case GeomAbs_Cylinder: case GeomAbs_Cone: case GeomAbs_Sphere: case GeomAbs_Torus:
+            case GeomAbs_BezierSurface: case GeomAbs_BSplineSurface: return true;
+            default: return false;
+            }
+        };
+        const auto boxes = [&](const TopTools_IndexedMapOfShape& map, std::vector<Bnd_Box>& out) {
             out.resize(static_cast<std::size_t>(map.Extent()));
             for (int index = 1; index <= map.Extent(); ++index) {
                 Bnd_Box box;
-                try { BRepBndLib::Add(map(index),box,Standard_False); } catch (...) { box.SetVoid(); }
+                try {
+                    if (exactlyBounded(map(index))) BRepBndLib::Add(map(index),box,Standard_False);
+                } catch (...) { box.SetVoid(); }
                 if (box.IsOpen()) box.SetVoid();
                 out[static_cast<std::size_t>(index - 1)] = box;
             }
@@ -132,6 +171,10 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
         // Every candidate of an edge or face lies on it, and consider() admits
         // only candidates within the tolerance: a piece whose box, widened by
         // the tolerance, misses the point cannot answer and is not measured.
+        // Intended: such a piece can no longer cancel the whole snap when its
+        // measurement would have failed (a bad midpoint or distance on a far
+        // edge). It could never be the answer, so the answer from the pieces
+        // in reach is the same one a successful measurement would have given.
         const auto outOfReach = [&](const std::vector<Bnd_Box>& boxes, int index) {
             if (index < 1 || static_cast<std::size_t>(index) > boxes.size()) return false;
             Bnd_Box box = boxes[static_cast<std::size_t>(index - 1)];
