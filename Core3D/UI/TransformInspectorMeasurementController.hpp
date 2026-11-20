@@ -97,6 +97,11 @@ struct TransformInspectorMeasurement {
     std::array<double, 6> localBounds{};
     TransformInspectorVector3 localDimensions;
     TransformInspectorVector3 dimensions;
+    //! Measure's floor size: the part turned by `quaternion`, measured along
+    //! world X, Y and Z, times abs(uniformScale). Filled only for a turn that
+    //! is not a quarter turn (a quarter turn maps the own box exactly).
+    bool hasFloorDimensions = false;
+    TransformInspectorVector3 floorDimensions;
 };
 
 enum class TransformInspectorPositionAxis : std::uint8_t {
