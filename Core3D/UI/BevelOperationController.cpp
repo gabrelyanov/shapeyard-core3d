@@ -7,6 +7,7 @@
 #include "../OCCTKit/FilletFailureClassifier.hxx"
 #include "PlaneFrameSettle.hpp"
 
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -702,6 +703,12 @@ std::vector<TopoDS_Edge> ChamferEdgesWithoutFlatSeams(
 struct ChamferInput {
     TopoDS_Shape shape;
     std::vector<TopoDS_Edge> edges;
+    //! Fable engine review 7 PP1 (CTO 20 Nov 19:14): in Object mode every edge
+    //! counts as selected, so the merge also removes a Split line the person
+    //! drew (the engine cannot tell it from a Join seam on a plain solid).
+    //! These are the flat seams the merge removed then (edges of the source
+    //! shape); they are drawn back onto the bevelled solid afterwards.
+    std::vector<TopoDS_Edge> seamsToRestore;
 };
 
 //! Fable engine review 5 (CTO 20 Nov 15:37): the merge is never made on a part
@@ -843,9 +850,113 @@ ChamferInput ChamferInputWithoutFlatSeams(
         ChamferInput aMergedInput;
         aMergedInput.shape = aMerged;
         aMergedInput.edges = std::move(aMapped);
+        if (aKeep.IsEmpty()) {
+            // Every edge selected (Object mode): the seams merged away are
+            // given back after the Bevel, so a Split line is kept (PP1).
+            TopTools_MapOfShape aBevelled;
+            for (const TopoDS_Edge& anEdge : anInput.edges) {
+                aBevelled.Add(anEdge);
+            }
+            for (const TopoDS_Edge& anEdge : theEdges) {
+                if (!aBevelled.Contains(anEdge)) {
+                    aMergedInput.seamsToRestore.push_back(anEdge);
+                }
+            }
+        }
         return aMergedInput;
     } catch (...) {
         return anInput;
+    }
+}
+
+//! Fable engine review 7 PP1 (CTO 20 Nov 19:14): a Split line the person drew
+//! never vanishes silently. Each seam the Object-mode merge removed is drawn
+//! back onto the bevelled solid (BRepAlgoAPI_Splitter with the seam's own
+//! edge as the tool: the face it lies in is split along it again, trimmed to
+//! the bevelled face). A seam is given back only when the result is still one
+//! valid solid of the same volume (1e-9) with one face more and no loose edge
+//! inside a face; otherwise that seam stays merged (a Join seam that would end
+//! inside a face, for example) and the bevelled solid is kept as it was.
+TopoDS_Shape BevelledWithFlatSeamsRestored(
+    const TopoDS_Shape& theBevelled,
+    const std::vector<TopoDS_Edge>& theSeams) noexcept
+{
+    constexpr std::size_t kMaximumSeamsToRestore = 32;
+    if (theBevelled.IsNull() || theSeams.empty()
+        || theSeams.size() > kMaximumSeamsToRestore) {
+        return theBevelled;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const auto aVolumeOf = [](const TopoDS_Shape& theShape) {
+            GProp_GProps aProperties;
+            BRepGProp::VolumeProperties(theShape, aProperties);
+            return std::abs(aProperties.Mass());
+        };
+        const auto aFaceCountOf = [](const TopoDS_Shape& theShape) {
+            TopTools_IndexedMapOfShape aFaces;
+            TopExp::MapShapes(theShape, TopAbs_FACE, aFaces);
+            return aFaces.Extent();
+        };
+        const Standard_Real aVolume = aVolumeOf(theBevelled);
+        if (!(aVolume > 0.0)) {
+            return theBevelled;
+        }
+        TopoDS_Shape aCurrent = theBevelled;
+        Standard_Integer aFaces = aFaceCountOf(aCurrent);
+        for (const TopoDS_Edge& aSeam : theSeams) {
+            if (aSeam.IsNull()) {
+                continue;
+            }
+            TopTools_ListOfShape anArguments;
+            anArguments.Append(aCurrent);
+            TopTools_ListOfShape aTools;
+            aTools.Append(aSeam);
+            BRepAlgoAPI_Splitter aSplitter;
+            aSplitter.SetArguments(anArguments);
+            aSplitter.SetTools(aTools);
+            aSplitter.SetRunParallel(Standard_False);
+            aSplitter.Build();
+            if (!aSplitter.IsDone() || aSplitter.HasErrors()) {
+                continue;
+            }
+            TopoDS_Shape aSolid;
+            Standard_Integer aSolids = 0;
+            for (TopExp_Explorer anIt(aSplitter.Shape(), TopAbs_SOLID);
+                 anIt.More(); anIt.Next()) {
+                aSolid = anIt.Current();
+                ++aSolids;
+            }
+            if (aSolids != 1 || aSolid.IsNull()) {
+                continue;
+            }
+            Standard_Boolean hasLooseEdge = Standard_False;
+            for (TopExp_Explorer aFace(aSolid, TopAbs_FACE);
+                 aFace.More() && !hasLooseEdge; aFace.Next()) {
+                for (TopExp_Explorer anEdge(aFace.Current(), TopAbs_EDGE);
+                     anEdge.More(); anEdge.Next()) {
+                    const TopAbs_Orientation anOrientation =
+                        anEdge.Current().Orientation();
+                    if (anOrientation == TopAbs_INTERNAL
+                        || anOrientation == TopAbs_EXTERNAL) {
+                        hasLooseEdge = Standard_True;
+                        break;
+                    }
+                }
+            }
+            const Standard_Integer aSplitFaces = aFaceCountOf(aSolid);
+            if (hasLooseEdge || aSplitFaces <= aFaces
+                || !BRepCheck_Analyzer(aSolid, Standard_True).IsValid()
+                || !(std::abs(aVolumeOf(aSolid) - aVolume)
+                     <= 1.0e-9 * aVolume)) {
+                continue;
+            }
+            aCurrent = aSolid;
+            aFaces = aSplitFaces;
+        }
+        return aCurrent;
+    } catch (...) {
+        return theBevelled;
     }
 }
 
@@ -1335,6 +1446,12 @@ private:
                         return aResult;
                     }
                     aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
+                    // PP1: Split lines the Object-mode merge removed come back.
+                    if (!aCandidate.IsNull()
+                        && !aChamferInput.seamsToRestore.empty()) {
+                        aCandidate = BevelledWithFlatSeamsRestored(
+                            aCandidate, aChamferInput.seamsToRestore);
+                    }
                     // A slanted face's plane frame can flip between two
                     // last-digit versions on every save, so the part never
                     // reads back as written. Settle it here (a last-bit nudge
