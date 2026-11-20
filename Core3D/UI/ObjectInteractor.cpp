@@ -2121,11 +2121,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 						== OcctGeometryRepresentation::TriangleMesh
 					? Standard_True
 					: Standard_False);
-				// R2-N02: a joined part reopened from a file is a plain solid
-				// whose exact result may not pass the strict BRep check (Join
-				// keeps the fused tolerances). The copy is the same geometry,
-				// so it may be exactly as valid as its source, never less:
-				// refuse only when the copy fails a check its source passes.
+				// R2-N02: a joined part reopened from a file is a plain solid.
+				// Its plain deep copy can fail the strict BRep check its source
+				// passes; the two fallbacks below then copy it another way. A
+				// copy that still fails the check is refused (Fable review 4):
+				// no unchecked solid is ever stored.
 				bool copyValid = source.representation
 						!= OcctGeometryRepresentation::BRep
 					|| IsTopologicallyValid(shapeCopy.Shape());
@@ -2197,23 +2197,20 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 				if ((!useRoundTrip && !shapeCopy.IsDone()) || copiedShape.IsNull()
 					|| copiedShape.IsPartner(
 						source.presentation->Shape())
-					|| (!copyValid && sourceValid)
+					|| !copyValid
 					|| (source.representation
 							== OcctGeometryRepresentation::TriangleMesh
 						&& !RestoreTriangleMeshCopyParameters(
 							source.presentation->Shape(), shapeCopy))) {
 #if DEBUG
 					// R2-N02 readout: 501 not done/null, 502 partner, 503 copy
-					// invalid while the source is valid, 504 mesh restore.
+					// fails the shape check, 504 mesh restore.
 					g_duplicateLastStep = ((!useRoundTrip && !shapeCopy.IsDone()) || copiedShape.IsNull()) ? 501
 						: copiedShape.IsPartner(source.presentation->Shape()) ? 502
-						: (!copyValid && sourceValid) ? 503 : 504;
+						: !copyValid ? 503 : 504;
 #endif
 					return;
 				}
-#if DEBUG
-				if (!copyValid) g_duplicatePlainBits |= 32; // copied an equally-invalid source
-#endif
                 CORE3D_DUPLICATE_STEP(51);
 				// Duplicates must remain capable of drawing authored face
                 // materials immediately, before history rebuilds a CafShapePrs.
