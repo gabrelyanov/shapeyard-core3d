@@ -111,6 +111,7 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #if DEBUG
 #include <BRepBuilderAPI_Transform.hxx>
@@ -14751,6 +14752,12 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         } else if (fixture == 5) {
             shape = BRepBuilderAPI_MakeEdge(
                 gp_Elips(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(0,0,1)),10,4),0,M_PI/2).Edge();
+        } else if (fixture == 6) {
+            // A face made by turning a curved outline once round Z: an
+            // elliptic arc, 20 mm from the axis at its widest (z = 0).
+            const gp_Elips outline(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(0,-1,0),gp_Dir(1,0,0)),20,10);
+            const auto arc = BRepBuilderAPI_MakeEdge(outline,-1.1,1.3).Edge();
+            shape = BRepPrimAPI_MakeRevol(arc,gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,0,1))).Shape();
         }
         if (fixture == 7) {
             const auto cylinder = BRepPrimAPI_MakeCylinder(30,50).Shape();
