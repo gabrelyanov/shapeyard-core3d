@@ -77,6 +77,10 @@ struct BevelPreviewWorkerSource {
         retainedInput;
     //! Fable engine review 5 F1: no flat-seam merge on a part with face looks.
     Standard_Boolean mayMergeFlatSeams = Standard_False;
+    //! Fable engine review 9 PP9: the part was picked in Object mode, so the
+    //! Split lines the merge removed are drawn back even when some edge (a
+    //! cone's tip, a sphere's pole) could not be selected.
+    Standard_Boolean isObjectSelection = Standard_False;
 };
 
 struct BevelPreviewWorkerRequest {
@@ -721,7 +725,8 @@ struct ChamferInput {
 ChamferInput ChamferInputWithoutFlatSeams(
     const TopoDS_Shape& theShape,
     const std::vector<TopoDS_Edge>& theEdges,
-    const Standard_Boolean theMayMerge) noexcept
+    const Standard_Boolean theMayMerge,
+    const Standard_Boolean theIsObjectSelection = Standard_False) noexcept
 {
     ChamferInput anUnchanged;
     anUnchanged.shape = theShape;
@@ -850,8 +855,10 @@ ChamferInput ChamferInputWithoutFlatSeams(
         ChamferInput aMergedInput;
         aMergedInput.shape = aMerged;
         aMergedInput.edges = std::move(aMapped);
-        if (aKeep.IsEmpty()) {
-            // Every edge selected (Object mode): the seams merged away are
+        if (aKeep.IsEmpty() || theIsObjectSelection) {
+            // Every edge selected, or the part picked in Object mode (review 9
+            // PP9: a cone's tip or a sphere's pole is never selected, so
+            // "every edge" alone missed them): the seams merged away are
             // given back after the Bevel, so a Split line is kept (PP1).
             TopTools_MapOfShape aBevelled;
             for (const TopoDS_Edge& anEdge : anInput.edges) {
@@ -1120,7 +1127,7 @@ Standard_Boolean PlainBevelBuildsAt(
         if (theIsChamfer) {
             const ChamferInput aChamferInput = ChamferInputWithoutFlatSeams(
                 theSource.shape, theSource.edges,
-                theSource.mayMergeFlatSeams);
+                theSource.mayMergeFlatSeams, theSource.isObjectSelection);
             BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
             for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                 aBuilder.Add(theValue, anEdge);
@@ -1561,7 +1568,8 @@ private:
                     const ChamferInput aChamferInput =
                         ChamferInputWithoutFlatSeams(
                             aSource.shape, aSource.edges,
-                            aSource.mayMergeFlatSeams);
+                            aSource.mayMergeFlatSeams,
+                            aSource.isObjectSelection);
                     BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
                     for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                         aBuilder.Add(aDistance, anEdge);
@@ -2330,6 +2338,8 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
             BevelPreviewWorkerSource aWorkerSource;
             aWorkerSource.shape = aCopiedShape;
             aWorkerSource.mayMergeFlatSeams = !aSource.hasFaceLooks;
+            aWorkerSource.isObjectSelection = aSource.selectionMode
+                == AIS_Shape::SelectionMode(TopAbs_SHAPE);
             aWorkerSource.edges.reserve(aSource.edges.size());
             for (const TopoDS_Edge& anEdge : aSource.edges) {
                 const TopoDS_Shape aCopiedEdge = aCopy.ModifiedShape(anEdge);
