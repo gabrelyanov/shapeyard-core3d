@@ -16,6 +16,9 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <GeomAdaptor_Surface.hxx>
+#include <Geom_Surface.hxx>
+#include <gp_Pln.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
@@ -26,8 +29,14 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <BRepTools_History.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
@@ -569,6 +578,141 @@ private:
     std::shared_ptr<std::atomic_bool> myCancellation;
 };
 
+//! CTO 20 Nov 12:23: a flat Bevel skips an edge that lies between two faces
+//! in one plane. A flush Join leaves such seams (a side split in two flat
+//! pieces); there is nothing to bevel there, and OCCT's chamfer builder
+//! refused the whole Bevel on them, while the round one copes. Only the
+//! chamfer is built from this list; the selection, the stored edge indices
+//! and the round are unchanged. When every edge is such a seam the list is
+//! returned unchanged, so the Bevel refuses exactly as before.
+std::vector<TopoDS_Edge> ChamferEdgesWithoutFlatSeams(
+    const TopoDS_Shape& theShape,
+    const std::vector<TopoDS_Edge>& theEdges) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        TopTools_IndexedDataMapOfShapeListOfShape aFacesOfEdge;
+        TopExp::MapShapesAndUniqueAncestors(
+            theShape, TopAbs_EDGE, TopAbs_FACE, aFacesOfEdge);
+        std::vector<TopoDS_Edge> aKept;
+        aKept.reserve(theEdges.size());
+        for (const TopoDS_Edge& anEdge : theEdges) {
+            Standard_Boolean isFlatSeam = Standard_False;
+            const Standard_Integer anIndex = anEdge.IsNull()
+                ? 0 : aFacesOfEdge.FindIndex(anEdge);
+            if (anIndex > 0 && aFacesOfEdge(anIndex).Extent() == 2) {
+                const TopoDS_Face aFirst =
+                    TopoDS::Face(aFacesOfEdge(anIndex).First());
+                const TopoDS_Face aSecond =
+                    TopoDS::Face(aFacesOfEdge(anIndex).Last());
+                const Handle(Geom_Surface) aFirstSurface =
+                    BRep_Tool::Surface(aFirst);
+                const Handle(Geom_Surface) aSecondSurface =
+                    BRep_Tool::Surface(aSecond);
+                if (!aFirst.IsSame(aSecond) && !aFirstSurface.IsNull()
+                    && !aSecondSurface.IsNull()) {
+                    const GeomAdaptor_Surface aFirstAdaptor(aFirstSurface);
+                    const GeomAdaptor_Surface aSecondAdaptor(aSecondSurface);
+                    if (aFirstAdaptor.GetType() == GeomAbs_Plane
+                        && aSecondAdaptor.GetType() == GeomAbs_Plane) {
+                        const gp_Pln aFirstPlane = aFirstAdaptor.Plane();
+                        const gp_Pln aSecondPlane = aSecondAdaptor.Plane();
+                        const Standard_Real aReach = 10.0 * std::max(
+                            BRep_Tool::Tolerance(anEdge),
+                            Precision::Confusion());
+                        isFlatSeam = aFirstPlane.Axis().Direction().IsParallel(
+                                aSecondPlane.Axis().Direction(),
+                                1.0e-6)
+                            && aFirstPlane.Distance(aSecondPlane.Location())
+                                <= aReach;
+                    }
+                }
+            }
+            if (!isFlatSeam) {
+                aKept.push_back(anEdge);
+            }
+        }
+        return aKept.empty() ? theEdges : aKept;
+    } catch (...) {
+        return theEdges;
+    }
+}
+
+//! The shape and edges a flat Bevel is built from. When the selection holds a
+//! seam between two faces in one plane (a flush Join), skipping the seam alone
+//! still leaves OCCT's chamfer builder a vertex where the seam meets bevelled
+//! edges, and it refuses (20 Nov run push-pull-20261120-125311-69082). Then
+//! the flat pieces are merged first (ShapeUpgrade_UnifySameDomain) and the
+//! selected edges are followed into the merged solid; the seams are gone and
+//! split collinear edges become one. With no seam selected, or if the merge
+//! fails or loses every edge, the input is used as before.
+struct ChamferInput {
+    TopoDS_Shape shape;
+    std::vector<TopoDS_Edge> edges;
+};
+
+ChamferInput ChamferInputWithoutFlatSeams(
+    const TopoDS_Shape& theShape,
+    const std::vector<TopoDS_Edge>& theEdges) noexcept
+{
+    ChamferInput anInput;
+    anInput.shape = theShape;
+    anInput.edges = ChamferEdgesWithoutFlatSeams(theShape, theEdges);
+    if (anInput.edges.size() == theEdges.size()) {
+        return anInput;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        ShapeUpgrade_UnifySameDomain aUnify(
+            theShape, Standard_True, Standard_True, Standard_False);
+        aUnify.AllowInternalEdges(Standard_False);
+        aUnify.Build();
+        const TopoDS_Shape aMerged = aUnify.Shape();
+        if (aMerged.IsNull()
+            || !BRepCheck_Analyzer(aMerged, Standard_True).IsValid()) {
+            return anInput;
+        }
+        TopTools_IndexedMapOfShape aMergedEdges;
+        TopExp::MapShapes(aMerged, TopAbs_EDGE, aMergedEdges);
+        const Handle(BRepTools_History) aHistory = aUnify.History();
+        TopTools_MapOfShape aSeen;
+        std::vector<TopoDS_Edge> aMapped;
+        for (const TopoDS_Edge& anEdge : anInput.edges) {
+            if (!aHistory.IsNull() && aHistory->IsRemoved(anEdge)) {
+                continue;
+            }
+            TopTools_ListOfShape aNow;
+            if (!aHistory.IsNull()) {
+                aNow = aHistory->Modified(anEdge);
+            }
+            if (aNow.IsEmpty()) {
+                aNow.Append(anEdge);
+            }
+            for (TopTools_ListIteratorOfListOfShape anIt(aNow);
+                 anIt.More(); anIt.Next()) {
+                if (anIt.Value().IsNull()
+                    || anIt.Value().ShapeType() != TopAbs_EDGE) {
+                    continue;
+                }
+                const Standard_Integer anIndex =
+                    aMergedEdges.FindIndex(anIt.Value());
+                if (anIndex > 0 && aSeen.Add(aMergedEdges(anIndex))) {
+                    aMapped.push_back(TopoDS::Edge(aMergedEdges(anIndex)));
+                }
+            }
+        }
+        if (aMapped.empty()) {
+            return anInput;
+        }
+        ChamferInput aMergedInput;
+        aMergedInput.shape = aMerged;
+        aMergedInput.edges = std::move(aMapped);
+        return aMergedInput;
+    } catch (...) {
+        return anInput;
+    }
+}
+
 //! True when the same edges built at theValue (distance for a chamfer,
 //! radius for a round) give one valid solid, exactly as a preview checks it.
 //! theNodesBefore / theSolidsBefore are the counts of the parts the preview
@@ -597,8 +741,10 @@ Standard_Boolean PlainBevelBuildsAt(
             new BevelCancellationIndicator(theCancellation);
         TopoDS_Shape aShape;
         if (theIsChamfer) {
-            BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
-            for (const TopoDS_Edge& anEdge : theSource.edges) {
+            const ChamferInput aChamferInput = ChamferInputWithoutFlatSeams(
+                theSource.shape, theSource.edges);
+            BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
+            for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                 aBuilder.Add(theValue, anEdge);
             }
             aBuilder.Build(aProgress->Start());
@@ -1034,8 +1180,11 @@ private:
                     }
                     aCandidate = aRetainedResult->result();
                 } else if (isChamfer) {
-                    BRepFilletAPI_MakeChamfer aBuilder(aSource.shape);
-                    for (const TopoDS_Edge& anEdge : aSource.edges) {
+                    const ChamferInput aChamferInput =
+                        ChamferInputWithoutFlatSeams(
+                            aSource.shape, aSource.edges);
+                    BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
+                    for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                         aBuilder.Add(aDistance, anEdge);
                     }
                     aBuilder.Build(aProgress->Start());
