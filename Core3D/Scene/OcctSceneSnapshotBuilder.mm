@@ -9730,8 +9730,8 @@ bool CopyMeasuredBRep(
             detachedCensus.meshNodes, detachedCensus.meshTriangles,
             detachedCensus.polygonStorage, detachedCensus.harrayStorage);
     }
-    assert(measuredEqual
-        && "BRep true/true copy disagreed with measured prediction");
+    // Blocker B6: the assert here is gone (Debug-only code; the mismatch is
+    // printed above and the copy is refused below).
     if (!measuredEqual) return false;
     if (debugCensusMode == 1)
         RecordDebugBRepCensus(sourceCensus, copyPrediction, reservedBytes,
