@@ -11823,6 +11823,20 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
     return result;
 }
 
+namespace {
+// Lamp S6-F5 (21 Nov): a tap on a part in Object mode does not always select GlobalSelOwner(): after a Ramp the
+// viewport hit selects the part's BRep owner (as a reopened XCAFPrs part does, see the "selection-owner" rebind).
+// Either is the whole part when the owner belongs to that presentation and holds exactly its shape.
+bool IsWholePartSelectionOwner(const Handle(SelectMgr_EntityOwner)& owner,
+                               const Handle(AIS_Shape)& presentation) noexcept {
+    if (owner.IsNull() || presentation.IsNull()) return false;
+    if (owner == presentation->GlobalSelOwner()) return true;
+    const auto brepOwner = Handle(StdSelect_BRepOwner)::DownCast(owner);
+    return !brepOwner.IsNull() && brepOwner->Selectable() == presentation.get() && brepOwner->HasShape()
+        && brepOwner->Shape().IsEqual(presentation->Shape());
+}
+}
+
 bool Core3DViewer::admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept {
     try {
         if (!ledger.meshCopy || ledger.records.size()!=1 || !_shapeInteractor || !_objectInteractor
@@ -11831,7 +11845,7 @@ bool Core3DViewer::admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept {
             || ledger.authority.selectionOwners.size()!=1
             || ledger.authority.selectedPresentations.size()!=1
             || ledger.authority.selectedPresentations.front().presentation!=ledger.meshCopy->presentation
-            || ledger.authority.selectionOwners.front()!=ledger.meshCopy->presentation->GlobalSelOwner()
+            || !IsWholePartSelectionOwner(ledger.authority.selectionOwners.front(),ledger.meshCopy->presentation)
             || !myDoc->ShapeLabel(ledger.meshCopy->presentation).IsEqual(ledger.meshCopy->previous.object.object.label)) return false;
         return _objectInteractor->verifyOrdinaryNameAuthority(ledger.authority);
     } catch (...) {return false;}
