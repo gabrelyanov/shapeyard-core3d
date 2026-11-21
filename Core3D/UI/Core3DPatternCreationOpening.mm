@@ -21,6 +21,7 @@
 #include "RadialArrayOperationController.hpp"
 
 #include <BRepBuilderAPI_Copy.hxx>
+#include <gp_Quaternion.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
@@ -1116,6 +1117,14 @@ bool CaptureAxesSnapshot(OcctDocument& owner, NSString *identifier,
     } catch (...) { output = {}; return false; }
 }
 
+
+NSArray<NSNumber *> *PlacementScalars(const gp_Trsf& transform) {
+    const gp_Quaternion rotation = transform.GetRotation();
+    return @[ @(transform.TranslationPart().X()), @(transform.TranslationPart().Y()),
+              @(transform.TranslationPart().Z()), @(rotation.X()), @(rotation.Y()),
+              @(rotation.Z()), @(rotation.W()), @(transform.ScaleFactor()) ];
+}
+
 NSDictionary<NSString *, id> *AxesEvidence(
     const core3d::pattern_owner::Snapshot& snapshot, double metersPerUnit) {
     if (!snapshot.admitted() || !snapshot.allLabels) return nil;
@@ -1140,6 +1149,9 @@ NSDictionary<NSString *, id> *AxesEvidence(
             @"shapeBytesBase64": Base64(actual.shapeBytes),
             @"shapeBytesDigest": Digest(actual.shapeBytes),
             @"geometryBounds": Bounds(object.shape),
+            // NF4: the member's own placement (translation, rotation quaternion
+            // x,y,z,w, scale), the same layout as a recipe construction frame.
+            @"placement": PlacementScalars(object.transform),
         }];
     }
     NSMutableArray *retired = [NSMutableArray array];
