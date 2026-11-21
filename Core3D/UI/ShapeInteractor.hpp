@@ -149,6 +149,9 @@ namespace core3d {
             //! distance is then the split line's offset from that edge and the
             //! candidate keeps the volume while splitting the face in two.
             Standard_Integer splitReferenceEdge = -1;
+            //! Lamp S6-F3: the name the person sees on a part whose name is only worked out (an unnamed Case is
+            //! "Case 1"); Apply stores it on the part in the same command, since the edit replaces what gave it.
+            TCollection_ExtendedString keptName;
             Standard_Size sourceSubshapeCount = 0;
             Standard_Size profileEdgeCount = 0;
             Standard_Size candidateSubshapeCount = 0;
@@ -326,6 +329,8 @@ namespace core3d {
         Standard_Integer extrusionSplitReferenceEdge() const noexcept {
             return _extrusion.splitReferenceEdge;
         }
+        //! Lamp S6-F3: the name Apply stores on the part (empty: none). Cleared with the captured face.
+        Standard_Boolean setExtrusionKeptName(const TCollection_ExtendedString& name) noexcept;
         Standard_Boolean canApplyExtrusion() const noexcept;
         //! Measure: exact local axis extents of the shown push/pull preview
         //! solid, in local BRep units (multiply by extrusionMetersPerUnit()).
