@@ -3597,6 +3597,7 @@ void P4AbortOpenCommandNoThrow(
 #include <TNaming_NamedShape.hxx>
 #include <Standard_GUID.hxx>
 #include <TDF_LabelMap.hxx>
+#include <TDF_ListIteratorOfAttributeDeltaList.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -8852,6 +8853,11 @@ void Core3DDebugDefineFrameBinXCAFFormat(
 // function : OcctViewer
 // purpose  :
 // =======================================================================
+namespace core3d::part_boolean::owner {
+int CommitReadbackFailureCount() noexcept;
+void InstallCommitReadback() noexcept;
+}
+
 OcctDocument::OcctDocument()
 : myMaximumSerializedTextureOccurrenceBytes(
       kMaximumAggregateTextureBytes),
@@ -8870,6 +8876,7 @@ OcctDocument::OcctDocument()
     myAuthorityApplication = new core3d::authority::NativeObservedApplication();
 #endif
     myApp = myAuthorityApplication;
+    core3d::part_boolean::owner::InstallCommitReadback();
     std::array<std::uint8_t, 16> nonce{};
     [[NSUUID UUID] getUUIDBytes:nonce.data()];
     myNativeAuthority = std::make_shared<core3d::authority::NativeEditAuthority>(nonce);
@@ -34978,6 +34985,41 @@ bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
         return proven;
     } catch (...) { return false; }
 }
+
+// READBACK B (CTO 21 Nov 09:50, Fable review 5 F2): the step a commit just made is read back for every part whose
+// shape changed in it and that holds a Join/Cut/Overlap record (the record save reads). Report only.
+namespace {
+std::atomic<int> gCommitReadbackFailures{0};
+std::atomic<const TDF_Delta*> gCommitReadbackLastDelta{nullptr};
+void CommitReadback(const Handle(TDocStd_Document)& document) noexcept {
+    try {
+        if (document.IsNull() || document->GetUndos().IsEmpty()) return;
+        const Handle(TDF_Delta) delta = document->GetUndos().Last();
+        // An empty commit leaves the earlier step on top: it was read back already.
+        if (delta.IsNull() || gCommitReadbackLastDelta.exchange(delta.get()) == delta.get()) return;
+        TDF_LabelMap seen;
+        for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
+            const Handle(TDF_AttributeDelta)& change = it.Value();
+            if (change.IsNull() || change->ID() != TNaming_NamedShape::GetID()) continue;
+            const TDF_Label label = change->Label();
+            if (label.IsNull() || !seen.Add(label) || !core3d::composite_recipe::HasRecord(label)) continue;
+            core3d::composite_recipe::Record record;
+            if (!core3d::composite_recipe::Read(document, label, record) || !record.value
+                || !OriginalsFeature(record.value->definition)) continue;
+            if (!ValidateOriginalsRecord(document, record)) {
+                gCommitReadbackFailures.fetch_add(1);
+#if DEBUG
+                TCollection_AsciiString entry; TDF_Tool::Entry(label, entry);
+                std::fprintf(stderr, "COMMIT_READBACK refused label=%s\n", entry.ToCString());
+#endif
+            }
+        }
+    } catch (...) { gCommitReadbackFailures.fetch_add(1); }
+}
+} // namespace
+
+int CommitReadbackFailureCount() noexcept { return gCommitReadbackFailures.load(); }
+void InstallCommitReadback() noexcept { core3d::authority::gCommitReadback = &CommitReadback; }
 
 #if DEBUG
 namespace i16_n_read {

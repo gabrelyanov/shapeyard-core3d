@@ -2748,6 +2748,10 @@ __attribute__((objc_subclassing_restricted))
 - (NSInteger)debugNativeDeleteRefusalStage;
 //! N04 diagnostic: the last Mesh copy guard reached (2-6 viewer, 10-19 source, 20+PreparationResult tessellation, 30 creation, 90 staged).
 - (NSInteger)debugMeshCopyRejectStage;
+//! READBACK B: how many committed commands left a joined or cut part whose record save would refuse (must stay 0).
++ (NSInteger)debugCommitReadbackFailureCount;
+//! READBACK B red-first: one committed command puts a 13 x 17 x 19 box on the part (DEBUG only; NO otherwise).
+- (BOOL)debugCommitWrongSolidOnEntity:(NSString *)entityIdentifier;
 //! Byte-drift diagnostic: the last NamedShape records read from a file.
 + (NSString *)debugNamedShapeReadSummary;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
