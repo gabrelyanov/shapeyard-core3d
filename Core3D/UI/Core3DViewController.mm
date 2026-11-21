@@ -5810,6 +5810,11 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 	std::vector<PendingStyle> pendingStyles;
     NSMutableArray* materials = [NSMutableArray array];
     NSMutableArray* colors = [NSMutableArray array];
+    // Object mode: a swatch is the part's own colour, and a colour painted on one face stays
+    // (round 3 S6-F4; Material > PBR already kept it). Face mode keeps its whole-part paint
+    // (62574950f, waiting on the founder's decision about painting one face).
+    const BOOL replacesFaceColours = wholeParts
+        && _currentSelectionType != PrimitiveSelectionTypeShape;
 
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         auto selected = context->SelectedInteractive();
@@ -5867,7 +5872,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 		}
 		for (const PendingStyle& style : pendingStyles) {
 
-            if (wholeParts && !doc->ClearPartSubshapeAppearance(style.label)) {
+            if (replacesFaceColours && !doc->ClearPartSubshapeAppearance(style.label)) {
                 Core3DAbortCommandNoThrow(transaction);
                 return;
             }
@@ -5889,7 +5894,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 	doc->NotifyChanges();
 
 	for (const PendingStyle& style : pendingStyles) {
-        if (wholeParts) {
+        if (replacesFaceColours) {
             const auto colored = Handle(AIS_ColoredShape)::DownCast(style.shape);
             if (!colored.IsNull()) {
                 for (AIS_DataMapOfShapeDrawer::Iterator entry(colored->CustomAspectsMap()); entry.More(); entry.Next()) {
