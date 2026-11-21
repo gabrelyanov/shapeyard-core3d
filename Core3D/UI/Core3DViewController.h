@@ -1219,6 +1219,10 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(createEnclosure(definition:expected:completion:));
 - (nullable Core3DStoredEnclosureSnapshot *)storedEnclosureWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedEnclosure(entityIdentifier:expected:));
+//! Lamp S6-F3: YES when the part carries a Case record, current or not (a Split leaves it out of date). Read-only,
+//! main thread, any selection mode. The Objects list names such an unnamed part "Case N".
+- (BOOL)partHoldsCaseRecordWithEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(partHoldsCaseRecord(entityIdentifier:));
 - (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
     definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion

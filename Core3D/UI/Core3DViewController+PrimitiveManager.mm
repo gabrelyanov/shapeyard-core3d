@@ -785,6 +785,13 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     return [GLController extrusionSplitReferenceEdge];
 }
 
+- (BOOL)setExtrusionKeptName:(NSString *)name {
+    if (_currentGizmoType != PrimitiveGizmoTypeExtrude) {
+        return NO;
+    }
+    return [GLController setExtrusionKeptName:name];
+}
+
 - (double)getExtrusionMetersPerUnit {
     if (![NSThread isMainThread] || GLController == nil
         || _currentGizmoType != PrimitiveGizmoTypeExtrude) {
