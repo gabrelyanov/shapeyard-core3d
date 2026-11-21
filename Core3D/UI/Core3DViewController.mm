@@ -17978,6 +17978,26 @@ extern "C" int Core3DDebugMeshCopyRejectStage;
     } catch (...) { return nil; }
 }
 
+- (BOOL)partHoldsCaseRecordWithEntityIdentifier:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:[NSString class]]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128 || !entityIdentifier.UTF8String
+        || GLController == nil || GLController.viewer == nullptr) return NO;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return NO;
+        const auto document = owner->Document();
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(labels);
+        for (int i = 1; i <= labels.Length(); ++i) {
+            const auto label = labels.Value(i);
+            if (owner->EntityIdentifierForLabel(label) != entityIdentifier.UTF8String) continue;
+            core3d::enclosure::Record record;
+            return core3d::enclosure::Read(document, label, record) && !record.label.IsNull();
+        }
+    } catch (...) {}
+    return NO;
+}
+
 - (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
     definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
