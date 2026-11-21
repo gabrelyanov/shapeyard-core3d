@@ -429,18 +429,43 @@ bool TransformFor(const core3d::pattern::Matrix& matrix, gp_Trsf& output) noexce
     } catch (...) { return false; }
 }
 
-// Detached independent member shape at the member placement. The coordinate
-// {0,0} source keeps its own label and is never copied here.
+// Detached independent member shape plus its member placement. The coordinate
+// {0,0} source keeps its own label and is never copied here. NF4 (21 Nov 2026):
+// the copy's shape is NOT shifted; the placement goes into the copy's own
+// transform (OcctPreparedLabelClone::memberPlacement), so By numbers reads
+// where the copy is, also after its original is deleted.
+#if DEBUG
+// DEBUG-only: lets a native check make a pattern the way build 8 saved it
+// (offset in the copy's shape) to prove such old files reopen and save unchanged.
+bool gLegacyShiftedPatternCopies = false;
+#endif
+
+bool LegacyShiftedPatternCopies() noexcept {
+#if DEBUG
+    return gLegacyShiftedPatternCopies;
+#else
+    return false;
+#endif
+}
+
 bool DetachedMemberShape(const TopoDS_Shape& source,
                          const core3d::pattern::Matrix& world,
                          TopoDS_Shape& output, gp_Trsf& placement) noexcept {
     output.Nullify();
     try {
         if (!TransformFor(world, placement)) return false;
-        BRepBuilderAPI_Transform copy(source, placement, Standard_True);
-        if (!copy.IsDone() || copy.Shape().IsNull()
-            || copy.Shape().IsPartner(source)) return false;
-        output = core3d::pattern_owner::FileStableMemberShape(copy.Shape());
+        TopoDS_Shape copied;
+        if (LegacyShiftedPatternCopies()) {
+            BRepBuilderAPI_Transform copy(source, placement, Standard_True);
+            if (!copy.IsDone()) return false;
+            copied = copy.Shape();
+        } else {
+            BRepBuilderAPI_Copy copy(source, Standard_True, Standard_False);
+            if (!copy.IsDone()) return false;
+            copied = copy.Shape();
+        }
+        if (copied.IsNull() || copied.IsPartner(source)) return false;
+        output = core3d::pattern_owner::FileStableMemberShape(copied);
         return true;
     } catch (...) { output.Nullify(); return false; }
 }
@@ -569,6 +594,7 @@ bool PrepareCreation(const CreationCapture& capture, NSDictionary *candidate,
             clone.detachedShape = shape;
             clone.representation =
                 capture.sourceReceipt.visibility.object.object.resolvedRepresentation;
+            if (!LegacyShiftedPatternCopies()) clone.memberPlacement = transform;
             CreationRecipe recipeEntry;
             recipeEntry.entityIdentifier = issued[issuedIndex].EntityIdentifier();
             if (capture.sourceRecipe.family != recipe::Family::None) {
@@ -580,7 +606,9 @@ bool PrepareCreation(const CreationCapture& capture, NSDictionary *candidate,
                 }
                 if (!minted) return false;
             }
-            const std::optional<gp_Trsf> baked = transform;
+            // NF4: the shape is unshifted, so the recipe keeps the source's frame.
+            const std::optional<gp_Trsf> baked = LegacyShiftedPatternCopies()
+                ? std::optional<gp_Trsf>(transform) : std::nullopt;
             if (!recipe::Prepare(capture.sourceRecipe, shape,
                                  recipeEntry.featureIdentifier, baked,
                                  recipeEntry.prepared)) return false;
@@ -1623,5 +1651,14 @@ std::uint64_t PatternCreationProbe(std::int32_t scenario) noexcept {
 extern "C" std::uint64_t
 Core3DDebugPatternCreationProbe(std::int32_t scenario) noexcept {
     return PatternCreationProbe(scenario);
+}
+
+// NF4 old-file check: true = new patterns are made the build 8 way (offset in
+// each copy's shape, copy keeps the original's placement). Returns the old value.
+extern "C" bool
+Core3DDebugPatternUseLegacyShiftedCopies(bool enabled) noexcept {
+    const bool previous = gLegacyShiftedPatternCopies;
+    gLegacyShiftedPatternCopies = enabled;
+    return previous;
 }
 #endif

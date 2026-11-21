@@ -25628,7 +25628,14 @@ Standard_Boolean OcctDocument::StageCreateExactFreeLabel(
         if (!SetGeometryRepresentationForLabel(label, clone.representation))
             return Standard_False;
         Handle(AIS_Shape) presentation = new AIS_Shape(detached);
-        presentation->SetLocalTransformation(source.visibility.object.object.transform);
+        if (clone.memberPlacement) {
+            if (!core3d::pattern_recipe_clone::IsProperRigidPlacement(*clone.memberPlacement))
+                return Standard_False;
+            presentation->SetLocalTransformation(
+                source.visibility.object.object.transform * *clone.memberPlacement);
+        } else {
+            presentation->SetLocalTransformation(source.visibility.object.object.transform);
+        }
         if (!SaveObjectTransform(label, presentation)
             || !CopyObjectAppearance(source.visibility.object.object.label, label))
             return Standard_False;
@@ -25695,8 +25702,16 @@ Standard_Boolean OcctDocument::StageReplaceExactFreeLabel(
                         ClassifyDefinitionGeometry(clone.detachedShape, nullptr),
                         clone.representation))))
             return Standard_False;
+        if (clone.memberPlacement
+            && !core3d::pattern_recipe_clone::IsProperRigidPlacement(*clone.memberPlacement))
+            return Standard_False;
         Handle(AIS_Shape) candidate = new AIS_Shape(clone.detachedShape);
-        candidate->SetLocalTransformation(expected.visibility.object.object.transform);
+        // NF4: an unshifted Pattern copy takes the source's transform composed
+        // with its member placement (also when an old shifted copy is rebuilt
+        // by an edit); otherwise the copy keeps its own transform.
+        candidate->SetLocalTransformation(clone.memberPlacement
+            ? source.visibility.object.object.transform * *clone.memberPlacement
+            : expected.visibility.object.object.transform);
         const TDF_Label label = expected.visibility.object.object.label;
         if (!R179TraceExactLabelCheck("exact.replace.ReplaceShape",
                 !traceRefusal("ReplaceShape",
@@ -25705,8 +25720,9 @@ Standard_Boolean OcctDocument::StageReplaceExactFreeLabel(
         // ReplaceShape materializes all eight optional transform attributes.
         // Restore the validated receipt's exact sparse representation without
         // creating labels for absent values or touching other attributes.
+        // An NF4 copy keeps the eight it was just given.
         const auto& object = expected.visibility.object.object;
-        for (Standard_Integer tag = 1; tag <= 8; ++tag) {
+        for (Standard_Integer tag = 1; tag <= 8 && !clone.memberPlacement; ++tag) {
             if (object.present[tag - 1]) {
                 TDataStd_Real::Set(label.FindChild(tag), object.scalars[tag - 1]);
             } else {
