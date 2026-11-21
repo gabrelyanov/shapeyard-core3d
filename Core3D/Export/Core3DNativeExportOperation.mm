@@ -63,6 +63,7 @@
 #include <StepData_ConfParameters.hxx>
 #include <StepData_StepModel.hxx>
 #include <TDF_Tool.hxx>
+#include <TDataStd_Name.hxx>
 #include <TColStd_IndexedDataMapOfStringString.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -142,7 +143,7 @@ struct NativeExportState {
     bool usesSelectedRoots = false;
     std::set<std::string> selectedEntityIdentifiers;
     //! Objects' name for a part that has none of its own ("Case 1"), keyed
-    //! by entity identifier; OBJ only, set before start (round 3 lamp F10).
+    //! by entity identifier; OBJ and STEP, set before start (round 3 lamp F10).
     std::unordered_map<std::string, std::string> partNames;
     Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
     Standard_Real deviationCoefficient = 0.001;
@@ -2891,6 +2892,31 @@ NativeExportResult RunNativeExport(
         }
 
         if (state->exportType == ExportTypeStep) {
+            // A root part with no name of its own (a Case) gets the name
+            // Objects shows for it ("Case 1"), so the STEP PRODUCT carries
+            // it. Only this private snapshot's open export transaction is
+            // touched; parts with their own name keep it (lamp F10).
+            if (!state->partNames.empty()) {
+                for (TDF_LabelSequence::Iterator root(rootLabels); root.More(); root.Next()) {
+                    const TDF_Label& label = root.Value();
+                    const auto named = state->partNames.find(
+                        document->EntityIdentifierForLabel(label));
+                    if (named == state->partNames.end()) {
+                        continue;
+                    }
+                    Handle(TDataStd_Name) own;
+                    if (label.FindAttribute(TDataStd_Name::GetID(), own)) {
+                        TCollection_AsciiString text(own->Get());
+                        text.LeftAdjust();
+                        text.RightAdjust();
+                        if (!text.IsEmpty()) {
+                            continue;
+                        }
+                    }
+                    TDataStd_Name::Set(label, TCollection_ExtendedString(
+                        named->second.c_str(), Standard_True));
+                }
+            }
             WriteSTEP(
                 state,
                 document,
@@ -3860,7 +3886,8 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 
 - (BOOL)setExportPartNames:(NSDictionary<NSString *, NSString *> *)partNames {
     const std::shared_ptr<NativeExportState> state = _state;
-    if (state == nullptr || state->exportType != ExportTypeObj
+    if (state == nullptr
+        || (state->exportType != ExportTypeObj && state->exportType != ExportTypeStep)
         || partNames.count > 50'000) {
         return NO;
     }
@@ -3870,7 +3897,8 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
             stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         const char *entityText = entity.UTF8String;
         const char *nameText = name.UTF8String;
-        // One OBJ "g" line holds the name: no line breaks, no NUL.
+        // One OBJ "g" line or one STEP string holds the name: no line
+        // breaks, no NUL.
         if (entityText == nullptr || nameText == nullptr || name.length == 0
             || name.length > 256
             || [name rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound
