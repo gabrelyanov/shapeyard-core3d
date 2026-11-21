@@ -5810,6 +5810,11 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 	std::vector<PendingStyle> pendingStyles;
     NSMutableArray* materials = [NSMutableArray array];
     NSMutableArray* colors = [NSMutableArray array];
+    // Object mode: a swatch is the part's own colour, and a colour painted on one face stays
+    // (round 3 S6-F4; Material > PBR already kept it). Face mode keeps its whole-part paint
+    // (62574950f, waiting on the founder's decision about painting one face).
+    const BOOL replacesFaceColours = wholeParts
+        && _currentSelectionType != PrimitiveSelectionTypeShape;
 
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         auto selected = context->SelectedInteractive();
@@ -5867,7 +5872,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 		}
 		for (const PendingStyle& style : pendingStyles) {
 
-            if (wholeParts && !doc->ClearPartSubshapeAppearance(style.label)) {
+            if (replacesFaceColours && !doc->ClearPartSubshapeAppearance(style.label)) {
                 Core3DAbortCommandNoThrow(transaction);
                 return;
             }
@@ -5889,7 +5894,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 	doc->NotifyChanges();
 
 	for (const PendingStyle& style : pendingStyles) {
-        if (wholeParts) {
+        if (replacesFaceColours) {
             const auto colored = Handle(AIS_ColoredShape)::DownCast(style.shape);
             if (!colored.IsNull()) {
                 for (AIS_DataMapOfShapeDrawer::Iterator entry(colored->CustomAspectsMap()); entry.More(); entry.Next()) {
@@ -16573,6 +16578,35 @@ namespace core3d::part_boolean::owner { int CommitReadbackFailureCount() noexcep
     return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly
                                            rect:rect objectIdentity:nullptr
                                     fillingRect:fillingRect];
+}
+
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)rect
+                        viewFromCenter:(simd_double3)viewFromCenter
+                                    up:(simd_double3)up {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return NO;
+    }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1.0 || size.height < 1.0
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        return NO;
+    }
+    const double from[3] = {viewFromCenter.x, viewFromCenter.y, viewFromCenter.z};
+    const double upward[3] = {up.x, up.y, up.z};
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
+            nullptr, false, from, upward)) {
+        return NO;
+    }
+    [GLController requestRender];
+    [self viewDidInvalidateSceneSnapshot];
+    return YES;
 }
 
 - (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
