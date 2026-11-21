@@ -4348,6 +4348,16 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     return _viewer->getShapeInteractor()->extrusionSplitReferenceEdge();
 }
 
+- (BOOL)setExtrusionKeptName:(NSString *)name {
+    if ([self getGizmoType] != PrimitiveGizmoTypeExtrude || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr || ![name isKindOfClass:[NSString class]]
+        || name.length == 0 || name.length > 128 || name.UTF8String == nullptr) {
+        return NO;
+    }
+    return _viewer->getShapeInteractor()->setExtrusionKeptName(
+        TCollection_ExtendedString(name.UTF8String, Standard_True));
+}
+
 - (NSArray<NSNumber *> *_Nullable)extrusionPreviewSizeMeters {
     if (![NSThread isMainThread] || _viewer == nullptr
         || [self getGizmoType] != PrimitiveGizmoTypeExtrude
