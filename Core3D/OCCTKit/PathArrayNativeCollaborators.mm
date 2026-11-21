@@ -5,6 +5,7 @@
 #include "NativeOpeningDependentReplay.hxx"
 #include "BoundedCurveOwner.hxx"
 
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -832,20 +833,24 @@ PreparedEdit PrepareMutation(OcctDocument& owner, PreparedEdit result,
             if (!MatrixTransform(placements[ordinal].occurrenceFrame, occurrence))
                 return refused;
             const gp_Trsf transform = occurrence * sourceFrame.Inverted();
-            BRepBuilderAPI_Transform copied(
+            // NF4 sibling (21 Nov 2026): unshifted copy; its placement goes
+            // into its own transform (clone.memberPlacement below).
+            BRepBuilderAPI_Copy copied(
                 result.opening.labels->source.visibility.object.object.shape,
-                transform, Standard_True);
+                Standard_True, Standard_False);
             if (!copied.IsDone() || copied.Shape().IsNull()) return refused;
             OcctPreparedLabelClone clone;
             clone.source = result.opening.labels->source;
             clone.detachedShape = copied.Shape();
             clone.representation = result.opening.labels->source
                 .visibility.object.object.resolvedRepresentation;
+            clone.memberPlacement = transform;
             NativeMutation::Recipe recipe;
             recipe.ordinal = std::uint32_t(ordinal);
             recipe.created = before == nullptr;
             recipe.entityIdentifier = Text(retained.identity);
-            const std::optional<gp_Trsf> baked = transform;
+            // NF4 sibling: the shape is unshifted, so recipes keep the source's frame.
+            const std::optional<gp_Trsf> baked = std::nullopt;
             if (before) {
                 mutation->labels.replacements.push_back({before->receipt, clone});
                 const auto& sourceRecipe = result.opening.labels->sourceRecipe;
