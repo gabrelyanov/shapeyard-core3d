@@ -5,6 +5,7 @@
 
 #include "BevelOperationController.hpp"
 #include "../OCCTKit/FilletFailureClassifier.hxx"
+#include "PlaneFrameSettle.hpp"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -16,6 +17,9 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <GeomAdaptor_Surface.hxx>
+#include <Geom_Surface.hxx>
+#include <gp_Pln.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
@@ -26,8 +30,14 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <BRepTools_History.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
@@ -64,6 +74,8 @@ struct BevelPreviewWorkerSource {
     std::vector<TopoDS_Edge> edges;
     std::shared_ptr<const retained_edge_treatment::DetachedInput>
         retainedInput;
+    //! Fable engine review 5 F1: no flat-seam merge on a part with face looks.
+    Standard_Boolean mayMergeFlatSeams = Standard_False;
 };
 
 struct BevelPreviewWorkerRequest {
@@ -219,6 +231,51 @@ Standard_Boolean HasStyledXCAFSubshape(
                 || (!aLayerTool.IsNull()
                     && aLayerTool->GetLayers(aLabel, aLayers)
                     && !aLayers.IsEmpty())) {
+                return Standard_True;
+            }
+        }
+        return Standard_False;
+    } catch (...) {
+        return Standard_True;
+    }
+}
+
+//! True when a face (or any sub-shape) of theDefinition carries its own look:
+//! a colour, a material, or a hidden flag. Also true when the walk cannot be
+//! finished, so a caller that uses it to allow a merge stays on the safe side.
+Standard_Boolean HasSubshapeLook(
+    const Handle(TDocStd_Document)& theDocument,
+    const TDF_Label& theDefinition,
+    const Standard_Size theMaximumLabels) noexcept
+{
+    if (theDocument.IsNull() || theDefinition.IsNull()
+        || theDefinition.Data() != theDocument->GetData()
+        || theMaximumLabels == 0) {
+        return Standard_True;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(XCAFDoc_ColorTool) aColorTool =
+            XCAFDoc_DocumentTool::CheckColorTool(theDocument->Main())
+                ? XCAFDoc_DocumentTool::ColorTool(theDocument->Main())
+                : Handle(XCAFDoc_ColorTool)();
+        Standard_Size aLabelCount = 0;
+        for (TDF_ChildIterator anItem(theDefinition, Standard_False);
+             anItem.More(); anItem.Next()) {
+            if (++aLabelCount > theMaximumLabels) {
+                return Standard_True;
+            }
+            const TDF_Label& aLabel = anItem.Value();
+            if (!XCAFDoc_ShapeTool::IsSubShape(aLabel)) {
+                continue;
+            }
+            if (aLabel.IsNull()
+                || !XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel).IsNull()
+                || (!aColorTool.IsNull()
+                    && (aColorTool->IsSet(aLabel, XCAFDoc_ColorGen)
+                        || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
+                        || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
+                        || !XCAFDoc_ColorTool::IsVisible(aLabel)))) {
                 return Standard_True;
             }
         }
@@ -569,6 +626,229 @@ private:
     std::shared_ptr<std::atomic_bool> myCancellation;
 };
 
+//! CTO 20 Nov 12:23: a flat Bevel skips an edge that lies between two faces
+//! in one plane. A flush Join leaves such seams (a side split in two flat
+//! pieces); there is nothing to bevel there, and OCCT's chamfer builder
+//! refused the whole Bevel on them, while the round one copes. Only the
+//! chamfer is built from this list; the selection, the stored edge indices
+//! and the round are unchanged. When every edge is such a seam the list is
+//! returned unchanged, so the Bevel refuses exactly as before.
+//! One angle for "two faces in one plane": the seam test and the merge use
+//! it both, so a rotated flush part is merged exactly when it is detected
+//! (Fable engine review 5: 1e-6 rad against the merge's 1e-12 refused them).
+constexpr Standard_Real kFlatSeamAngularTolerance = 1.0e-6;
+
+std::vector<TopoDS_Edge> ChamferEdgesWithoutFlatSeams(
+    const TopoDS_Shape& theShape,
+    const std::vector<TopoDS_Edge>& theEdges) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        TopTools_IndexedDataMapOfShapeListOfShape aFacesOfEdge;
+        TopExp::MapShapesAndUniqueAncestors(
+            theShape, TopAbs_EDGE, TopAbs_FACE, aFacesOfEdge);
+        std::vector<TopoDS_Edge> aKept;
+        aKept.reserve(theEdges.size());
+        for (const TopoDS_Edge& anEdge : theEdges) {
+            Standard_Boolean isFlatSeam = Standard_False;
+            const Standard_Integer anIndex = anEdge.IsNull()
+                ? 0 : aFacesOfEdge.FindIndex(anEdge);
+            if (anIndex > 0 && aFacesOfEdge(anIndex).Extent() == 2) {
+                const TopoDS_Face aFirst =
+                    TopoDS::Face(aFacesOfEdge(anIndex).First());
+                const TopoDS_Face aSecond =
+                    TopoDS::Face(aFacesOfEdge(anIndex).Last());
+                const Handle(Geom_Surface) aFirstSurface =
+                    BRep_Tool::Surface(aFirst);
+                const Handle(Geom_Surface) aSecondSurface =
+                    BRep_Tool::Surface(aSecond);
+                if (!aFirst.IsSame(aSecond) && !aFirstSurface.IsNull()
+                    && !aSecondSurface.IsNull()) {
+                    const GeomAdaptor_Surface aFirstAdaptor(aFirstSurface);
+                    const GeomAdaptor_Surface aSecondAdaptor(aSecondSurface);
+                    if (aFirstAdaptor.GetType() == GeomAbs_Plane
+                        && aSecondAdaptor.GetType() == GeomAbs_Plane) {
+                        const gp_Pln aFirstPlane = aFirstAdaptor.Plane();
+                        const gp_Pln aSecondPlane = aSecondAdaptor.Plane();
+                        const Standard_Real aReach = 10.0 * std::max(
+                            BRep_Tool::Tolerance(anEdge),
+                            Precision::Confusion());
+                        isFlatSeam = aFirstPlane.Axis().Direction().IsParallel(
+                                aSecondPlane.Axis().Direction(),
+                                kFlatSeamAngularTolerance)
+                            && aFirstPlane.Distance(aSecondPlane.Location())
+                                <= aReach;
+                    }
+                }
+            }
+            if (!isFlatSeam) {
+                aKept.push_back(anEdge);
+            }
+        }
+        return aKept.empty() ? theEdges : aKept;
+    } catch (...) {
+        return theEdges;
+    }
+}
+
+//! The shape and edges a flat Bevel is built from. When the selection holds a
+//! seam between two faces in one plane (a flush Join), skipping the seam alone
+//! still leaves OCCT's chamfer builder a vertex where the seam meets bevelled
+//! edges, and it refuses (20 Nov run push-pull-20261120-125311-69082). Then
+//! the flat pieces are merged first (ShapeUpgrade_UnifySameDomain) and the
+//! selected edges are followed into the merged solid; the seams are gone and
+//! split collinear edges become one. With no seam selected, or if the merge
+//! fails or loses every edge, the input is used as before.
+struct ChamferInput {
+    TopoDS_Shape shape;
+    std::vector<TopoDS_Edge> edges;
+};
+
+//! Fable engine review 5 (CTO 20 Nov 15:37): the merge is never made on a part
+//! whose faces carry their own looks (theMayMerge false: a two-look flush side
+//! would come out in one look), and it is used only when every selected edge
+//! that is not a seam is found again in the merged solid and every merged edge
+//! it is bevelled on comes only from selected edges (a piece of a split edge
+//! never bevels its unselected neighbour). Otherwise the selection goes to
+//! the chamfer builder unchanged, which refuses as before 6f2a87e.
+ChamferInput ChamferInputWithoutFlatSeams(
+    const TopoDS_Shape& theShape,
+    const std::vector<TopoDS_Edge>& theEdges,
+    const Standard_Boolean theMayMerge) noexcept
+{
+    ChamferInput anUnchanged;
+    anUnchanged.shape = theShape;
+    anUnchanged.edges = theEdges;
+    if (!theMayMerge) {
+        return anUnchanged;
+    }
+    ChamferInput anInput;
+    anInput.shape = theShape;
+    anInput.edges = ChamferEdgesWithoutFlatSeams(theShape, theEdges);
+    if (anInput.edges.size() == theEdges.size()) {
+        return anInput;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        // Fable engine review 6 P2 (CTO 20 Nov 18:40): only the selected seams
+        // go. Every edge the person did not select is kept, so no faces merge
+        // across it (a Split line or an unselected seam stays), and so is every
+        // vertex of such an edge, so it is never fused with a neighbour.
+        TopTools_MapOfShape aSelected;
+        for (const TopoDS_Edge& anEdge : theEdges) {
+            aSelected.Add(anEdge);
+        }
+        TopTools_IndexedMapOfShape anOriginalEdges;
+        TopExp::MapShapes(theShape, TopAbs_EDGE, anOriginalEdges);
+        TopTools_MapOfShape aKeep;
+        for (Standard_Integer anIndex = 1;
+             anIndex <= anOriginalEdges.Extent(); ++anIndex) {
+            const TopoDS_Shape& anOriginal = anOriginalEdges(anIndex);
+            if (aSelected.Contains(anOriginal)) {
+                continue;
+            }
+            aKeep.Add(anOriginal);
+            for (TopExp_Explorer aVertex(anOriginal, TopAbs_VERTEX);
+                 aVertex.More(); aVertex.Next()) {
+                aKeep.Add(aVertex.Current());
+            }
+        }
+        ShapeUpgrade_UnifySameDomain aUnify(
+            theShape, Standard_True, Standard_True, Standard_False);
+        aUnify.AllowInternalEdges(Standard_False);
+        aUnify.SetAngularTolerance(kFlatSeamAngularTolerance);
+        aUnify.KeepShapes(aKeep);
+        aUnify.Build();
+        const TopoDS_Shape aMerged = aUnify.Shape();
+        if (aMerged.IsNull()
+            || !BRepCheck_Analyzer(aMerged, Standard_True).IsValid()) {
+            return anInput;
+        }
+        // Fable engine review 6 P3: the merge only removes seams, so the solid
+        // must hold the same volume; anything else and the merge is not used.
+        {
+            GProp_GProps aBefore;
+            GProp_GProps anAfter;
+            BRepGProp::VolumeProperties(theShape, aBefore);
+            BRepGProp::VolumeProperties(aMerged, anAfter);
+            const Standard_Real aSource = std::abs(aBefore.Mass());
+            if (!(aSource > 0.0)
+                || !(std::abs(std::abs(anAfter.Mass()) - aSource)
+                     <= 1.0e-9 * aSource)) {
+                return anInput;
+            }
+        }
+        TopTools_IndexedMapOfShape aMergedEdges;
+        TopExp::MapShapes(aMerged, TopAbs_EDGE, aMergedEdges);
+        const Handle(BRepTools_History) aHistory = aUnify.History();
+        if (aHistory.IsNull()) {
+            return anUnchanged;
+        }
+        // Where each edge of the part goes in the merged solid (itself when
+        // the merge left it alone); empty when it was merged away.
+        const auto anImages = [&](const TopoDS_Shape& theEdge) {
+            std::vector<TopoDS_Shape> aFound;
+            if (aHistory->IsRemoved(theEdge)) {
+                return aFound;
+            }
+            TopTools_ListOfShape aNow = aHistory->Modified(theEdge);
+            if (aNow.IsEmpty()) {
+                aNow.Append(theEdge);
+            }
+            for (TopTools_ListIteratorOfListOfShape anIt(aNow);
+                 anIt.More(); anIt.Next()) {
+                if (!anIt.Value().IsNull()
+                    && anIt.Value().ShapeType() == TopAbs_EDGE
+                    && aMergedEdges.FindIndex(anIt.Value()) > 0) {
+                    aFound.push_back(aMergedEdges(
+                        aMergedEdges.FindIndex(anIt.Value())));
+                }
+            }
+            return aFound;
+        };
+        TopTools_MapOfShape aSeen;
+        std::vector<TopoDS_Edge> aMapped;
+        for (const TopoDS_Edge& anEdge : anInput.edges) {
+            const std::vector<TopoDS_Shape> aNow = anImages(anEdge);
+            if (aNow.empty()) {
+                // A selected edge lost in the merge: refuse, never drop it.
+                return anUnchanged;
+            }
+            for (const TopoDS_Shape& anImage : aNow) {
+                if (aSeen.Add(anImage)) {
+                    aMapped.push_back(TopoDS::Edge(anImage));
+                }
+            }
+        }
+        // Bevel what was selected: a merged edge that also grew out of an
+        // edge the person did not select (one piece of a split edge chosen
+        // in Edge mode) would bevel the unselected piece too. With every
+        // unselected edge and its vertices kept this cannot happen any more;
+        // the test stays as a guard on the kernel's history.
+        for (Standard_Integer anIndex = 1;
+             anIndex <= anOriginalEdges.Extent(); ++anIndex) {
+            const TopoDS_Shape& anOriginal = anOriginalEdges(anIndex);
+            if (aSelected.Contains(anOriginal)) {
+                continue;
+            }
+            for (const TopoDS_Shape& anImage : anImages(anOriginal)) {
+                if (aSeen.Contains(anImage)) {
+                    return anUnchanged;
+                }
+            }
+        }
+        if (aMapped.empty()) {
+            return anUnchanged;
+        }
+        ChamferInput aMergedInput;
+        aMergedInput.shape = aMerged;
+        aMergedInput.edges = std::move(aMapped);
+        return aMergedInput;
+    } catch (...) {
+        return anInput;
+    }
+}
+
 //! True when the same edges built at theValue (distance for a chamfer,
 //! radius for a round) give one valid solid, exactly as a preview checks it.
 //! theNodesBefore / theSolidsBefore are the counts of the parts the preview
@@ -597,8 +877,11 @@ Standard_Boolean PlainBevelBuildsAt(
             new BevelCancellationIndicator(theCancellation);
         TopoDS_Shape aShape;
         if (theIsChamfer) {
-            BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
-            for (const TopoDS_Edge& anEdge : theSource.edges) {
+            const ChamferInput aChamferInput = ChamferInputWithoutFlatSeams(
+                theSource.shape, theSource.edges,
+                theSource.mayMergeFlatSeams);
+            BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
+            for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                 aBuilder.Add(theValue, anEdge);
             }
             aBuilder.Build(aProgress->Start());
@@ -1034,8 +1317,12 @@ private:
                     }
                     aCandidate = aRetainedResult->result();
                 } else if (isChamfer) {
-                    BRepFilletAPI_MakeChamfer aBuilder(aSource.shape);
-                    for (const TopoDS_Edge& anEdge : aSource.edges) {
+                    const ChamferInput aChamferInput =
+                        ChamferInputWithoutFlatSeams(
+                            aSource.shape, aSource.edges,
+                            aSource.mayMergeFlatSeams);
+                    BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
+                    for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                         aBuilder.Add(aDistance, anEdge);
                     }
                     aBuilder.Build(aProgress->Start());
@@ -1048,6 +1335,14 @@ private:
                         return aResult;
                     }
                     aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
+                    // A slanted face's plane frame can flip between two
+                    // last-digit versions on every save, so the part never
+                    // reads back as written. Settle it here (a last-bit nudge
+                    // on this worker's own copy, as Push-pull does) so the
+                    // bevelled part saves and reopens to the same bytes.
+                    if (!aCandidate.IsNull()) {
+                        (void)plane_frames::SettlePlaneFramesForFile(aCandidate);
+                    }
                 } else {
                     BRepFilletAPI_MakeFillet aBuilder(aSource.shape);
                     for (const TopoDS_Edge& anEdge : aSource.edges) {
@@ -1425,6 +1720,9 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 return Standard_False;
             }
             Source aSource;
+            aSource.hasFaceLooks = HasSubshapeLook(
+                aDocument, aSelection.documentLabel,
+                kMaxStyledSubshapeLabels);
             aSource.original = aSelection.original;
             aSource.label = aSelection.documentLabel;
             aSource.shape = aShape;
@@ -1773,6 +2071,7 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
             }
             BevelPreviewWorkerSource aWorkerSource;
             aWorkerSource.shape = aCopiedShape;
+            aWorkerSource.mayMergeFlatSeams = !aSource.hasFaceLooks;
             aWorkerSource.edges.reserve(aSource.edges.size());
             for (const TopoDS_Edge& anEdge : aSource.edges) {
                 const TopoDS_Shape aCopiedEdge = aCopy.ModifiedShape(anEdge);
