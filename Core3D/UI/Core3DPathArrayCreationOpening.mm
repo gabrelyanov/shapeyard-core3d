@@ -20,7 +20,6 @@
 #include "../OCCTKit/PathArrayPersistence.hxx"
 #include "../OCCTKit/PatternOwnerBridge.hxx"
 
-#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopExp.hxx>
@@ -477,9 +476,7 @@ bool DetachedMemberShape(const CreationCapture& capture,
             || !MatrixTransform(sourceFrameValue, sourceFrame)) return false;
         transform = occurrence * sourceFrame.Inverted();
         if (!recipe::IsProperRigidPlacement(transform)) return false;
-        // NF4 sibling (21 Nov 2026): the copy's shape is NOT shifted; the
-        // placement goes into the copy's own transform (clone.memberPlacement).
-        BRepBuilderAPI_Copy copied(capture.sourceShape, Standard_True, Standard_False);
+        BRepBuilderAPI_Transform copied(capture.sourceShape, transform, Standard_True);
         if (!copied.IsDone() || copied.Shape().IsNull()
             || copied.Shape().IsPartner(capture.sourceShape)) return false;
         output = copied.Shape(); return true;
@@ -562,12 +559,10 @@ bool BuildPreparedPlan(const CreationCapture& capture,
             clone.detachedShape = shape;
             clone.representation = capture.sourceReceipt.visibility.object.object
                 .resolvedRepresentation;
-            clone.memberPlacement = transform;
             CreationRecipe entry;
             entry.entityIdentifier = issued[ordinal - 1].EntityIdentifier();
             entry.featureIdentifier = feature;
-            // NF4 sibling: the shape is unshifted, so the recipe keeps the source's frame.
-            const std::optional<gp_Trsf> baked = std::nullopt;
+            const std::optional<gp_Trsf> baked = transform;
             if (!recipe::Prepare(capture.sourceRecipe, shape, feature,
                                  baked, entry.prepared)) return false;
             output.labels.creates.push_back({issued[ordinal - 1], clone});
