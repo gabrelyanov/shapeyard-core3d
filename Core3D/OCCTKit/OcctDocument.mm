@@ -3597,7 +3597,6 @@ void P4AbortOpenCommandNoThrow(
 #include <TNaming_NamedShape.hxx>
 #include <Standard_GUID.hxx>
 #include <TDF_LabelMap.hxx>
-#include <TDF_ListIteratorOfAttributeDeltaList.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -34986,35 +34985,59 @@ bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
     } catch (...) { return false; }
 }
 
-// READBACK B (CTO 21 Nov 09:50, Fable review 5 F2): the step a commit just made is read back for every part whose
-// shape changed in it and that holds a Join/Cut/Overlap record (the record save reads). Report only.
+// READBACK B (CTO 21 Nov 09:50, Fable review 5 F2): after every commit the document's Join/Cut/Overlap records are
+// read the way save reads them (composite_recipe::ReadAll refuses when a part's stored shape is not the shape its
+// record holds), and every editable Join/Cut record whose shape changed since its last clean proof is proven again
+// (ValidateOriginalsRecord, the proof save runs). Report only: a refusal is counted and traced in DEBUG.
+// The commit's attribute delta list is not used: a commit that only rewrites a part's shape can leave it empty.
 namespace {
 std::atomic<int> gCommitReadbackFailures{0};
-std::atomic<const TDF_Delta*> gCommitReadbackLastDelta{nullptr};
+struct CommitReadbackCache {
+    const TDocStd_Document* document = nullptr;
+    std::map<std::string, TopoDS_Shape> proven; // record owner entry -> the shape last proven clean
+};
+CommitReadbackCache& ReadbackCache() noexcept { static CommitReadbackCache cache; return cache; }
+void CountReadbackFailure(const char* what, const char* entry) noexcept {
+    gCommitReadbackFailures.fetch_add(1);
+#if DEBUG
+    std::fprintf(stderr, "COMMIT_READBACK refused %s label=%s\n", what, entry);
+#else
+    (void)what; (void)entry;
+#endif
+}
+bool HoldsOriginals(const core3d::composite_recipe::Definition& definition) noexcept {
+    return std::any_of(definition.nodes.begin(), definition.nodes.end(),
+        [](const core3d::composite_recipe::Node& node) {
+            const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(&node.value);
+            return feature && feature->kind == core3d::composite_recipe::PartBooleanFeatureKind
+                && (feature->codecVersion == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec
+                    || feature->codecVersion == core3d::composite_recipe::PartBooleanResultSetFeatureCodec);
+        });
+}
 void CommitReadback(const Handle(TDocStd_Document)& document) noexcept {
     try {
-        if (document.IsNull() || document->GetUndos().IsEmpty()) return;
-        const Handle(TDF_Delta) delta = document->GetUndos().Last();
-        // An empty commit leaves the earlier step on top: it was read back already.
-        if (delta.IsNull() || gCommitReadbackLastDelta.exchange(delta.get()) == delta.get()) return;
-        TDF_LabelMap seen;
-        for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
-            const Handle(TDF_AttributeDelta)& change = it.Value();
-            if (change.IsNull() || change->ID() != TNaming_NamedShape::GetID()) continue;
-            const TDF_Label label = change->Label();
-            if (label.IsNull() || !seen.Add(label) || !core3d::composite_recipe::HasRecord(label)) continue;
-            core3d::composite_recipe::Record record;
-            if (!core3d::composite_recipe::Read(document, label, record) || !record.value
-                || !OriginalsFeature(record.value->definition)) continue;
-            if (!ValidateOriginalsRecord(document, record)) {
-                gCommitReadbackFailures.fetch_add(1);
-#if DEBUG
-                TCollection_AsciiString entry; TDF_Tool::Entry(label, entry);
-                std::fprintf(stderr, "COMMIT_READBACK refused label=%s\n", entry.ToCString());
-#endif
-            }
+        if (document.IsNull()) return;
+        auto& cache = ReadbackCache();
+        if (cache.document != document.get()) { cache.document = document.get(); cache.proven.clear(); }
+        std::vector<core3d::composite_recipe::Record> all;
+        if (!core3d::composite_recipe::ReadAll(document, all)) {
+            cache.proven.clear();
+            CountReadbackFailure("records", "-");
+            return;
         }
-    } catch (...) { gCommitReadbackFailures.fetch_add(1); }
+        std::map<std::string, TopoDS_Shape> next;
+        for (const auto& record : all) {
+            if (!record.value || record.owner.IsNull() || !HoldsOriginals(record.value->definition)) continue;
+            TCollection_AsciiString entry; TDF_Tool::Entry(record.owner, entry);
+            const std::string key(entry.ToCString());
+            const auto known = cache.proven.find(key);
+            if (known == cache.proven.end() || !known->second.IsEqual(record.current)) {
+                if (!ValidateOriginalsRecord(document, record)) { CountReadbackFailure("proof", key.c_str()); continue; }
+            }
+            next.emplace(key, record.current);
+        }
+        cache.proven.swap(next);
+    } catch (...) { CountReadbackFailure("exception", "-"); }
 }
 } // namespace
 
