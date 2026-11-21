@@ -3106,6 +3106,9 @@ bool ValidateAttachmentRigDocument(
 #include <gp_GTrsf.hxx>
 #include <XCAFDoc_ShapeMapTool.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <algorithm>
@@ -13662,6 +13665,72 @@ Standard_Boolean OcctDocument::BooleanResultRecordForBake(
     } catch (...) { record.Nullify(); return Standard_False; }
 }
 
+namespace {
+// Join tidy, plain route (CTO 18:23 20 Nov; push-pull 20 Nov: a tower Joined flush on a cube kept its shared
+// flat sides split, so flat Bevel and Shell refused). Faces that lie in one plane and edges that lie in one line
+// are merged, but never across two faces that look different (colour, material): every edge between two faces
+// of different looks is kept. Refused (the untidied result stays) unless the tidy keeps the number of solids, the
+// volume and a valid solid. The result then goes through the file trip so it is stored as the file holds it.
+// TIDY-CHECK (Fable): pictures on faces are not in `looks` (PBR colours only); such parts must not merge across
+// a picture edge.
+bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& result,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks, TopoDS_Shape& tidied) noexcept {
+    tidied.Nullify();
+    try {
+        OCC_CATCH_SIGNALS
+        if (result.IsNull()) return false;
+#if DEBUG
+        if (std::getenv("SHAPEYARD_JOIN_TIDY_OFF")) return false;
+#endif
+        // Each face's look: an index into the distinct looks, -1 for the part's own look.
+        std::vector<XCAFDoc_VisMaterialPBR> distinct;
+        TopTools_DataMapOfShapeInteger lookOfFace;
+        for (const auto& [face, material] : document.MatchFaceLooks(result, looks, Standard_False)) {
+            int index = -1;
+            for (std::size_t i = 0; i < distinct.size(); ++i)
+                if (distinct[i].IsEqual(material)) { index = int(i); break; }
+            if (index < 0) { distinct.push_back(material); index = int(distinct.size()) - 1; }
+            lookOfFace.Bind(face, index);
+        }
+        const auto lookOf = [&](const TopoDS_Shape& face) {
+            return lookOfFace.IsBound(face) ? lookOfFace.Find(face) : -1;
+        };
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
+        TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
+        TopTools_MapOfShape seams;
+        for (int i = 1; i <= facesOfEdge.Extent(); ++i) {
+            const TopTools_ListOfShape& faces = facesOfEdge.FindFromIndex(i);
+            int first = -2;
+            for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
+                const int look = lookOf(it.Value());
+                if (first == -2) first = look;
+                else if (look != first) { seams.Add(facesOfEdge.FindKey(i)); break; }
+            }
+        }
+        ShapeUpgrade_UnifySameDomain unify(result, Standard_True, Standard_True, Standard_False);
+        unify.AllowInternalEdges(Standard_False);
+        if (!seams.IsEmpty()) unify.KeepShapes(seams);
+        unify.Build();
+        const TopoDS_Shape merged = unify.Shape();
+        if (merged.IsNull()) return false;
+        const auto count = [](const TopoDS_Shape& shape, TopAbs_ShapeEnum kind) {
+            TopTools_IndexedMapOfShape map; TopExp::MapShapes(shape, kind, map); return map.Extent();
+        };
+        if (count(merged, TopAbs_FACE) >= count(result, TopAbs_FACE)
+            || count(merged, TopAbs_SOLID) != count(result, TopAbs_SOLID)
+            || !BRepCheck_Analyzer(merged, Standard_True).IsValid()) return false;
+        GProp_GProps before, after;
+        BRepGProp::VolumeProperties(result, before); BRepGProp::VolumeProperties(merged, after);
+        if (!(before.Mass() > 0) || std::abs(after.Mass() - before.Mass()) > 1.0e-7 * before.Mass()) return false;
+        TopoDS_Shape stable;
+        if (!FileStableShape(merged, stable) || stable.IsNull()
+            || !BRepCheck_Analyzer(stable, Standard_True).IsValid()) return false;
+        tidied = stable;
+        return true;
+    } catch (...) { tidied.Nullify(); return false; }
+}
+} // namespace
+
 Standard_Boolean OcctDocument::ApplyBakedBoolean(
     const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
     const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
@@ -13758,6 +13827,15 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                 std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> looks;
                 if (JoinFaceLooks(target, targetPresentation, tools, scale, looks))
                     coloured[at].insert(coloured[at].end(), looks.begin(), looks.end());
+            }
+            // Join tidy (CTO 18:23 20 Nov): flat sides the parts share become one face, colours kept apart.
+            if (operation == 0) {
+                TopoDS_Shape tidied;
+                if (TidyJoinKeepingLooks(*this, made[at].first, coloured[at], tidied)) {
+                    Handle(AIS_Shape) tidyShown = new AIS_Shape(tidied);
+                    tidyShown->SetLocalTransformation(placement);
+                    made[at] = {tidied, tidyShown};
+                }
             }
         }
         if (!anythingCut) { refusal = "no-overlap"; return Standard_False; }
