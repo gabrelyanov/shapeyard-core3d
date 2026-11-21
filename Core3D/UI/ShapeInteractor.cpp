@@ -2200,6 +2200,17 @@ namespace core3d {
 		return Standard_True;
 	}
 
+	Standard_Boolean ShapeInteractor::setExtrusionKeptName(
+		const TCollection_ExtendedString& name) noexcept {
+		try {
+			if (!_extrusion.IsReady() || !OcctObjectNameIsValid(name)) {
+				return Standard_False;
+			}
+			_extrusion.keptName = name;
+			return Standard_True;
+		} catch (...) { return Standard_False; }
+	}
+
 	void ShapeInteractor::clearExtrusionSelection() noexcept {
 		_extrusion = ExtrusionSelection();
 	}
@@ -2722,6 +2733,20 @@ namespace core3d {
 						Standard_True)) {
 					throw Standard_Failure(
 						"Unable to replace extrusion result geometry");
+				}
+				// Lamp S6-F3 (20 Nov): an unnamed Case is shown as "Case 1" only while it holds its
+				// Case record, which this edit replaces; the shown name is stored in the same step.
+				if (!_extrusion.keptName.IsEmpty()) {
+					OcctObjectNameState named;
+					if (!myDoc->CaptureObjectNameStateForLabel(_extrusion.label, named)) {
+						throw Standard_Failure("Unable to read the part's name");
+					}
+					const Standard_Boolean unnamed = !named.namePresent || named.name.IsEmpty()
+						|| named.name.IsEqual(TCollection_ExtendedString(
+							myDoc->EntityIdentifierForLabel(_extrusion.label).c_str(), Standard_True));
+					if (unnamed && !myDoc->SetObjectNameForLabel(_extrusion.label, _extrusion.keptName)) {
+						throw Standard_Failure("Unable to keep the part's name");
+					}
 				}
 				if (myDoc->GeometryRepresentationForLabel(_extrusion.label)
 					!= OcctGeometryRepresentation::BRep) {
