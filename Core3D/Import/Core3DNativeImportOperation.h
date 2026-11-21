@@ -20,26 +20,13 @@ NS_SWIFT_SENDABLE
 @property(nonatomic, readonly, copy) NSData *indexData;
 @property(nonatomic, readonly) NSUInteger vertexCount;
 @property(nonatomic, readonly) NSUInteger indexCount;
-//! Round 5 lamp S8-F2 (20 Nov 2026): the OBJ's parts ('g' / 'o' groups) in
-//! file order. Part i owns the next partTriangleCounts[i] triangles of
-//! indexData and is named partNames[i] ("" = no name in the file). Empty
-//! arrays mean one unnamed part holding every triangle.
-@property(nonatomic, readonly, copy) NSArray<NSNumber *> *partTriangleCounts;
-@property(nonatomic, readonly, copy) NSArray<NSString *> *partNames;
 
 - (instancetype)initWithVertexData:(NSData *)vertexData
                          indexData:(NSData *)indexData
                        vertexCount:(NSUInteger)vertexCount
                         indexCount:(NSUInteger)indexCount
-    NS_SWIFT_NAME(init(vertexData:indexData:vertexCount:indexCount:));
-- (instancetype)initWithVertexData:(NSData *)vertexData
-                         indexData:(NSData *)indexData
-                       vertexCount:(NSUInteger)vertexCount
-                        indexCount:(NSUInteger)indexCount
-                partTriangleCounts:(NSArray<NSNumber *> *)partTriangleCounts
-                         partNames:(NSArray<NSString *> *)partNames
     NS_DESIGNATED_INITIALIZER
-    NS_SWIFT_NAME(init(vertexData:indexData:vertexCount:indexCount:partTriangleCounts:partNames:));
+    NS_SWIFT_NAME(init(vertexData:indexData:vertexCount:indexCount:));
 - (instancetype)init NS_UNAVAILABLE;
 
 @end
