@@ -28,8 +28,6 @@
 #include <TDF_ChildIterator.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_MapOfShape.hxx>
-#include <Quantity_ColorRGBA.hxx>
-#include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_MaterialTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -2708,8 +2706,6 @@ void ImportOBJ(
         std::size_t firstTriangle = 0;
         std::size_t triangleCount = 0;
         TCollection_ExtendedString name;
-        bool hasColour = false;
-        Quantity_ColorRGBA colour;
     };
     const std::size_t triangleTotal = indexCount / 3;
     NSArray<NSNumber *> *partCounts = decoded.partTriangleCounts ?: @[];
@@ -2751,35 +2747,6 @@ void ImportOBJ(
             throw NativeImportFailure(
                 Core3DNativeImportErrorReadFailed,
                 "The OBJ decoder returned invalid part lists.");
-        }
-        // Round 5 lamp S8-F2 colours: one linear RGBA per part (Kd + opacity
-        // from the OBJ's material library); a negative alpha = no colour.
-        NSData *colours = decoded.partLinearRGBA ?: [NSData data];
-        if (colours.length != 0) {
-            if (colours.length != parts.size() * 4 * sizeof(float)) {
-                throw NativeImportFailure(
-                    Core3DNativeImportErrorReadFailed,
-                    "The OBJ decoder returned invalid part colours.");
-            }
-            const auto* rgba = static_cast<const std::uint8_t*>(colours.bytes);
-            for (std::size_t part = 0; part < parts.size(); ++part) {
-                float value[4];
-                std::memcpy(value, rgba + part * sizeof(value), sizeof(value));
-                if (value[3] < 0.0f) {
-                    continue;
-                }
-                for (const float channel : value) {
-                    if (!std::isfinite(channel) || channel < 0.0f || channel > 1.0f) {
-                        throw NativeImportFailure(
-                            Core3DNativeImportErrorReadFailed,
-                            "The OBJ decoder returned invalid part colours.");
-                    }
-                }
-                parts[part].hasColour = true;
-                parts[part].colour = Quantity_ColorRGBA(
-                    Quantity_Color(value[0], value[1], value[2], Quantity_TOC_RGB),
-                    value[3]);
-            }
         }
     }
 
@@ -2863,10 +2830,6 @@ void ImportOBJ(
                 "The OBJ mesh could not be prepared for editing.");
         }
         partLabels.push_back(label);
-        if (part.hasColour) {
-            XCAFDoc_DocumentTool::ColorTool(document->Document()->Main())
-                ->SetColor(label, part.colour, XCAFDoc_ColorSurf);
-        }
         TDataStd_Name::Set(
             label,
             part.name.Length() > 0
@@ -3080,7 +3043,6 @@ NSString *ErrorDescription(const NativeImportResult& result) {
 @property(nonatomic, readwrite) NSUInteger indexCount;
 @property(nonatomic, readwrite, copy) NSArray<NSNumber *> *partTriangleCounts;
 @property(nonatomic, readwrite, copy) NSArray<NSString *> *partNames;
-@property(nonatomic, readwrite, copy) NSData *partLinearRGBA;
 
 @end
 
@@ -3104,22 +3066,6 @@ NSString *ErrorDescription(const NativeImportResult& result) {
                         indexCount:(NSUInteger)indexCount
                 partTriangleCounts:(NSArray<NSNumber *> *)partTriangleCounts
                          partNames:(NSArray<NSString *> *)partNames {
-    return [self initWithVertexData:vertexData
-                          indexData:indexData
-                        vertexCount:vertexCount
-                         indexCount:indexCount
-                 partTriangleCounts:partTriangleCounts
-                          partNames:partNames
-                     partLinearRGBA:[NSData data]];
-}
-
-- (instancetype)initWithVertexData:(NSData *)vertexData
-                         indexData:(NSData *)indexData
-                       vertexCount:(NSUInteger)vertexCount
-                        indexCount:(NSUInteger)indexCount
-                partTriangleCounts:(NSArray<NSNumber *> *)partTriangleCounts
-                         partNames:(NSArray<NSString *> *)partNames
-                    partLinearRGBA:(NSData *)partLinearRGBA {
     self = [super init];
     if (self) {
         _vertexData = [vertexData copy];
@@ -3128,7 +3074,6 @@ NSString *ErrorDescription(const NativeImportResult& result) {
         _indexCount = indexCount;
         _partTriangleCounts = [partTriangleCounts copy] ?: @[];
         _partNames = [partNames copy] ?: @[];
-        _partLinearRGBA = [partLinearRGBA copy] ?: [NSData data];
     }
     return self;
 }

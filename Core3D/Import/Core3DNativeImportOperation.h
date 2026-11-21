@@ -26,10 +26,6 @@ NS_SWIFT_SENDABLE
 //! arrays mean one unnamed part holding every triangle.
 @property(nonatomic, readonly, copy) NSArray<NSNumber *> *partTriangleCounts;
 @property(nonatomic, readonly, copy) NSArray<NSString *> *partNames;
-//! Round 5 lamp S8-F2 colours: empty, or four Float32 per part (linear RGBA,
-//! the OBJ material's Kd and opacity). A part whose alpha is negative has no
-//! colour and keeps the default material.
-@property(nonatomic, readonly, copy) NSData *partLinearRGBA;
 
 - (instancetype)initWithVertexData:(NSData *)vertexData
                          indexData:(NSData *)indexData
@@ -42,16 +38,8 @@ NS_SWIFT_SENDABLE
                         indexCount:(NSUInteger)indexCount
                 partTriangleCounts:(NSArray<NSNumber *> *)partTriangleCounts
                          partNames:(NSArray<NSString *> *)partNames
-    NS_SWIFT_NAME(init(vertexData:indexData:vertexCount:indexCount:partTriangleCounts:partNames:));
-- (instancetype)initWithVertexData:(NSData *)vertexData
-                         indexData:(NSData *)indexData
-                       vertexCount:(NSUInteger)vertexCount
-                        indexCount:(NSUInteger)indexCount
-                partTriangleCounts:(NSArray<NSNumber *> *)partTriangleCounts
-                         partNames:(NSArray<NSString *> *)partNames
-                    partLinearRGBA:(NSData *)partLinearRGBA
     NS_DESIGNATED_INITIALIZER
-    NS_SWIFT_NAME(init(vertexData:indexData:vertexCount:indexCount:partTriangleCounts:partNames:partLinearRGBA:));
+    NS_SWIFT_NAME(init(vertexData:indexData:vertexCount:indexCount:partTriangleCounts:partNames:));
 - (instancetype)init NS_UNAVAILABLE;
 
 @end
