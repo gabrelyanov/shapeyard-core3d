@@ -25734,8 +25734,31 @@ Standard_Boolean OcctDocument::StageReplaceExactFreeLabel(
                 !traceRefusal("recapture", !CaptureExactFreeLabel(label, receipt)))) {
             receipt = {}; return Standard_False;
         }
+        // NF4: a copy rebuilt with a member placement was deliberately given a
+        // new transform; everything else must still be preserved exactly, and
+        // the stored transform must be exactly the one just written.
+        OcctExactLabelReceipt presentationExpected = expected;
+        if (clone.memberPlacement) {
+            const gp_Trsf written = candidate->LocalTransformation();
+            const gp_Quaternion rotation = written.GetRotation();
+            const std::array<Standard_Real, 8> values = {{
+                written.TranslationPart().X(), written.TranslationPart().Y(),
+                written.TranslationPart().Z(), rotation.X(), rotation.Y(),
+                rotation.Z(), rotation.W(), written.ScaleFactor()}};
+            const auto& stored = receipt.visibility.object.object;
+            for (Standard_Integer index = 0; index < 8; ++index) {
+                if (!R179TraceExactLabelCheck("exact.replace.member-placement",
+                        !traceRefusal("member-placement",
+                            !stored.present[index] || stored.scalars[index] != values[index]))) {
+                    receipt = {}; return Standard_False;
+                }
+            }
+            auto& target = presentationExpected.visibility.object.object;
+            target.present = stored.present;
+            target.scalars = stored.scalars;
+        }
         if (!R179TraceExactLabelCheck("exact.replace.presentation",
-                ExactReceiptPresentationPreserved(expected, receipt))) {
+                ExactReceiptPresentationPreserved(presentationExpected, receipt))) {
 #if DEBUG
             const auto& a = expected.visibility.object;
             const auto& b = receipt.visibility.object;
