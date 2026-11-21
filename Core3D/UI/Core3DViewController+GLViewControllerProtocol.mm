@@ -139,7 +139,17 @@ supportsNormalTextureEditing:supportsNormalTextureEditing];
 
 - (void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selections {
 
-    assert(_currentGizmoType == [GLController getGizmoType]);
+    if (_currentGizmoType != [GLController getGizmoType]) {
+        // Blocker B6: was assert() (in Release too), which closed the app.
+        static BOOL logged = NO;
+        if (!logged) {
+            logged = YES;
+            NSLog(@"CORE3D_SAFE_EXIT didChangeSelections host tool %lu, viewer tool %lu: selection read-out unchanged",
+                (unsigned long)_currentGizmoType,
+                (unsigned long)[GLController getGizmoType]);
+        }
+        return;
+    }
     const BOOL duplicateRecoveryPending =
         [GLController hasUnresolvedEdit];
     self.can_apply_material = !duplicateRecoveryPending
