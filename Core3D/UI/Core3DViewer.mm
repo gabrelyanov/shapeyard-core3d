@@ -2763,9 +2763,18 @@ bool Core3DViewer::showHolePreview(const std::string& entity, const gp_Pnt& worl
             result,refusal))return false;
         auto state=std::make_shared<BooleanPairPreview>();
         state->target=presentation;state->targetLabel=label;state->operation=1;
-        state->preview=new AIS_Shape(result);
+        // Desk lamp round 3 S2-F3: a painted face keeps its look in the preview, as the tick keeps it
+        // (CommitDrilledShape carries the face colours; the preview drew the part's colour only).
+        std::vector<TDF_Label> unusedLabels;
+        std::vector<std::pair<TopoDS_Face,XCAFDoc_VisMaterialPBR>> looks,matched;
+        if(myDoc->CaptureFaceColours(label,1.0,unusedLabels,looks)&&!looks.empty())
+            matched=myDoc->MatchFaceLooks(result,looks);
+        if(matched.empty())state->preview=new AIS_Shape(result);
+        else state->preview=new AIS_ColoredShape(result);
         state->preview->SetLocalTransformation(toWorld);
         myDoc->LoadObjectMeterial(label,state->preview);
+        if(const auto coloured=Handle(AIS_ColoredShape)::DownCast(state->preview);!coloured.IsNull())
+            for(const auto& [face,material]:matched)coloured->SetCustomColor(face,material.BaseColor.GetRGB());
         myContext->ClearSelected(Standard_False);
         myContext->Display(state->preview,AIS_Shaded,0,Standard_False);
         myContext->Deactivate(state->preview);
