@@ -2557,6 +2557,13 @@ __attribute__((objc_subclassing_restricted))
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
     axis:(NSArray<NSNumber *> *)axis
     NS_SWIFT_NAME(debugGeometryAxisSnap(fixture:point:tolerance:kinds:axis:));
+//! Detached timing of the snap's cheap per-part work (CTO 18:40 point 1): 32-sided
+//! prisms are made until their topology nodes reach `nodes`; each is then located,
+//! boxed, counted and prepared as one Move drag step does for a part in reach.
+//! Returns parts, nodes, seconds (all the per-part work) and prepareSeconds
+//! (PrepareGeometrySnapTarget alone), each the fastest of three passes.
++ (NSDictionary<NSString *, id> *)debugGeometrySnapPrepareTimingForNodes:(NSInteger)nodes
+    NS_SWIFT_NAME(debugGeometrySnapPrepareTiming(nodes:));
 + (NSDictionary<NSString *, id> *)debugFaceSketchFixture:(NSInteger)fixture
     cut:(BOOL)cut depth:(double)depth fault:(NSInteger)fault
     NS_SWIFT_NAME(debugFaceSketch(fixture:cut:depth:fault:));
