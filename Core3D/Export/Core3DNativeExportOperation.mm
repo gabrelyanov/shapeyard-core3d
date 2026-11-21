@@ -2234,15 +2234,25 @@ void WriteSTEP(
         // The header names the project and Shapeyard, not OCCT's defaults
         // ('Open CASCADE Shape Model', 'Author', 'Open CASCADE'); round 8
         // iPhone hand test. Geometry, part names and colours are unchanged.
+        // The setters edit the model's own header entities in place; each
+        // is guarded so a header without that entry keeps OCCT's.
         {
             APIHeaderSection_MakeHeader header(translatedModel);
-            header.SetName(new TCollection_HAsciiString(
-                state->stepTitle.empty() ? "Shapeyard model" : state->stepTitle.c_str()));
-            header.SetAuthorValue(1, new TCollection_HAsciiString(""));
-            header.SetOrganizationValue(1, new TCollection_HAsciiString("Shapeyard"));
-            header.SetOriginatingSystem(new TCollection_HAsciiString("Shapeyard 3D"));
-            header.SetAuthorisation(new TCollection_HAsciiString(""));
-            header.SetDescriptionValue(1, new TCollection_HAsciiString("Shapeyard model"));
+            if (header.HasFn()) {
+                header.SetName(new TCollection_HAsciiString(
+                    state->stepTitle.empty() ? "Shapeyard model" : state->stepTitle.c_str()));
+                if (header.NbAuthor() >= 1) {
+                    header.SetAuthorValue(1, new TCollection_HAsciiString(""));
+                }
+                if (header.NbOrganization() >= 1) {
+                    header.SetOrganizationValue(1, new TCollection_HAsciiString("Shapeyard"));
+                }
+                header.SetOriginatingSystem(new TCollection_HAsciiString("Shapeyard 3D"));
+                header.SetAuthorisation(new TCollection_HAsciiString(""));
+            }
+            if (header.HasFd() && header.NbDescription() >= 1) {
+                header.SetDescriptionValue(1, new TCollection_HAsciiString("Shapeyard model"));
+            }
         }
         if (writer.Write(partialPath.c_str()) != IFSelect_RetDone) {
             throw NativeExportFailure(
