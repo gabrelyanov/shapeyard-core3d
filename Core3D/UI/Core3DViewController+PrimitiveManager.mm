@@ -1243,7 +1243,23 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     (void)[self tryCancelIntersect];
 }
 
+// Round 3 S5-F3: the history redraw rebuilds the tools as None and tells the host None, so after
+// Undo or Redo of a scale-handle drag the part stayed selected with no handles and Delete and
+// Duplicate went grey. If Scale was the tool before the step and the still-selected part now has
+// none, give it Scale again through the Scale button's own path (setGizmoType sets host and
+// engine together, so the selection callback's check of the two stays true).
+- (void)core3d_keepScaleAfterHistory:(BOOL)wasScale {
+    if (!wasScale
+        || [GLController getGizmoType] != PrimitiveGizmoTypeNone
+        || GLController.viewer == nullptr
+        || GLController.viewer->getObjectInteractor() == nullptr
+        || !GLController.viewer->getObjectInteractor()->isSelected()) return;
+    [self setGizmoType:PrimitiveGizmoTypeScale];
+}
+
 - (void)undo {
+    const BOOL wasScale = _currentGizmoType == PrimitiveGizmoTypeScale
+        || [GLController getGizmoType] == PrimitiveGizmoTypeScale;
     const BOOL wasChamfer =
         _currentGizmoType == PrimitiveGizmoTypeChamfer;
     const BOOL wasExtrusion =
@@ -1255,6 +1271,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const BOOL wasRadialArray =
         _currentGizmoType == PrimitiveGizmoTypeRadialArray;
     [GLController undo];
+    [self core3d_keepScaleAfterHistory:wasScale];
     if (wasChamfer) {
         if (![GLController hasActiveBevel]
             && _currentGizmoType == PrimitiveGizmoTypeChamfer)
@@ -1354,6 +1371,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)redo {
+    const BOOL wasScale = _currentGizmoType == PrimitiveGizmoTypeScale
+        || [GLController getGizmoType] == PrimitiveGizmoTypeScale;
     const BOOL wasChamfer =
         _currentGizmoType == PrimitiveGizmoTypeChamfer;
     const BOOL wasExtrusion =
@@ -1365,6 +1384,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const BOOL wasRadialArray =
         _currentGizmoType == PrimitiveGizmoTypeRadialArray;
     [GLController redo];
+    [self core3d_keepScaleAfterHistory:wasScale];
     if (wasChamfer) {
         if (![GLController hasActiveBevel]
             && _currentGizmoType == PrimitiveGizmoTypeChamfer)

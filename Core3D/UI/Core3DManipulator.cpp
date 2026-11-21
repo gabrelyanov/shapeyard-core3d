@@ -299,9 +299,11 @@ bool AddGizmoComponent(
 void Core3DManipulator::init()
 {
     // Create axis in the default coordinate system. The custom position is applied in local transformation.
-    myAxes[0] = Axis (gp::OX(), Quantity_NOC_DEEPSKYBLUE2);
+    // Red X, green Y, blue Z, as the axis indicator in the corner (design system v1.3,
+    // handles rule 2; round 3 S3-F1: the X arrow was blue and the up Z arrow red).
+    myAxes[0] = Axis (gp::OX(), Quantity_NOC_INDIANRED1);
     myAxes[1] = Axis (gp::OY(), Quantity_NOC_PALEGREEN1);
-    myAxes[2] = Axis (gp::OZ(), Quantity_NOC_INDIANRED1);
+    myAxes[2] = Axis (gp::OZ(), Quantity_NOC_DEEPSKYBLUE2);
     
     Graphic3d_MaterialAspect aShadingMaterial;
     aShadingMaterial.SetSpecularColor(Quantity_NOC_BLACK);
