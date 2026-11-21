@@ -16442,6 +16442,35 @@ void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
         }
     } else {
         OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+        // A part can answer a pick through more than one owner (see SelectBehind, 15 Nov).
+        // In Object mode a tap on another face of a part that is already selected must take
+        // the part out, as a tap on a selected part does, not select it a second time
+        // (round 3 S5-F4: the count read 4 with 3 parts marked).
+        if (!oldOwners.empty()
+            && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape) {
+            try {
+                OCC_CATCH_SIGNALS
+                std::unordered_set<const SelectMgr_SelectableObject*> oldParts;
+                std::vector<Handle(SelectMgr_EntityOwner)> added;
+                for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                    const Handle(SelectMgr_EntityOwner) owner = myContext->SelectedOwner();
+                    if (owner.IsNull() || !owner->HasSelectable()) continue;
+                    if (oldOwners.count(owner.get()) != 0) oldParts.insert(owner->Selectable().get());
+                    else added.push_back(owner);
+                }
+                for (const auto& owner : added) {
+                    if (oldParts.count(owner->Selectable().get()) == 0) continue;
+                    std::vector<Handle(SelectMgr_EntityOwner)> samePart;
+                    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                        const Handle(SelectMgr_EntityOwner) selected = myContext->SelectedOwner();
+                        if (!selected.IsNull() && selected->HasSelectable()
+                            && selected->Selectable() == owner->Selectable()) samePart.push_back(selected);
+                    }
+                    for (const auto& selected : samePart) myContext->AddOrRemoveSelected(selected, Standard_False);
+                }
+            } catch (...) {
+            }
+        }
     }
 
     try {
