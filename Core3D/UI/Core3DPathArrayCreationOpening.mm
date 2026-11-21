@@ -466,6 +466,21 @@ bool ParseCandidate(NSDictionary *value, array::Definition& output) {
     return true;
 }
 
+#if DEBUG
+// DEBUG-only (NF4 sibling old-file check): lets a native check make a Path
+// array the way build 8 saved it (offset in each copy's shape, the copy keeps
+// the original's placement) to prove such old files reopen and save unchanged.
+bool gLegacyShiftedPathArrayCopies = false;
+#endif
+
+bool LegacyShiftedPathArrayCopies() noexcept {
+#if DEBUG
+    return gLegacyShiftedPathArrayCopies;
+#else
+    return false;
+#endif
+}
+
 bool DetachedMemberShape(const CreationCapture& capture,
                          const array::Matrix& sourceFrameValue,
                          const array::Placement& placement,
@@ -479,6 +494,12 @@ bool DetachedMemberShape(const CreationCapture& capture,
         if (!recipe::IsProperRigidPlacement(transform)) return false;
         // NF4 sibling (21 Nov 2026): the copy's shape is NOT shifted; the
         // placement goes into the copy's own transform (clone.memberPlacement).
+        if (LegacyShiftedPathArrayCopies()) {
+            BRepBuilderAPI_Transform shifted(capture.sourceShape, transform, Standard_True);
+            if (!shifted.IsDone() || shifted.Shape().IsNull()
+                || shifted.Shape().IsPartner(capture.sourceShape)) return false;
+            output = shifted.Shape(); return true;
+        }
         BRepBuilderAPI_Copy copied(capture.sourceShape, Standard_True, Standard_False);
         if (!copied.IsDone() || copied.Shape().IsNull()
             || copied.Shape().IsPartner(capture.sourceShape)) return false;
@@ -562,12 +583,13 @@ bool BuildPreparedPlan(const CreationCapture& capture,
             clone.detachedShape = shape;
             clone.representation = capture.sourceReceipt.visibility.object.object
                 .resolvedRepresentation;
-            clone.memberPlacement = transform;
+            if (!LegacyShiftedPathArrayCopies()) clone.memberPlacement = transform;
             CreationRecipe entry;
             entry.entityIdentifier = issued[ordinal - 1].EntityIdentifier();
             entry.featureIdentifier = feature;
             // NF4 sibling: the shape is unshifted, so the recipe keeps the source's frame.
-            const std::optional<gp_Trsf> baked = std::nullopt;
+            const std::optional<gp_Trsf> baked = LegacyShiftedPathArrayCopies()
+                ? std::optional<gp_Trsf>(transform) : std::nullopt;
             if (!recipe::Prepare(capture.sourceRecipe, shape, feature,
                                  baked, entry.prepared)) return false;
             output.labels.creates.push_back({issued[ordinal - 1], clone});
@@ -1498,3 +1520,15 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
 #endif
 
 @end
+
+#if DEBUG
+// NF4 sibling old-file check: true = new Path arrays are made the build 8 way
+// (offset in each copy's shape, copy keeps the original's placement). Returns
+// the old value.
+extern "C" bool
+Core3DDebugPathArrayUseLegacyShiftedCopies(bool enabled) noexcept {
+    const bool previous = gLegacyShiftedPathArrayCopies;
+    gLegacyShiftedPathArrayCopies = enabled;
+    return previous;
+}
+#endif
