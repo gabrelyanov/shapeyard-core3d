@@ -146,6 +146,13 @@ NS_SWIFT_SENDABLE
 //! for other formats, or for a name with a line break (round 3 lamp F10).
 - (BOOL)setExportPartNames:(NSDictionary<NSString *, NSString *> *)partNames
     NS_SWIFT_NAME(setExportPartNames(_:));
+//! STEP only, before start: the project's name for the file header
+//! (FILE_NAME), which otherwise says 'Open CASCADE Shape Model' and author
+//! 'Author'. Characters outside printable ASCII become '_' (STEP header
+//! strings are ASCII). NO after start, for other formats, for an empty name
+//! or one with a line break (round 8 iPhone hand test, CTO 21 Nov 17:00).
+- (BOOL)setExportTitle:(NSString *)title
+    NS_SWIFT_NAME(setExportTitle(_:));
 
 #ifdef DEBUG
 //! Arms one operation-local E4 fault before the worker starts.

@@ -56,6 +56,7 @@
 #include <XCAFDoc_VisMaterial.hxx>
 #include <RWStl.hxx>
 #include <STEPCAFControl_Writer.hxx>
+#include <APIHeaderSection_MakeHeader.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -145,6 +146,9 @@ struct NativeExportState {
     //! Objects' name for a part that has none of its own ("Case 1"), keyed
     //! by entity identifier; OBJ and STEP, set before start (round 3 lamp F10).
     std::unordered_map<std::string, std::string> partNames;
+    //! The project's name for the STEP header, printable ASCII; set before
+    //! start; empty = "Shapeyard model".
+    std::string stepTitle;
     Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
     Standard_Real deviationCoefficient = 0.001;
     Standard_Real deviationAngle = 20.0 * M_PI / 180.0;
@@ -2227,6 +2231,19 @@ void WriteSTEP(
                 Core3DNativeExportErrorWriterFailed,
                 "The committed geometry could not be translated to STEP.");
         }
+        // The header names the project and Shapeyard, not OCCT's defaults
+        // ('Open CASCADE Shape Model', 'Author', 'Open CASCADE'); round 8
+        // iPhone hand test. Geometry, part names and colours are unchanged.
+        {
+            APIHeaderSection_MakeHeader header(translatedModel);
+            header.SetName(new TCollection_HAsciiString(
+                state->stepTitle.empty() ? "Shapeyard model" : state->stepTitle.c_str()));
+            header.SetAuthorValue(1, new TCollection_HAsciiString(""));
+            header.SetOrganizationValue(1, new TCollection_HAsciiString("Shapeyard"));
+            header.SetOriginatingSystem(new TCollection_HAsciiString("Shapeyard 3D"));
+            header.SetAuthorisation(new TCollection_HAsciiString(""));
+            header.SetDescriptionValue(1, new TCollection_HAsciiString("Shapeyard model"));
+        }
         if (writer.Write(partialPath.c_str()) != IFSelect_RetDone) {
             throw NativeExportFailure(
                 Core3DNativeExportErrorWriterFailed,
@@ -3913,6 +3930,31 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
         return NO;
     }
     state->partNames = std::move(names);
+    return YES;
+}
+
+- (BOOL)setExportTitle:(NSString *)title {
+    const std::shared_ptr<NativeExportState> state = _state;
+    NSString *trimmed = [title
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (state == nullptr || state->exportType != ExportTypeStep
+        || trimmed.length == 0 || trimmed.length > 256
+        || [trimmed rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound) {
+        return NO;
+    }
+    std::string ascii;
+    ascii.reserve(trimmed.length);
+    for (NSUInteger index = 0; index < trimmed.length; ++index) {
+        const unichar character = [trimmed characterAtIndex:index];
+        ascii.push_back(character >= 0x20 && character <= 0x7E
+            ? static_cast<char>(character) : '_');
+    }
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (state->started || state->finished
+        || state->cancelled.load(std::memory_order_acquire)) {
+        return NO;
+    }
+    state->stepTitle = std::move(ascii);
     return YES;
 }
 
