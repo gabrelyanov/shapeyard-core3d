@@ -139,6 +139,13 @@ NS_SWIFT_SENDABLE
     operationOwnedRawEvidenceRecordForReturnedScene:
         (Core3DSceneSnapshot *)returnedScene
     NS_SWIFT_NAME(operationOwnedRawEvidenceRecord(returnedScene:));
+//! OBJ only, before start: the name Objects shows for a part that has no
+//! name of its own ("Case 1"), keyed by entity identifier. The file names
+//! that part the same way instead of Part_0001; a part with its own name
+//! keeps it. NO after start, for other formats, or for a name with a line
+//! break (round 3 lamp F10).
+- (BOOL)setExportPartNames:(NSDictionary<NSString *, NSString *> *)partNames
+    NS_SWIFT_NAME(setExportPartNames(_:));
 
 #ifdef DEBUG
 //! Arms one operation-local E4 fault before the worker starts.
