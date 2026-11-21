@@ -5,8 +5,11 @@
 #include "NativeOpeningDependentReplay.hxx"
 #include "BoundedCurveOwner.hxx"
 
+#include <AIS_Shape.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <TopExp.hxx>
+#include <gp_Quaternion.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
 #include <algorithm>
@@ -683,10 +686,37 @@ private:
                     || stagedRecipe.identifier != currentRecipe.loft.identifier
                     || !stagedRecipe.IsCurrent(document, label)) return false;
             } else return false;
+            // NF4 sibling (21 Nov 2026): an unshifted survivor carries its
+            // offset in its own transform, so an edit that moves it (new
+            // spacing, edited guide) writes the source's transform composed
+            // with the new member placement, exactly as the shared exact-label
+            // replace does; the check below then expects exactly that
+            // placement and every other presentation field unchanged.
+            OcctExactLabelReceipt presentationExpected = expected;
+            if (replacement.clone.memberPlacement) {
+                const gp_Trsf& member = *replacement.clone.memberPlacement;
+                OcctExactLabelReceipt source;
+                if (!pattern_recipe_clone::IsProperRigidPlacement(member)
+                    || !owner_.ReadExactFreeLabel(replacement.clone.source, source))
+                    return false;
+                Handle(AIS_Shape) carrier =
+                    new AIS_Shape(replacement.clone.detachedShape);
+                carrier->SetLocalTransformation(
+                    source.visibility.object.object.transform * member);
+                if (!owner_.SaveObjectTransform(label, carrier)) return false;
+                const gp_Trsf written = carrier->LocalTransformation();
+                const gp_Quaternion rotation = written.GetRotation();
+                auto& target = presentationExpected.visibility.object.object;
+                target.scalars = {{written.TranslationPart().X(),
+                    written.TranslationPart().Y(), written.TranslationPart().Z(),
+                    rotation.X(), rotation.Y(), rotation.Z(), rotation.W(),
+                    written.ScaleFactor()}};
+                target.present.fill(Standard_True);
+            }
             if (!owner_.CaptureExactFreeLabel(label, receipt)
                 || !receipt.visibility.object.object.shape.IsEqual(
                     replacement.clone.detachedShape)
-                || !SurvivorPresentationPreserved(expected, receipt))
+                || !SurvivorPresentationPreserved(presentationExpected, receipt))
                 { receipt = {}; return false; }
             return true;
         } catch (...) { receipt = {}; return false; }
@@ -832,20 +862,24 @@ PreparedEdit PrepareMutation(OcctDocument& owner, PreparedEdit result,
             if (!MatrixTransform(placements[ordinal].occurrenceFrame, occurrence))
                 return refused;
             const gp_Trsf transform = occurrence * sourceFrame.Inverted();
-            BRepBuilderAPI_Transform copied(
+            // NF4 sibling (21 Nov 2026): unshifted copy; its placement goes
+            // into its own transform (clone.memberPlacement below).
+            BRepBuilderAPI_Copy copied(
                 result.opening.labels->source.visibility.object.object.shape,
-                transform, Standard_True);
+                Standard_True, Standard_False);
             if (!copied.IsDone() || copied.Shape().IsNull()) return refused;
             OcctPreparedLabelClone clone;
             clone.source = result.opening.labels->source;
             clone.detachedShape = copied.Shape();
             clone.representation = result.opening.labels->source
                 .visibility.object.object.resolvedRepresentation;
+            clone.memberPlacement = transform;
             NativeMutation::Recipe recipe;
             recipe.ordinal = std::uint32_t(ordinal);
             recipe.created = before == nullptr;
             recipe.entityIdentifier = Text(retained.identity);
-            const std::optional<gp_Trsf> baked = transform;
+            // NF4 sibling: the shape is unshifted, so recipes keep the source's frame.
+            const std::optional<gp_Trsf> baked = std::nullopt;
             if (before) {
                 mutation->labels.replacements.push_back({before->receipt, clone});
                 const auto& sourceRecipe = result.opening.labels->sourceRecipe;
