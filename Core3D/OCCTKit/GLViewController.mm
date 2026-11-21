@@ -1371,6 +1371,37 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         ? static_cast<Core3DViewController *>(delegate) : nil;
 }
 
+// Blocker B6 (CTO 22:40, 20 Nov): assert() is compiled into Release, so a
+// failed assert closed the app. Each former assert site now leaves its action
+// unchanged and writes one line the first time it is taken.
+static void Core3DLogSafeExitOnce(BOOL *logged, NSString *line)
+{
+    if (logged == nullptr || *logged) { return; }
+    *logged = YES;
+    NSLog(@"CORE3D_SAFE_EXIT %@", line);
+}
+
+static bool Core3DGizmoTypeIsKnown(const PrimitiveGizmoType type) noexcept
+{
+    switch (type) {
+        case PrimitiveGizmoTypeNone:
+        case PrimitiveGizmoTypeMoveRotate:
+        case PrimitiveGizmoTypeScale:
+        case PrimitiveGizmoTypeChamfer:
+        case PrimitiveGizmoTypeSubtract:
+        case PrimitiveGizmoTypeUnion:
+        case PrimitiveGizmoTypeMirror:
+        case PrimitiveGizmoTypeMaterial:
+        case PrimitiveGizmoTypeExtrude:
+        case PrimitiveGizmoTypeIntersect:
+        case PrimitiveGizmoTypeLinearArray:
+        case PrimitiveGizmoTypeShell:
+        case PrimitiveGizmoTypeRadialArray:
+            return true;
+    }
+    return false;
+}
+
 // Plain selection: a tap that begins on the Move or Scale handles of the
 // selected part adds the part behind them (founder walk 15 Nov). One switch;
 // a screen check launches with SHAPEYARD_UITEST_TAPS_STOP_AT_HANDLES to show
@@ -3686,6 +3717,13 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
+    if (!Core3DGizmoTypeIsKnown(type)) {
+        static BOOL logged = NO;
+        Core3DLogSafeExitOnce(&logged, [NSString stringWithFormat:
+            @"setGizmoType unknown tool %lu: tool unchanged",
+            (unsigned long)type]);
+        return;
+    }
     if (_viewer != nullptr) _viewer->observeNativePlanningInteraction();
 	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
@@ -3878,9 +3916,16 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             manipulatorType =
                 PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray;
             break;
-        default:
-            assert(false);
-            break;
+        default: {
+            // Unreachable: unknown tools are refused at the top. Kept as a
+            // safe exit so no unset manipulator is ever applied.
+            static BOOL logged = NO;
+            Core3DLogSafeExitOnce(&logged, [NSString stringWithFormat:
+                @"setGizmoType no manipulator for tool %lu: tool unchanged",
+                (unsigned long)type]);
+            [self requestRender];
+            return;
+        }
     }
     _viewer->getObjectInteractor()->setManipulatorType(manipulatorType);
 	if (_viewer->getObjectInteractor()->getManipulatorType()
@@ -3989,7 +4034,13 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 }
 
 - (void)setChamfer:(CGFloat)value {
-    assert([self getGizmoType] == PrimitiveGizmoTypeChamfer);
+    if ([self getGizmoType] != PrimitiveGizmoTypeChamfer) {
+        static BOOL logged = NO;
+        Core3DLogSafeExitOnce(&logged, [NSString stringWithFormat:
+            @"setChamfer while tool %lu is open: value ignored",
+            (unsigned long)[self getGizmoType]]);
+        return;
+    }
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
         [rawOwner core3d_setVisibleRawR2BevelValue:value];
@@ -7853,9 +7904,14 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         case ExportTypeStep:
             pathExtension = @"step";
             break;
-        default:
-            assert(false);
-            break;
+        default: {
+            // Unreachable: the format switch above already returns nil.
+            static BOOL logged = NO;
+            Core3DLogSafeExitOnce(&logged, [NSString stringWithFormat:
+                @"export has no file kind for type %lu: nothing exported",
+                (unsigned long)exportType]);
+            return nil;
+        }
     }
 
     NSString *exportFilename = [NSUUID.UUID.UUIDString
@@ -7892,9 +7948,15 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         case ExportTypeStep:
             _viewer->getShapeInteractor()->exportToStep(exportPath);
             break;
-        default:
-            assert(false);
-            break;
+        default: {
+            // Unreachable: the file-kind switch above already returns nil.
+            static BOOL logged = NO;
+            Core3DLogSafeExitOnce(&logged, [NSString stringWithFormat:
+                @"export has no writer for type %lu: nothing exported",
+                (unsigned long)exportType]);
+            removeExportArtifacts();
+            return nil;
+        }
     }
 
 

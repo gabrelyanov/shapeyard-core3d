@@ -2123,7 +2123,9 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 					: Standard_False);
 				// R2-N02: a joined part reopened from a file is a plain solid.
 				// Its plain deep copy can fail the strict BRep check its source
-				// passes; the two fallbacks below then copy it another way. A
+				// passes; the fallback below then copies it through the engine's
+				// exact binary form as new, independent topology, curves and
+				// surfaces (no copy shares geometry with its source). A
 				// copy that still fails the check is refused (Fable review 4):
 				// no unchecked solid is ever stored.
 				bool copyValid = source.representation
@@ -2133,23 +2135,8 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 					|| source.representation
 						!= OcctGeometryRepresentation::BRep
 					|| IsTopologicallyValid(source.presentation->Shape());
-				// R2-N02 (run editor-20261120-100554-5052, step 503): the
-				// deep copy of a valid reopened joined part can fail the
-				// check its source passes. Copy its faces and edges again
-				// over the source's own (unchanged, shared) curves and
-				// surfaces, which keeps the source's validity.
-				if (!copyValid && sourceValid) {
-					shapeCopy.Perform(source.presentation->Shape(),
-						Standard_False, Standard_False);
-					copyValid = shapeCopy.IsDone()
-						&& !shapeCopy.Shape().IsNull()
-						&& IsTopologicallyValid(shapeCopy.Shape());
-#if DEBUG
-					if (copyValid) g_duplicatePlainBits |= 64; // shared-geometry copy
-#endif
-				}
-				// R2-N02 (run editor-20261120-105844-56587: the shared-geometry
-				// copy failed too, step 503 again). The reopened part was read
+				// R2-N02 (runs editor-20261120-100554-5052 and -105844-56587,
+				// step 503: the plain deep copy fails). The reopened part was read
 				// from its file in the engine's binary form and passes there, so
 				// make the copy the same way: write the source's exact shape and
 				// read it back as new, independent topology. Faces correspond by
@@ -3077,20 +3064,44 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             for (const auto& anchor : anchors) proposals.push_back(anchor.Transformed(raw));
             Bnd_Box reach;
             for (const auto& proposed : proposals) reach.Add(proposed);
-            struct Target { std::string identifier; TopoDS_Shape world; Bnd_Box nearby;
+            struct Target { std::string identifier; TopoDS_Shape world; Bnd_Box nearby, exact;
                 std::optional<GeometrySnapTarget> snap; };
             std::vector<Target> targets;
             AIS_ListOfInteractive displayed;
             myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
-            // The snap budget (64 parts in play, 1024 target topology nodes)
-            // counts only the moved parts and the parts a moved corner can
-            // reach at this drag step. Parts out of reach cannot be snapped
-            // to, so they must not switch snapping off in a big model. The
-            // reach test costs one box per displayed part; the census cap
-            // keeps that cost bounded in a huge scene.
-            std::size_t census = 0, inspected = moving.size(), nodes = 0;
+            // The snap budget (CTO 18:40, Fable review 6) never switches
+            // snapping off: each bound keeps the nearest work of this drag
+            // step and leaves the farthest out, in a fixed order.
+            // - Parts: only those a moved corner can reach. The reach test
+            //   costs one box per displayed part; past the census cap of
+            //   1024 displayed parts the rest are not looked at.
+            // - Preparation: nearest part box first (ties by identifier), at
+            //   most 64 parts in play and kSnapPrepareNodeCeiling topology
+            //   nodes; a part that would pass the ceiling is left out.
+            // - Corners: at most 64 in play, nearest to a reachable part's
+            //   box first (ties by corner order).
+            // - Measurements (a distance or crossing on one edge or face for
+            //   one corner): at most kSnapMeasurementCap per step, nearest
+            //   piece box first (ties by part, corner, edges before faces,
+            //   then piece order). A piece whose box is void has an unknown
+            //   reach: it always counts, at distance zero, so it goes first.
+            constexpr std::size_t kSnapMaximumPartsInPlay = 64, kSnapMaximumCornersInPlay = 64;
+            // Prepare alone: 8,280 nodes 0.0076 s on the iPad simulator (20 Nov).
+            constexpr std::size_t kSnapPrepareNodeCeiling = 8192, kSnapMeasurementCap = 1024;
+            const auto boxDistance = [](const Bnd_Box& box, const gp_Pnt& p) {
+                if (box.IsVoid()) return 0.0;
+                double x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
+                box.Get(x0,y0,z0,x1,y1,z1);
+                const double dx = std::max({x0 - p.X(), 0.0, p.X() - x1});
+                const double dy = std::max({y0 - p.Y(), 0.0, p.Y() - y1});
+                const double dz = std::max({z0 - p.Z(), 0.0, p.Z() - z1});
+                return std::sqrt(dx * dx + dy * dy + dz * dz);
+            };
+            struct Candidate { std::string identifier; TopoDS_Shape shape, world; Bnd_Box nearby, exact; double distance; };
+            std::vector<Candidate> candidates;
+            std::size_t census = 0;
             for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
-                if (++census > 1024) return;
+                if (++census > 1024) break;
                 const auto object = Handle(AIS_Shape)::DownCast(it.Value());
                 if (object.IsNull() || moving.count(object.get())) continue;
                 const auto label = myDoc->ShapeLabel(object);
@@ -3111,44 +3122,108 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 Bnd_Box nearby;
                 BRepBndLib::Add(located.Shape(),nearby);
                 if (nearby.IsVoid() || nearby.IsOpen()) return;
+                const Bnd_Box exact = nearby;
                 nearby.Enlarge(_geometrySnappingTolerance);
                 if (nearby.IsOut(reach)) continue;
                 // Same test as the per-anchor skip below: a part no moved
                 // corner can reach yields no hit, so it is left out unseen.
-                if (std::all_of(proposals.begin(),proposals.end(),
-                        [&nearby](const gp_Pnt& p) { return nearby.IsOut(p); })) continue;
-                if (++inspected > 64) return;
+                double distance = std::numeric_limits<double>::infinity();
+                for (const auto& proposed : proposals)
+                    if (!nearby.IsOut(proposed)) distance = std::min(distance,boxDistance(exact,proposed));
+                if (!std::isfinite(distance)) continue;
+                candidates.push_back({identifier,shape,located.Shape(),nearby,exact,distance});
+            }
+            std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b) {
+                return a.distance != b.distance ? a.distance < b.distance : a.identifier < b.identifier;
+            });
+            std::size_t inspected = moving.size(), nodes = 0;
+            for (const auto& candidate : candidates) {
+                if (inspected >= kSnapMaximumPartsInPlay) break;
                 TopTools_IndexedMapOfShape topology;
-                TopExp::MapShapes(shape,topology);
-                nodes += topology.Extent();
-                if (nodes > 1024) return;
-                targets.push_back({identifier,located.Shape(),nearby});
+                TopExp::MapShapes(candidate.shape,topology);
+                const auto size = static_cast<std::size_t>(topology.Extent());
+                if (nodes + size > kSnapPrepareNodeCeiling) continue;
+                nodes += size; ++inspected;
+                targets.push_back({candidate.identifier,candidate.world,candidate.nearby,candidate.exact,std::nullopt});
             }
             std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b) {
                 return a.identifier < b.identifier;
             });
-            // Corners in play: those inside a reachable part's box. At most 64,
-            // as before, so a drag step stays bounded (64 corners x 64 parts).
-            std::vector<gp_Pnt> inPlay;
-            for (const auto& proposed : proposals) {
-                if (std::any_of(targets.begin(),targets.end(),
-                        [&proposed](const Target& t) { return !t.nearby.IsOut(proposed); }))
-                    inPlay.push_back(proposed);
+            // Corners in play: those inside a reachable part's box, the 64
+            // nearest to one (ties by corner order), kept in corner order.
+            std::vector<std::pair<double,std::size_t>> reachable;
+            for (std::size_t index = 0; index < proposals.size(); ++index) {
+                double distance = std::numeric_limits<double>::infinity();
+                for (const auto& target : targets)
+                    if (!target.nearby.IsOut(proposals[index]))
+                        distance = std::min(distance,boxDistance(target.exact,proposals[index]));
+                if (std::isfinite(distance)) reachable.emplace_back(distance,index);
             }
-            if (inPlay.size() > 64) return;
+            std::sort(reachable.begin(),reachable.end());
+            if (reachable.size() > kSnapMaximumCornersInPlay) reachable.resize(kSnapMaximumCornersInPlay);
+            std::sort(reachable.begin(),reachable.end(),[](const auto& a,const auto& b) { return a.second < b.second; });
+            std::vector<gp_Pnt> inPlay;
+            for (const auto& corner : reachable) inPlay.push_back(proposals[corner.second]);
             // Each reachable part's corners, edges, faces and their boxes are
             // gathered once and reused for every moving corner of this drag
             // step, so a corner skips the edges and faces it cannot reach.
             for (auto& target : targets) target.snap = PrepareGeometrySnapTarget(target.world);
+            // The measurements of this step, nearest piece box first; the
+            // same reach test as SnapPointToGeometry's, so a piece left out
+            // here is one it would have measured.
+            struct Measurement { double distance; std::size_t target, corner; int face, index; };
+            std::vector<Measurement> plan;
+            const double pieceReach = _geometrySnappingTolerance + Precision::Confusion();
+            for (std::size_t t = 0; t < targets.size(); ++t) {
+                const auto& snap = targets[t].snap;
+                if (!snap) continue;
+                for (std::size_t c = 0; c < inPlay.size(); ++c) {
+                    if (targets[t].nearby.IsOut(inPlay[c])) continue;
+                    const auto add = [&](const std::vector<Bnd_Box>& boxes, int count, int face) {
+                        for (int index = 1; index <= count; ++index) {
+                            if (!face && BRep_Tool::Degenerated(TopoDS::Edge(snap->edges(index)))) continue;
+                            const auto position = static_cast<std::size_t>(index - 1);
+                            const Bnd_Box box = position < boxes.size() ? boxes[position] : Bnd_Box();
+                            if (!box.IsVoid()) {
+                                Bnd_Box widened = box;
+                                widened.Enlarge(pieceReach);
+                                if (widened.IsOut(inPlay[c])) continue;
+                            }
+                            plan.push_back({boxDistance(box,inPlay[c]),t,c,face,index});
+                        }
+                    };
+                    add(snap->edgeBoxes,snap->edges.Extent(),0);
+                    add(snap->faceBoxes,snap->faces.Extent(),1);
+                }
+            }
+            std::sort(plan.begin(),plan.end(),[](const Measurement& a,const Measurement& b) {
+                if (a.distance != b.distance) return a.distance < b.distance;
+                if (a.target != b.target) return a.target < b.target;
+                if (a.corner != b.corner) return a.corner < b.corner;
+                if (a.face != b.face) return a.face < b.face;
+                return a.index < b.index;
+            });
+            if (plan.size() > kSnapMeasurementCap) plan.resize(kSnapMeasurementCap);
+            std::vector<GeometrySnapPieces> allowed(targets.size() * inPlay.size());
+            for (const auto& measurement : plan) {
+                auto& pieces = allowed[measurement.target * inPlay.size() + measurement.corner];
+                (measurement.face ? pieces.faces : pieces.edges).push_back(measurement.index);
+            }
+            for (auto& pieces : allowed) {
+                std::sort(pieces.edges.begin(),pieces.edges.end());
+                std::sort(pieces.faces.begin(),pieces.faces.end());
+            }
             gp_Vec correction;
-            for (const auto& target : targets) {
-                for (const auto& proposed : inPlay) {
+            for (std::size_t t = 0; t < targets.size(); ++t) {
+                const auto& target = targets[t];
+                for (std::size_t c = 0; c < inPlay.size(); ++c) {
+                    const auto& proposed = inPlay[c];
                     if (!target.snap || target.nearby.IsOut(proposed)) continue;
                     unsigned kinds = AllGeometrySnapKinds;
                     std::optional<GeometrySnapResult> hit;
                     for (int attempt = 0; attempt < 3; ++attempt) {
                         hit = SnapPointToGeometry(*target.snap,proposed,
-                            _geometrySnappingTolerance,kinds,axis);
+                            _geometrySnappingTolerance,kinds,axis,&allowed[t * inPlay.size() + c]);
                         if (!hit || hit->distance > Precision::Confusion()) break;
                         // Contact along the drag direction is not a positional
                         // anchor: a lid already resting on a plane must still
