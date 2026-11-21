@@ -14847,6 +14847,9 @@ bool Core3DViewer::frameModel(
         || viewportWidth == 0 || viewportHeight == 0) {
         return false;
     }
+    // Set only once the camera is about to be turned; the catch below puts it
+    // back so an exception mid-turn never leaves a half-turned camera.
+    Handle(Graphic3d_Camera) previous;
     try {
         OCC_CATCH_SIGNALS
         // Reuse the bounded, document-authoritative extraction contract. This
@@ -14905,7 +14908,7 @@ bool Core3DViewer::frameModel(
             || !std::isfinite(up.X()) || !std::isfinite(up.Y()) || !std::isfinite(up.Z())
             || from.Magnitude() < 1e-9 || up.Magnitude() < 1e-9
             || from.IsParallel(up, 1e-3)) { return false; }
-        Handle(Graphic3d_Camera) previous = new Graphic3d_Camera(myView->Camera());
+        previous = new Graphic3d_Camera(myView->Camera());
         myView->Camera()->SetDirection(gp_Dir(from.Reversed()));
         myView->Camera()->SetUp(gp_Dir(up));
         myView->Camera()->OrthogonalizeUp();
@@ -14915,7 +14918,12 @@ bool Core3DViewer::frameModel(
             return false;
         }
         return true;
-    } catch (...) { return false; }
+    } catch (...) {
+        if (!previous.IsNull() && !myView.IsNull() && !myView->Camera().IsNull()) {
+            try { myView->Camera()->Copy(previous); } catch (...) {}
+        }
+        return false;
+    }
 }
 
 bool Core3DViewer::frameMirrorPreview(
