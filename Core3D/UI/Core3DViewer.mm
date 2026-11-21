@@ -14837,7 +14837,8 @@ bool Core3DViewer::frameModel(
     const std::uint32_t viewportHeight,
     const double targetX, const double targetY,
     const double targetWidth, const double targetHeight,
-    const ObjectFrameIdentity* objectIdentity, const bool fillTarget) noexcept {
+    const ObjectFrameIdentity* objectIdentity, const bool fillTarget,
+    const double* viewFromCenter, const double* viewUp) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -14896,8 +14897,29 @@ bool Core3DViewer::frameModel(
             }
         }
         if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
-        return FitCameraToBounds(myView, bounds,
-            targetX, targetY, targetWidth, targetHeight, fillTarget);
+        if ((viewFromCenter == nullptr) != (viewUp == nullptr)) { return false; }
+        if (viewFromCenter == nullptr) {
+            return FitCameraToBounds(myView, bounds,
+                targetX, targetY, targetWidth, targetHeight, fillTarget);
+        }
+        // Camera only: look at the model from the given side, then fit as
+        // above. Any failure puts the exact previous camera back.
+        const gp_Vec from(viewFromCenter[0], viewFromCenter[1], viewFromCenter[2]);
+        const gp_Vec up(viewUp[0], viewUp[1], viewUp[2]);
+        if (!std::isfinite(from.X()) || !std::isfinite(from.Y()) || !std::isfinite(from.Z())
+            || !std::isfinite(up.X()) || !std::isfinite(up.Y()) || !std::isfinite(up.Z())
+            || from.Magnitude() < 1e-9 || up.Magnitude() < 1e-9
+            || from.IsParallel(up, 1e-3)) { return false; }
+        Handle(Graphic3d_Camera) previous = new Graphic3d_Camera(myView->Camera());
+        myView->Camera()->SetDirection(gp_Dir(from.Reversed()));
+        myView->Camera()->SetUp(gp_Dir(up));
+        myView->Camera()->OrthogonalizeUp();
+        if (!FitCameraToBounds(myView, bounds,
+                targetX, targetY, targetWidth, targetHeight, fillTarget)) {
+            myView->Camera()->Copy(previous);
+            return false;
+        }
+        return true;
     } catch (...) { return false; }
 }
 

@@ -217,6 +217,11 @@ private:
         std::shared_ptr<const RetainedBevelAdapter::Capture> retainedCapture;
         // A standalone saved Hole that Apply bakes in its own command.
         Standard_Boolean bakesSavedCut = Standard_False;
+        //! True when any face of the part carries its own look (a painted
+        //! face, or a Join of parts that look different). A flat Bevel then
+        //! never merges flat seams: the merge would give a two-look side one
+        //! look (Fable engine review 5 F1, CTO 20 Nov 15:37).
+        Standard_Boolean hasFaceLooks = Standard_True;
         std::shared_ptr<const RetainedBevelAdapter::PreparedPreview>
             retainedPrepared;
         std::optional<retained_edge_treatment::Edit> retainedEdit;
