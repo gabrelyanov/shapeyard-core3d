@@ -59,6 +59,8 @@ NS_ASSUME_NONNULL_BEGIN
 //! edge. -1 returns to push/pull. Discards any open preview.
 - (BOOL)setExtrusionSplitReferenceEdge:(NSInteger)index;
 - (NSInteger)extrusionSplitReferenceEdge;
+//! Lamp S6-F3: the name the next Push-pull or Split Apply stores on an unnamed part ("Case 1").
+- (BOOL)setExtrusionKeptName:(NSString *)name NS_SWIFT_NAME(setExtrusionKeptName(_:));
 - (Core3DShellParameters)getShellParameters;
 - (BOOL)setShellThickness:(CGFloat)thickness;
 - (Core3DModelingOperationResult)tryApplyShell
