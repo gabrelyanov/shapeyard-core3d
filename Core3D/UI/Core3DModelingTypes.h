@@ -1200,6 +1200,9 @@ typedef NS_ENUM(NSInteger, Core3DRoundFailureKind) {
     Core3DRoundFailureKindNone = 0,
     Core3DRoundFailureKindRadiusRefused,
     Core3DRoundFailureKindOther,
+    //! A flat Bevel over a seam between two faces in one plane on a part whose
+    //! faces carry their own looks: refused at any value (Fable review 6 P1).
+    Core3DRoundFailureKindFlatSeamOnPaintedPart,
 };
 
 typedef struct {

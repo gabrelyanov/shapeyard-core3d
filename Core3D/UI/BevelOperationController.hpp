@@ -39,6 +39,11 @@ enum class BevelFailureKind : std::uint8_t {
     None = 0,
     RadiusRefused,
     Other,
+    //! Fable engine review 6 P1: a flat Bevel whose selection holds a seam
+    //! between two faces in one plane, on a part whose faces carry their own
+    //! looks. The seam is not merged there (a two-look side would come out in
+    //! one look) and the chamfer builder refuses it at any distance.
+    FlatSeamOnPaintedPart,
 };
 
 struct BevelFailureObservation {

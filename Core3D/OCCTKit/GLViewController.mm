@@ -4208,6 +4208,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         case BevelFailureKind::Other:
             result.kind = Core3DRoundFailureKindOther;
             break;
+        case BevelFailureKind::FlatSeamOnPaintedPart:
+            result.kind = Core3DRoundFailureKindFlatSeamOnPaintedPart;
+            break;
     }
     return result;
 }
