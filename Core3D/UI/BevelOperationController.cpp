@@ -7,6 +7,7 @@
 #include "../OCCTKit/FilletFailureClassifier.hxx"
 #include "PlaneFrameSettle.hpp"
 
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -76,6 +77,10 @@ struct BevelPreviewWorkerSource {
         retainedInput;
     //! Fable engine review 5 F1: no flat-seam merge on a part with face looks.
     Standard_Boolean mayMergeFlatSeams = Standard_False;
+    //! Fable engine review 9 PP9: the part was picked in Object mode, so the
+    //! Split lines the merge removed are drawn back even when some edge (a
+    //! cone's tip, a sphere's pole) could not be selected.
+    Standard_Boolean isObjectSelection = Standard_False;
 };
 
 struct BevelPreviewWorkerRequest {
@@ -702,6 +707,12 @@ std::vector<TopoDS_Edge> ChamferEdgesWithoutFlatSeams(
 struct ChamferInput {
     TopoDS_Shape shape;
     std::vector<TopoDS_Edge> edges;
+    //! Fable engine review 7 PP1 (CTO 20 Nov 19:14): in Object mode every edge
+    //! counts as selected, so the merge also removes a Split line the person
+    //! drew (the engine cannot tell it from a Join seam on a plain solid).
+    //! These are the flat seams the merge removed then (edges of the source
+    //! shape); they are drawn back onto the bevelled solid afterwards.
+    std::vector<TopoDS_Edge> seamsToRestore;
 };
 
 //! Fable engine review 5 (CTO 20 Nov 15:37): the merge is never made on a part
@@ -714,7 +725,8 @@ struct ChamferInput {
 ChamferInput ChamferInputWithoutFlatSeams(
     const TopoDS_Shape& theShape,
     const std::vector<TopoDS_Edge>& theEdges,
-    const Standard_Boolean theMayMerge) noexcept
+    const Standard_Boolean theMayMerge,
+    const Standard_Boolean theIsObjectSelection = Standard_False) noexcept
 {
     ChamferInput anUnchanged;
     anUnchanged.shape = theShape;
@@ -843,9 +855,245 @@ ChamferInput ChamferInputWithoutFlatSeams(
         ChamferInput aMergedInput;
         aMergedInput.shape = aMerged;
         aMergedInput.edges = std::move(aMapped);
+        if (aKeep.IsEmpty() || theIsObjectSelection) {
+            // Every edge selected, or the part picked in Object mode (review 9
+            // PP9: a cone's tip or a sphere's pole is never selected, so
+            // "every edge" alone missed them): the seams merged away are
+            // given back after the Bevel, so a Split line is kept (PP1).
+            TopTools_MapOfShape aBevelled;
+            for (const TopoDS_Edge& anEdge : anInput.edges) {
+                aBevelled.Add(anEdge);
+            }
+            std::vector<TopoDS_Edge> aRemoved;
+            for (const TopoDS_Edge& anEdge : theEdges) {
+                if (!aBevelled.Contains(anEdge)) {
+                    aRemoved.push_back(anEdge);
+                }
+            }
+            // Fable engine review 9 PP5: only a Split line is drawn back. A
+            // Join seam (a closed ring: every corner met by two seam ends) is
+            // not drawn before the Bevel, so it stays merged after it; drawn
+            // back, its pieces would stop at the bevel faces and show. Same
+            // peel as the drawing rule (OcctSceneSnapshotBuilder.mm, closed
+            // seams): dead ends are peeled until none is left; what is peeled
+            // is a Split line (or hangs off one) and is given back.
+            TopTools_IndexedMapOfShape aCorners;
+            std::vector<std::pair<Standard_Integer, Standard_Integer>> anEnds;
+            anEnds.reserve(aRemoved.size());
+            for (const TopoDS_Edge& aSeam : aRemoved) {
+                TopoDS_Vertex aFirst;
+                TopoDS_Vertex aLast;
+                TopExp::Vertices(aSeam, aFirst, aLast);
+                anEnds.emplace_back(aFirst.IsNull() ? 0 : aCorners.Add(aFirst),
+                                    aLast.IsNull() ? 0 : aCorners.Add(aLast));
+            }
+            std::vector<int> aSeamEnds(
+                static_cast<std::size_t>(aCorners.Extent()) + 1, 0);
+            for (const auto& anEnd : anEnds) {
+                ++aSeamEnds[static_cast<std::size_t>(anEnd.first)];
+                ++aSeamEnds[static_cast<std::size_t>(anEnd.second)];
+            }
+            std::vector<bool> aClosed(aRemoved.size(), true);
+            for (bool aPeeled = true; aPeeled;) {
+                aPeeled = false;
+                for (std::size_t anIndex = 0; anIndex < aRemoved.size(); ++anIndex) {
+                    const auto& anEnd = anEnds[anIndex];
+                    if (!aClosed[anIndex]
+                        || (anEnd.first > 0 && anEnd.second > 0
+                            && aSeamEnds[static_cast<std::size_t>(anEnd.first)] >= 2
+                            && aSeamEnds[static_cast<std::size_t>(anEnd.second)] >= 2)) {
+                        continue;
+                    }
+                    aClosed[anIndex] = false;
+                    --aSeamEnds[static_cast<std::size_t>(anEnd.first)];
+                    --aSeamEnds[static_cast<std::size_t>(anEnd.second)];
+                    aPeeled = true;
+                }
+            }
+            for (std::size_t anIndex = 0; anIndex < aRemoved.size(); ++anIndex) {
+                if (!aClosed[anIndex]) {
+                    aMergedInput.seamsToRestore.push_back(aRemoved[anIndex]);
+                }
+            }
+        }
         return aMergedInput;
     } catch (...) {
         return anInput;
+    }
+}
+
+//! Fable engine review 7 PP1 (CTO 20 Nov 19:14): a Split line the person drew
+//! never vanishes silently. Each seam the Object-mode merge removed is drawn
+//! back onto the bevelled solid (BRepAlgoAPI_Splitter with the seam's own
+//! edge as the tool: the face it lies in is split along it again, trimmed to
+//! the bevelled face). A seam is given back only when the result is still one
+//! valid solid of the same volume (1e-9) with one face more and no loose edge
+//! inside a face; otherwise that seam stays merged (a Join seam that would end
+//! inside a face, for example) and the bevelled solid is kept as it was.
+TopoDS_Shape BevelledWithFlatSeamsRestored(
+    const TopoDS_Shape& theBevelled,
+    const std::vector<TopoDS_Edge>& theSeams,
+    const std::shared_ptr<std::atomic_bool>& theCancellation = nullptr) noexcept
+{
+    // Review 9 PP12: a preview the slider has already left stops trying.
+    const auto aCancelled = [&theCancellation]() {
+        return theCancellation != nullptr
+            && theCancellation->load(std::memory_order_relaxed);
+    };
+    constexpr std::size_t kMaximumSeamsToRestore = 32;
+    if (theBevelled.IsNull() || theSeams.empty()
+        || theSeams.size() > kMaximumSeamsToRestore) {
+        return theBevelled;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const auto aVolumeOf = [](const TopoDS_Shape& theShape) {
+            GProp_GProps aProperties;
+            BRepGProp::VolumeProperties(theShape, aProperties);
+            return std::abs(aProperties.Mass());
+        };
+        const auto aFaceCountOf = [](const TopoDS_Shape& theShape) {
+            TopTools_IndexedMapOfShape aFaces;
+            TopExp::MapShapes(theShape, TopAbs_FACE, aFaces);
+            return aFaces.Extent();
+        };
+        const Standard_Real aVolume = aVolumeOf(theBevelled);
+        if (!(aVolume > 0.0)) {
+            return theBevelled;
+        }
+        // One try: theStart split by theTools. The split solid, or a null
+        // shape when it is not one valid solid of the same volume with more
+        // faces and no loose edge.
+        const auto aSplitWith = [&](const TopoDS_Shape& theStart,
+                                    const Standard_Integer theFacesBefore,
+                                    const TopTools_ListOfShape& theTools) -> TopoDS_Shape {
+            TopTools_ListOfShape anArguments;
+            anArguments.Append(theStart);
+            BRepAlgoAPI_Splitter aSplitter;
+            aSplitter.SetArguments(anArguments);
+            aSplitter.SetTools(theTools);
+            aSplitter.SetRunParallel(Standard_False);
+            // Review 9 PP12: a skipped try must not leave raised tolerances
+            // on the solid that is kept.
+            aSplitter.SetNonDestructive(Standard_True);
+            aSplitter.Build();
+            if (!aSplitter.IsDone() || aSplitter.HasErrors()) {
+                return TopoDS_Shape();
+            }
+            TopoDS_Shape aSolid;
+            Standard_Integer aSolids = 0;
+            for (TopExp_Explorer anIt(aSplitter.Shape(), TopAbs_SOLID);
+                 anIt.More(); anIt.Next()) {
+                aSolid = anIt.Current();
+                ++aSolids;
+            }
+            if (aSolids != 1 || aSolid.IsNull()) {
+                return TopoDS_Shape();
+            }
+            Standard_Boolean hasLooseEdge = Standard_False;
+            for (TopExp_Explorer aFace(aSolid, TopAbs_FACE);
+                 aFace.More() && !hasLooseEdge; aFace.Next()) {
+                for (TopExp_Explorer anEdge(aFace.Current(), TopAbs_EDGE);
+                     anEdge.More(); anEdge.Next()) {
+                    const TopAbs_Orientation anOrientation =
+                        anEdge.Current().Orientation();
+                    if (anOrientation == TopAbs_INTERNAL
+                        || anOrientation == TopAbs_EXTERNAL) {
+                        hasLooseEdge = Standard_True;
+                        break;
+                    }
+                }
+            }
+            // Fable engine review 9 PP6: an edge the split left inside the
+            // solid (a seam ending on an inner corner the bevel filled) is
+            // made INTERNAL for the solid, not for a face, so the face walk
+            // above does not see it. Refuse that split: the solid holds only
+            // shells of faces, and every edge is owned by two faces (one for
+            // the seam of a closed face; a degenerated pole edge is fine).
+            for (TopoDS_Iterator aChild(aSolid); aChild.More() && !hasLooseEdge;
+                 aChild.Next()) {
+                if (aChild.Value().ShapeType() != TopAbs_SHELL) {
+                    hasLooseEdge = Standard_True;
+                    break;
+                }
+                for (TopoDS_Iterator aShellChild(aChild.Value());
+                     aShellChild.More(); aShellChild.Next()) {
+                    if (aShellChild.Value().ShapeType() != TopAbs_FACE) {
+                        hasLooseEdge = Standard_True;
+                        break;
+                    }
+                }
+            }
+            if (!hasLooseEdge) {
+                TopTools_IndexedDataMapOfShapeListOfShape anEdgeFaces;
+                TopExp::MapShapesAndUniqueAncestors(
+                    aSolid, TopAbs_EDGE, TopAbs_FACE, anEdgeFaces);
+                for (Standard_Integer anIndex = 1;
+                     anIndex <= anEdgeFaces.Extent() && !hasLooseEdge; ++anIndex) {
+                    const TopoDS_Edge& anEdge =
+                        TopoDS::Edge(anEdgeFaces.FindKey(anIndex));
+                    if (BRep_Tool::Degenerated(anEdge)) {
+                        continue;
+                    }
+                    const TopTools_ListOfShape& anOwners =
+                        anEdgeFaces.FindFromIndex(anIndex);
+                    if (anOwners.Extent() == 2
+                        || (anOwners.Extent() == 1
+                            && BRep_Tool::IsClosed(
+                                anEdge, TopoDS::Face(anOwners.First())))) {
+                        continue;
+                    }
+                    hasLooseEdge = Standard_True;
+                }
+            }
+            // "More faces", not "one face more": a seam that crosses a face
+            // twice may add two (review 9 PP12).
+            const Standard_Integer aSplitFaces = aFaceCountOf(aSolid);
+            if (hasLooseEdge || aSplitFaces <= theFacesBefore
+                || !BRepCheck_Analyzer(aSolid, Standard_True).IsValid()
+                || !(std::abs(aVolumeOf(aSolid) - aVolume)
+                     <= 1.0e-9 * aVolume)) {
+                return TopoDS_Shape();
+            }
+            return aSolid;
+        };
+        TopoDS_Shape aCurrent = theBevelled;
+        Standard_Integer aFaces = aFaceCountOf(aCurrent);
+        // Fable engine review 9 PP7: Split lines that meet (a T) are stored
+        // as pieces that each end at the meeting point; alone, no piece can
+        // split its face. Together they close, so every seam is tried in one
+        // Splitter call first; one at a time only if that is refused.
+        TopTools_ListOfShape anAllSeams;
+        for (const TopoDS_Edge& aSeam : theSeams) {
+            if (!aSeam.IsNull()) {
+                anAllSeams.Append(aSeam);
+            }
+        }
+        if (anAllSeams.Extent() > 1 && !aCancelled()) {
+            const TopoDS_Shape aTogether = aSplitWith(aCurrent, aFaces, anAllSeams);
+            if (!aTogether.IsNull()) {
+                return aTogether;
+            }
+        }
+        for (const TopoDS_Edge& aSeam : theSeams) {
+            if (aCancelled()) {
+                break;
+            }
+            if (aSeam.IsNull()) {
+                continue;
+            }
+            TopTools_ListOfShape aTools;
+            aTools.Append(aSeam);
+            const TopoDS_Shape aSolid = aSplitWith(aCurrent, aFaces, aTools);
+            if (aSolid.IsNull()) {
+                continue;
+            }
+            aCurrent = aSolid;
+            aFaces = aFaceCountOf(aSolid);
+        }
+        return aCurrent;
+    } catch (...) {
+        return theBevelled;
     }
 }
 
@@ -879,7 +1127,7 @@ Standard_Boolean PlainBevelBuildsAt(
         if (theIsChamfer) {
             const ChamferInput aChamferInput = ChamferInputWithoutFlatSeams(
                 theSource.shape, theSource.edges,
-                theSource.mayMergeFlatSeams);
+                theSource.mayMergeFlatSeams, theSource.isObjectSelection);
             BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
             for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                 aBuilder.Add(theValue, anEdge);
@@ -1320,13 +1568,24 @@ private:
                     const ChamferInput aChamferInput =
                         ChamferInputWithoutFlatSeams(
                             aSource.shape, aSource.edges,
-                            aSource.mayMergeFlatSeams);
+                            aSource.mayMergeFlatSeams,
+                            aSource.isObjectSelection);
                     BRepFilletAPI_MakeChamfer aBuilder(aChamferInput.shape);
                     for (const TopoDS_Edge& anEdge : aChamferInput.edges) {
                         aBuilder.Add(aDistance, anEdge);
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
+                        // P1 (Fable engine review 6): no value works when the
+                        // seam could not be merged on a painted part; say so.
+                        if (!aSource.mayMergeFlatSeams
+                            && ChamferEdgesWithoutFlatSeams(
+                                   aSource.shape, aSource.edges).size()
+                                != aSource.edges.size()) {
+                            aResult.failureKind =
+                                BevelFailureKind::FlatSeamOnPaintedPart;
+                            return aResult;
+                        }
                         aResult.failureKind = ClassifyFailedPlainChamfer(
                             aSource, aDistance, theRequest.cancellation,
                             aNodesBefore, aSolidsBefore,
@@ -1335,6 +1594,13 @@ private:
                         return aResult;
                     }
                     aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
+                    // PP1: Split lines the Object-mode merge removed come back.
+                    if (!aCandidate.IsNull()
+                        && !aChamferInput.seamsToRestore.empty()) {
+                        aCandidate = BevelledWithFlatSeamsRestored(
+                            aCandidate, aChamferInput.seamsToRestore,
+                            theRequest.cancellation);
+                    }
                     // A slanted face's plane frame can flip between two
                     // last-digit versions on every save, so the part never
                     // reads back as written. Settle it here (a last-bit nudge
@@ -2072,6 +2338,8 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
             BevelPreviewWorkerSource aWorkerSource;
             aWorkerSource.shape = aCopiedShape;
             aWorkerSource.mayMergeFlatSeams = !aSource.hasFaceLooks;
+            aWorkerSource.isObjectSelection = aSource.selectionMode
+                == AIS_Shape::SelectionMode(TopAbs_SHAPE);
             aWorkerSource.edges.reserve(aSource.edges.size());
             for (const TopoDS_Edge& anEdge : aSource.edges) {
                 const TopoDS_Shape aCopiedEdge = aCopy.ModifiedShape(anEdge);
@@ -2477,9 +2745,13 @@ BevelOperationController::failureObservation() const noexcept
 {
     // Round owns the full classification. A plain Bevel reports only the
     // bounded size refusal (ClassifyFailedPlainChamfer) so the screen can say
-    // the amount is too large; every other Bevel failure stays unclassified.
+    // the amount is too large, and the seam on a painted part that no amount
+    // can cross (Fable engine review 6 P1); every other Bevel failure stays
+    // unclassified.
     if (myRoundOwned
-        || myFailureObservation.kind == BevelFailureKind::RadiusRefused) {
+        || myFailureObservation.kind == BevelFailureKind::RadiusRefused
+        || myFailureObservation.kind
+            == BevelFailureKind::FlatSeamOnPaintedPart) {
         return myFailureObservation;
     }
     return BevelFailureObservation{myGeneration, BevelFailureKind::None};
