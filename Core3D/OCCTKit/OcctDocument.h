@@ -634,6 +634,11 @@ struct OcctPreparedLabelClone {
     OcctExactLabelReceipt source;
     TopoDS_Shape detachedShape;
     OcctGeometryRepresentation representation = OcctGeometryRepresentation::Invalid;
+    //! NF4 (21 Nov 2026): a Pattern copy whose shape is NOT shifted. Its own
+    //! placement is the source's transform composed with this member placement,
+    //! so By numbers reads where the copy really is. Absent = the old rule
+    //! (the copy takes the source's transform; any offset is in the shape).
+    std::optional<gp_Trsf> memberPlacement;
 };
 
 //! One preflightable all-label mutation. Later D2/D3 authorities may retain
