@@ -1843,6 +1843,10 @@ __attribute__((objc_subclassing_restricted))
 //! Exact current attached manipulator location; nil when no gizmo is attached.
 //! Read-only DEBUG evidence for saved-group pivot attachment paths.
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
+//! The open tool's preview solids (Repeat and ring copies, Shell, Bevel, Join
+//! results): @[minX, minY, minZ, maxX, maxY, maxZ, count] in world units; nil
+//! when the tool shows none. Read-only evidence for Frame All with a tool open.
+- (NSArray<NSNumber *> *_Nullable)debugToolPreviewBounds;
 //! The attached Move handles' Z arrow direction (world, unit); nil when none (K13 check).
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection;
 //! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).

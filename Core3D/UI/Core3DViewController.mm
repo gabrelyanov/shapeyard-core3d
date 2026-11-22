@@ -8261,6 +8261,15 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return @[@(position.X()), @(position.Y()), @(position.Z())];
 }
 
+- (NSArray<NSNumber *> *_Nullable)debugToolPreviewBounds {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    double box[6] = {0, 0, 0, 0, 0, 0};
+    std::size_t count = 0;
+    if (!GLController.viewer->toolPreviewBounds(box, count)) { return nil; }
+    return @[@(box[0]), @(box[1]), @(box[2]), @(box[3]), @(box[4]), @(box[5]), @(count)];
+}
+
 - (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions {
     if (![NSThread isMainThread] || GLController == nil
         || GLController.viewer == nullptr) { return nil; }

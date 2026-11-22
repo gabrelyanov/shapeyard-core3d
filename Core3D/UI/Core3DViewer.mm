@@ -14849,6 +14849,24 @@ static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bound
     }
 }
 
+// The box of shown preview solids in world space (each with its own placement).
+static bool AddPresentationBounds(const std::vector<Handle(AIS_Shape)>& presentations,
+                                  Bnd_Box& bounds) noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        for (const Handle(AIS_Shape)& presentation : presentations) {
+            if (presentation.IsNull() || presentation->Shape().IsNull()) continue;
+            Bnd_Box local;
+            BRepBndLib::Add(presentation->Shape(), local);
+            if (local.IsVoid() || local.IsWhole() || local.IsOpen()) continue;
+            bounds.Add(local.Transformed(presentation->Transformation()));
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool Core3DViewer::frameModel(
     const bool selectedObjectsOnly,
     const std::uint32_t viewportWidth,
@@ -15481,6 +15499,38 @@ Core3DViewer::captureSceneFrameSnapshot(
         myDoc,
         myView,
         scene::UInt2{viewportWidth, viewportHeight});
+}
+
+std::vector<Handle(AIS_Shape)> Core3DViewer::toolPreviewPresentations() const noexcept {
+    std::vector<Handle(AIS_Shape)> shown = previewedResultPresentations();
+    try {
+        if (myContext.IsNull() || _objectInteractor == nullptr) return shown;
+        std::vector<Handle(AIS_Shape)> copies;
+        if (_objectInteractor->hasActiveLinearArray()) {
+            if (!_objectInteractor->captureLinearArrayPreview(copies)) copies.clear();
+        } else if (_objectInteractor->hasActiveRadialArray()) {
+            RadialArrayPreviewCapture ring;
+            if (_objectInteractor->captureRadialArrayPreview(ring)) copies = ring.previewObjects;
+        }
+        for (const Handle(AIS_Shape)& copy : copies) {
+            if (!copy.IsNull() && !copy->Shape().IsNull() && myContext->IsDisplayed(copy)) {
+                shown.push_back(copy);
+            }
+        }
+    } catch (...) {
+    }
+    return shown;
+}
+
+bool Core3DViewer::toolPreviewBounds(double out[6], std::size_t& count) const noexcept {
+    const auto presentations = toolPreviewPresentations();
+    count = presentations.size();
+    Bnd_Box box;
+    if (presentations.empty() || !AddPresentationBounds(presentations, box)
+        || box.IsVoid() || box.IsWhole() || box.IsOpen()) { return false; }
+    box.Get(out[0], out[1], out[2], out[3], out[4], out[5]);
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2])
+        && std::isfinite(out[3]) && std::isfinite(out[4]) && std::isfinite(out[5]);
 }
 
 std::vector<Handle(AIS_Shape)> Core3DViewer::previewedResultPresentations() const noexcept {

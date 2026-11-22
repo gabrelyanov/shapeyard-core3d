@@ -1048,6 +1048,13 @@ namespace core3d {
         //! Join, Cut, Hole) that are on screen now; empty when none. Read-only.
         //! The OpenGL view draws their edge lines from this.
         std::vector<Handle(AIS_Shape)> previewedResultPresentations() const noexcept;
+        //! Every preview solid the open tool shows before its tick: the Repeat
+        //! and ring copies plus previewedResultPresentations(). Read-only; empty
+        //! when none. Frame All with a tool open fits these with the parts.
+        std::vector<Handle(AIS_Shape)> toolPreviewPresentations() const noexcept;
+        //! World box (min x,y,z, max x,y,z) of toolPreviewPresentations(); false
+        //! when there is none. `count` is the number of preview solids. Read-only.
+        bool toolPreviewBounds(double out[6], std::size_t& count) const noexcept;
 #ifdef DEBUG
         struct RawR2AuthorityObservation {
             bool native = false;
