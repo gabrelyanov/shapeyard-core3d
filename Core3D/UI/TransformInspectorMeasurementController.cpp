@@ -1251,6 +1251,9 @@ struct TransformInspectorBoundsWorkerResult {
     BoundsWorkerOutcome outcome = BoundsWorkerOutcome::Failed;
     TransformInspectorBoundsValue bounds;
     Standard_Boolean computeWasMainThread = Standard_False;
+    // The request's turn, so a failed floor box read can mark it (M4).
+    bool wantsFloor = false;
+    TransformInspectorQuaternion floorTurn;
 };
 
 struct TransformInspectorBoundsWorkerEnqueueResult {
@@ -1423,6 +1426,8 @@ private:
         TransformInspectorBoundsWorkerResult aResult;
         aResult.generation = theRequest.generation;
         aResult.computeWasMainThread = pthread_main_np() != 0;
+        aResult.wantsFloor = theRequest.wantsFloor;
+        aResult.floorTurn = theRequest.floorTurn;
         if (theRequest.cancellation == nullptr
             || theRequest.cancellation->load(std::memory_order_relaxed)) {
             aResult.outcome = BoundsWorkerOutcome::Cancelled;
@@ -2342,6 +2347,13 @@ TransformInspectorMeasurementController::capture(
                 }
                 return aMeasurement;
             }
+            // A good read ends any earlier cut's mark (Fable review 8, M3):
+            // the value came from the cache and may still carry the mark of
+            // another turn, which would then hide that turn's floor size.
+            aBounds.floorUnavailable = aWantsFloor && !aBounds.hasFloor;
+            aBounds.floorUnavailableRotation = aBounds.floorUnavailable
+                ? aMeasurement.quaternion
+                : TransformInspectorQuaternion{};
             myImpl->insert(aKey, aBounds);
             if (!TryApplyBounds(aBounds, aMeasurement)) {
                 aMeasurement.state =
@@ -2450,6 +2462,14 @@ TransformInspectorMeasurementController::capture(
         aMeasurement.state =
             TransformInspectorMeasurementState::Measuring;
         myImpl->pendingMeasurement.state = aMeasurement.state;
+        // Only the floor box for a new turn is read: the own box is known,
+        // so By numbers keeps showing it instead of "Measuring" (M2).
+        if (aKnownOwnBounds.has_value()
+            && TryApplyBounds(*aKnownOwnBounds, aMeasurement)) {
+            aMeasurement.hasFloorDimensions = false;
+            aMeasurement.floorDimensions = {};
+            aMeasurement.hasKnownDimensionsWhileMeasuring = true;
+        }
         return aMeasurement;
     } catch (...) {
         myCompletion = {};
@@ -3038,13 +3058,27 @@ void TransformInspectorMeasurementController::acceptWorkerResult(
     if (theResult.outcome == BoundsWorkerOutcome::Success
         && !aCurrentDocument.IsNull()
         && aCurrentDocument == aResultKey->document) {
+        // A turn whose floor box could not be read is marked, so it is not
+        // copied and read again on every refresh (Fable review 8, M4).
+        theResult.bounds.floorUnavailable =
+            theResult.wantsFloor && !theResult.bounds.hasFloor;
+        if (theResult.bounds.floorUnavailable) {
+            theResult.bounds.floorUnavailableRotation = theResult.floorTurn;
+        }
         myImpl->insert(*aResultKey, theResult.bounds);
     } else if (theResult.outcome == BoundsWorkerOutcome::Failed
                && !aCurrentDocument.IsNull()
                && aCurrentDocument == aResultKey->document) {
-        // A failed floor box read never erases a known own box (M1).
+        // A failed floor box read never erases a known own box (M1), and
+        // marks the turn so it is not read again on every refresh (M4).
         if (myImpl->lookup(*aResultKey, aKnownOwnBounds)) {
             hasKnownOwnBounds = true;
+            if (theResult.wantsFloor) {
+                aKnownOwnBounds.floorUnavailable = true;
+                aKnownOwnBounds.floorUnavailableRotation =
+                    theResult.floorTurn;
+                myImpl->insert(*aResultKey, aKnownOwnBounds);
+            }
         } else {
             myImpl->insertNegative(
                 *aResultKey,

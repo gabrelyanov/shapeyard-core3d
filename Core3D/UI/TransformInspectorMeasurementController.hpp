@@ -102,6 +102,10 @@ struct TransformInspectorMeasurement {
     //! is not a quarter turn (a quarter turn maps the own box exactly).
     bool hasFloorDimensions = false;
     TransformInspectorVector3 floorDimensions;
+    //! Measuring only: the part's own box was already known, so `localBounds`,
+    //! `localDimensions` and `dimensions` hold it while the worker reads the
+    //! floor box for a new turn (Fable review 6, M2). No floor dimensions.
+    bool hasKnownDimensionsWhileMeasuring = false;
 };
 
 enum class TransformInspectorPositionAxis : std::uint8_t {
