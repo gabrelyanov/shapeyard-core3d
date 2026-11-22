@@ -3059,6 +3059,7 @@ bool ValidateAttachmentRigDocument(
 #include "AssetAtlasPersistence.hxx"
 #include "AssetAtlasBuild.hxx"
 #include "FaceImagePersistence.hxx"
+#include "DecalLayerPersistence.hxx"
 #include "PaintedAtlasBake.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
 #include "RetainedEdgeTreatmentBinaryDriver.hxx"
@@ -13682,6 +13683,29 @@ namespace {
 // volume and a valid solid. The result then goes through the file trip so it is stored as the file holds it.
 // TIDY-CHECK (Fable): pictures on faces are not in `looks` (PBR colours only); such parts must not merge across
 // a picture edge.
+// TIDY-CHECK (Fable review 13 item 3a): a part that carries a picture on a face (face image, sticker/decal layer) or a
+// document that holds a painted atlas is never tidied: such looks are not in the PBR looks list, so two faces in one
+// plane, one with a picture, could be merged. Cautious on purpose: unknown or unreadable metadata counts as a picture.
+bool JoinInputCarriesPicture(const Handle(TDocStd_Document)& document, const TDF_Label& part) noexcept {
+    try {
+        if (document.IsNull() || part.IsNull()) return true;
+        const auto marked = [](const TDF_Label& label) {
+            return core3d::face_image::persistence::bindings::HasSchemaAttribute(label)
+                || core3d::decal_layer::persistence::HasSchemaAttribute(label);
+        };
+        if (marked(part)) return true;
+        for (TDF_ChildIterator child(part, Standard_True); child.More(); child.Next())
+            if (marked(child.Value())) return true;
+        const TDF_Label atlas = document->Main().FindChild(core3d::painted_atlas_bake::persistence::RootTag, Standard_False);
+        if (!atlas.IsNull()) {
+            if (core3d::painted_atlas_bake::persistence::HasSchemaAttribute(atlas)) return true;
+            for (TDF_ChildIterator child(atlas, Standard_True); child.More(); child.Next())
+                if (child.Value().HasAttribute()) return true;
+        }
+        return false;
+    } catch (...) { return true; }
+}
+
 bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& result,
     const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks, TopoDS_Shape& tidied) noexcept {
     tidied.Nullify();
@@ -13838,7 +13862,10 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                     coloured[at].insert(coloured[at].end(), looks.begin(), looks.end());
             }
             // Join tidy (CTO 18:23 20 Nov): flat sides the parts share become one face, colours kept apart.
-            if (operation == 0) {
+            bool pictured = JoinInputCarriesPicture(myOcafDoc, target);
+            for (const auto& [tool, unusedToolPresentation] : tools)
+                pictured = pictured || JoinInputCarriesPicture(myOcafDoc, tool);
+            if (operation == 0 && !pictured) {
                 TopoDS_Shape tidied;
                 if (TidyJoinKeepingLooks(*this, made[at].first, coloured[at], tidied)) {
                     Handle(AIS_Shape) tidyShown = new AIS_Shape(tidied);
