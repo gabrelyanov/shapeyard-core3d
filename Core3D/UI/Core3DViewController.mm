@@ -15525,7 +15525,12 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 }
 #if DEBUG
 extern "C" int Core3DDebugMeshCopyRejectStage;
+namespace core3d::part_boolean::owner { int CommitReadbackFailureCount() noexcept; }
 #endif
++ (NSInteger)debugCommitReadbackFailureCount {
+    return core3d::part_boolean::owner::CommitReadbackFailureCount();
+}
+
 - (NSInteger)debugMeshCopyRejectStage {
     // N04 diagnostic: the last Mesh copy guard reached (Core3DViewer / OrdinaryEditController).
 #if DEBUG
@@ -23679,6 +23684,32 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
 // checks their currency, so a filleted seat whose profile recipe is stale
 // remains observable and no current parametric recipe is required. No
 // selection, edit, command or geometry-generation authority is acquired.
+- (BOOL)debugCommitWrongSolidOnEntity:(NSString *)entity {
+#if DEBUG
+    // READBACK B red-first check: one committed command puts a 13 x 17 x 19 box on the part's stored shape, the
+    // same drift Shell's debugMutateSourcePersistedShape makes, without needing a tool to open on the part.
+    if(![NSThread isMainThread]||!GLController||!GLController.viewer||!entity||!entity.UTF8String)return NO;
+    try {
+        const Handle(OcctDocument) owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull())return NO;
+        TDF_Label label;
+        if(!core3d::placement::Find(owner,entity.UTF8String,label)||label.IsNull())return NO;
+        Handle(TDocStd_Document)& document=owner->ChangeDocument();
+        const Handle(XCAFDoc_ShapeTool) shapes=XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if(shapes.IsNull()||document->HasOpenCommand())return NO;
+        const TopoDS_Shape box=BRepPrimAPI_MakeBox(13.0,17.0,19.0).Shape();
+        document->NewCommand();
+        if(!document->HasOpenCommand())return NO;
+        shapes->SetShape(label,box);
+        try{(void)document->CommitCommand();}catch(...){}
+        if(document->HasOpenCommand()){document->AbortCommand();return NO;}
+        return XCAFDoc_ShapeTool::GetShape(label).IsEqual(box);
+    } catch (...) { return NO; }
+#else
+    (void)entity; return NO;
+#endif
+}
+
 - (NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity {
     if(![NSThread isMainThread]||!GLController||!GLController.viewer||!entity
         ||entity.length>128||!entity.UTF8String)return nil;

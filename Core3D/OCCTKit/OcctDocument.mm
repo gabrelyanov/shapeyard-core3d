@@ -3106,6 +3106,9 @@ bool ValidateAttachmentRigDocument(
 #include <gp_GTrsf.hxx>
 #include <XCAFDoc_ShapeMapTool.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <algorithm>
@@ -8849,6 +8852,11 @@ void Core3DDebugDefineFrameBinXCAFFormat(
 // function : OcctViewer
 // purpose  :
 // =======================================================================
+namespace core3d::part_boolean::owner {
+int CommitReadbackFailureCount() noexcept;
+void InstallCommitReadback() noexcept;
+}
+
 OcctDocument::OcctDocument()
 : myMaximumSerializedTextureOccurrenceBytes(
       kMaximumAggregateTextureBytes),
@@ -8867,6 +8875,10 @@ OcctDocument::OcctDocument()
     myAuthorityApplication = new core3d::authority::NativeObservedApplication();
 #endif
     myApp = myAuthorityApplication;
+#if DEBUG
+    // READBACK B runs only in the engine's DEBUG configuration (Fable review 13 item 4): never in a user's build.
+    core3d::part_boolean::owner::InstallCommitReadback();
+#endif
     std::array<std::uint8_t, 16> nonce{};
     [[NSUUID UUID] getUUIDBytes:nonce.data()];
     myNativeAuthority = std::make_shared<core3d::authority::NativeEditAuthority>(nonce);
@@ -13662,6 +13674,72 @@ Standard_Boolean OcctDocument::BooleanResultRecordForBake(
     } catch (...) { record.Nullify(); return Standard_False; }
 }
 
+namespace {
+// Join tidy, plain route (CTO 18:23 20 Nov; push-pull 20 Nov: a tower Joined flush on a cube kept its shared
+// flat sides split, so flat Bevel and Shell refused). Faces that lie in one plane and edges that lie in one line
+// are merged, but never across two faces that look different (colour, material): every edge between two faces
+// of different looks is kept. Refused (the untidied result stays) unless the tidy keeps the number of solids, the
+// volume and a valid solid. The result then goes through the file trip so it is stored as the file holds it.
+// TIDY-CHECK (Fable): pictures on faces are not in `looks` (PBR colours only); such parts must not merge across
+// a picture edge.
+bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& result,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks, TopoDS_Shape& tidied) noexcept {
+    tidied.Nullify();
+    try {
+        OCC_CATCH_SIGNALS
+        if (result.IsNull()) return false;
+#if DEBUG
+        if (std::getenv("SHAPEYARD_JOIN_TIDY_OFF")) return false;
+#endif
+        // Each face's look: an index into the distinct looks, -1 for the part's own look.
+        std::vector<XCAFDoc_VisMaterialPBR> distinct;
+        TopTools_DataMapOfShapeInteger lookOfFace;
+        for (const auto& [face, material] : document.MatchFaceLooks(result, looks, Standard_False)) {
+            int index = -1;
+            for (std::size_t i = 0; i < distinct.size(); ++i)
+                if (distinct[i].IsEqual(material)) { index = int(i); break; }
+            if (index < 0) { distinct.push_back(material); index = int(distinct.size()) - 1; }
+            lookOfFace.Bind(face, index);
+        }
+        const auto lookOf = [&](const TopoDS_Shape& face) {
+            return lookOfFace.IsBound(face) ? lookOfFace.Find(face) : -1;
+        };
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
+        TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
+        TopTools_MapOfShape seams;
+        for (int i = 1; i <= facesOfEdge.Extent(); ++i) {
+            const TopTools_ListOfShape& faces = facesOfEdge.FindFromIndex(i);
+            int first = -2;
+            for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
+                const int look = lookOf(it.Value());
+                if (first == -2) first = look;
+                else if (look != first) { seams.Add(facesOfEdge.FindKey(i)); break; }
+            }
+        }
+        ShapeUpgrade_UnifySameDomain unify(result, Standard_True, Standard_True, Standard_False);
+        unify.AllowInternalEdges(Standard_False);
+        if (!seams.IsEmpty()) unify.KeepShapes(seams);
+        unify.Build();
+        const TopoDS_Shape merged = unify.Shape();
+        if (merged.IsNull()) return false;
+        const auto count = [](const TopoDS_Shape& shape, TopAbs_ShapeEnum kind) {
+            TopTools_IndexedMapOfShape map; TopExp::MapShapes(shape, kind, map); return map.Extent();
+        };
+        if (count(merged, TopAbs_FACE) >= count(result, TopAbs_FACE)
+            || count(merged, TopAbs_SOLID) != count(result, TopAbs_SOLID)
+            || !BRepCheck_Analyzer(merged, Standard_True).IsValid()) return false;
+        GProp_GProps before, after;
+        BRepGProp::VolumeProperties(result, before); BRepGProp::VolumeProperties(merged, after);
+        if (!(before.Mass() > 0) || std::abs(after.Mass() - before.Mass()) > 1.0e-7 * before.Mass()) return false;
+        TopoDS_Shape stable;
+        if (!FileStableShape(merged, stable) || stable.IsNull()
+            || !BRepCheck_Analyzer(stable, Standard_True).IsValid()) return false;
+        tidied = stable;
+        return true;
+    } catch (...) { tidied.Nullify(); return false; }
+}
+} // namespace
+
 Standard_Boolean OcctDocument::ApplyBakedBoolean(
     const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
     const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
@@ -13758,6 +13836,15 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                 std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> looks;
                 if (JoinFaceLooks(target, targetPresentation, tools, scale, looks))
                     coloured[at].insert(coloured[at].end(), looks.begin(), looks.end());
+            }
+            // Join tidy (CTO 18:23 20 Nov): flat sides the parts share become one face, colours kept apart.
+            if (operation == 0) {
+                TopoDS_Shape tidied;
+                if (TidyJoinKeepingLooks(*this, made[at].first, coloured[at], tidied)) {
+                    Handle(AIS_Shape) tidyShown = new AIS_Shape(tidied);
+                    tidyShown->SetLocalTransformation(placement);
+                    made[at] = {tidied, tidyShown};
+                }
             }
         }
         if (!anythingCut) { refusal = "no-overlap"; return Standard_False; }
@@ -34939,6 +35026,65 @@ bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
         return proven;
     } catch (...) { return false; }
 }
+
+// READBACK B (CTO 21 Nov 09:50, Fable review 5 F2): after every commit the document's Join/Cut/Overlap records are
+// read the way save reads them (composite_recipe::ReadAll refuses when a part's stored shape is not the shape its
+// record holds), and every editable Join/Cut record whose shape changed since its last clean proof is proven again
+// (ValidateOriginalsRecord, the proof save runs). Report only: a refusal is counted and traced in DEBUG.
+// The commit's attribute delta list is not used: a commit that only rewrites a part's shape can leave it empty.
+namespace {
+std::atomic<int> gCommitReadbackFailures{0};
+struct CommitReadbackCache {
+    const TDocStd_Document* document = nullptr;
+    std::map<std::string, TopoDS_Shape> proven; // record owner entry -> the shape last proven clean
+};
+CommitReadbackCache& ReadbackCache() noexcept { static CommitReadbackCache cache; return cache; }
+void CountReadbackFailure(const char* what, const char* entry) noexcept {
+    gCommitReadbackFailures.fetch_add(1);
+#if DEBUG
+    std::fprintf(stderr, "COMMIT_READBACK refused %s label=%s\n", what, entry);
+#else
+    (void)what; (void)entry;
+#endif
+}
+bool HoldsOriginals(const core3d::composite_recipe::Definition& definition) noexcept {
+    return std::any_of(definition.nodes.begin(), definition.nodes.end(),
+        [](const core3d::composite_recipe::Node& node) {
+            const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(&node.value);
+            return feature && feature->kind == core3d::composite_recipe::PartBooleanFeatureKind
+                && (feature->codecVersion == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec
+                    || feature->codecVersion == core3d::composite_recipe::PartBooleanResultSetFeatureCodec);
+        });
+}
+void CommitReadback(const Handle(TDocStd_Document)& document) noexcept {
+    try {
+        if (document.IsNull()) return;
+        auto& cache = ReadbackCache();
+        if (cache.document != document.get()) { cache.document = document.get(); cache.proven.clear(); }
+        std::vector<core3d::composite_recipe::Record> all;
+        if (!core3d::composite_recipe::ReadAll(document, all)) {
+            cache.proven.clear();
+            CountReadbackFailure("records", "-");
+            return;
+        }
+        std::map<std::string, TopoDS_Shape> next;
+        for (const auto& record : all) {
+            if (!record.value || record.owner.IsNull() || !HoldsOriginals(record.value->definition)) continue;
+            TCollection_AsciiString entry; TDF_Tool::Entry(record.owner, entry);
+            const std::string key(entry.ToCString());
+            const auto known = cache.proven.find(key);
+            if (known == cache.proven.end() || !known->second.IsEqual(record.current)) {
+                if (!ValidateOriginalsRecord(document, record)) { CountReadbackFailure("proof", key.c_str()); continue; }
+            }
+            next.emplace(key, record.current);
+        }
+        cache.proven.swap(next);
+    } catch (...) { CountReadbackFailure("exception", "-"); }
+}
+} // namespace
+
+int CommitReadbackFailureCount() noexcept { return gCommitReadbackFailures.load(); }
+void InstallCommitReadback() noexcept { core3d::authority::gCommitReadback = &CommitReadback; }
 
 #if DEBUG
 namespace i16_n_read {
