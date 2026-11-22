@@ -3203,8 +3203,12 @@ namespace core3d {
 	}
 
 	Standard_Boolean ShapeInteractor::tryCaptureBevelSelection(
-		std::vector<BevelSourceSelection>& theSelection) const noexcept {
+		std::vector<BevelSourceSelection>& theSelection,
+		Standard_Boolean* theOverEdgeLimit) const noexcept {
 		theSelection.clear();
+		if (theOverEdgeLimit != nullptr) {
+			*theOverEdgeLimit = Standard_False;
+		}
 		if (myContext.IsNull() || myDoc.IsNull()
 			|| _bevelController == nullptr
 			|| !selectionModeAuthorityIsExact()) {
@@ -3401,6 +3405,14 @@ namespace core3d {
 					if (!IsBevelEdgeEligible(aCanonicalEdge)) {
 						return Standard_True;
 					}
+					// R9-C3 (CTO 22 Nov 18:47): Object and Face mode take the sharp
+					// edges only; where a round already meets a side no Bevel can
+					// be made, and those edges used up the 64-edge limit. An edge
+					// picked on its own is kept: its Bevel says why it cannot.
+					if (_topAbsSelMode != TopAbs_EDGE
+						&& IsSmoothBevelEdge(aSource->shape, aCanonicalEdge)) {
+						return Standard_True;
+					}
 					++anOwnerEligibleEdgeCount;
 					for (const TopoDS_Edge& anExisting
 						 : aSource->selection.edges) {
@@ -3410,6 +3422,9 @@ namespace core3d {
 					}
 					if (anAggregateEdgeCount
 						>= BevelOperationController::kMaxSelectedEdges) {
+						if (theOverEdgeLimit != nullptr) {
+							*theOverEdgeLimit = Standard_True;
+						}
 						return Standard_False;
 					}
 					++anAggregateEdgeCount;
@@ -3470,6 +3485,15 @@ namespace core3d {
 		std::vector<BevelSourceSelection> aSelection;
 		return tryCaptureBevelSelection(aSelection)
 			&& _bevelController->canBegin(aSelection);
+	}
+
+	Standard_Boolean ShapeInteractor::bevelSelectionOverEdgeLimit() const noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		Standard_Boolean anOverLimit = Standard_False;
+		return !tryCaptureBevelSelection(aSelection, &anOverLimit) && anOverLimit;
 	}
 
 	Standard_Boolean ShapeInteractor::canBeginRoundSelection() const noexcept {

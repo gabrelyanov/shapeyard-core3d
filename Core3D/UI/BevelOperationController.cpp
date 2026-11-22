@@ -14,6 +14,9 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
+#include <gp_Pnt2d.hxx>
+#include <Geom2d_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAdaptor_Curve.hxx>
@@ -1054,6 +1057,77 @@ Standard_Boolean IsBevelEdgeEligible(
     }
 }
 
+Standard_Boolean IsSmoothBevelEdge(
+    const TopoDS_Shape& theShape,
+    const TopoDS_Edge& theEdge) noexcept
+{
+    if (theShape.IsNull() || theEdge.IsNull()) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        std::vector<TopoDS_Face> aFaces;
+        for (TopExp_Explorer aFace(theShape, TopAbs_FACE); aFace.More(); aFace.Next()) {
+            for (TopExp_Explorer anEdge(aFace.Current(), TopAbs_EDGE); anEdge.More(); anEdge.Next()) {
+                if (anEdge.Current().IsSame(theEdge)) {
+                    const TopoDS_Face aCandidate = TopoDS::Face(aFace.Current());
+                    bool known = false;
+                    for (const TopoDS_Face& aSeen : aFaces) known = known || aSeen.IsSame(aCandidate);
+                    if (!known) aFaces.push_back(aCandidate);
+                    break;
+                }
+            }
+            if (aFaces.size() > 2) return Standard_False;
+        }
+        if (aFaces.size() == 1) {
+            // A seam: the edge runs inside one face (the side of a cylinder).
+            return BRep_Tool::IsClosed(theEdge, aFaces.front());
+        }
+        if (aFaces.size() != 2) {
+            return Standard_False;
+        }
+        // Two flat faces in one plane meet at a seam, not a smooth edge: Bevel
+        // already handles that seam (it merges it, or says a painted part's
+        // seam cannot be crossed), so it is never called smooth here.
+        if (BRepAdaptor_Surface(aFaces[0], Standard_False).GetType() == GeomAbs_Plane
+            && BRepAdaptor_Surface(aFaces[1], Standard_False).GetType() == GeomAbs_Plane) {
+            return Standard_False;
+        }
+        Standard_Real aFirst = 0.0, aLast = 0.0;
+        BRep_Tool::Range(theEdge, aFirst, aLast);
+        if (!std::isfinite(aFirst) || !std::isfinite(aLast) || aLast <= aFirst) {
+            return Standard_False;
+        }
+        const auto normalAt = [&](const TopoDS_Face& theFace, const Standard_Real t, gp_Vec& theNormal) {
+            Standard_Real f = 0.0, l = 0.0;
+            const Handle(Geom2d_Curve) aCurve = BRep_Tool::CurveOnSurface(theEdge, theFace, f, l);
+            if (aCurve.IsNull()) return false;
+            const gp_Pnt2d aUV = aCurve->Value(t);
+            BRepAdaptor_Surface aSurface(theFace, Standard_False);
+            gp_Pnt aPoint; gp_Vec aDU, aDV;
+            aSurface.D1(aUV.X(), aUV.Y(), aPoint, aDU, aDV);
+            theNormal = aDU.Crossed(aDV);
+            if (theNormal.Magnitude() < 1.0e-12) return false;
+            if (theFace.Orientation() == TopAbs_REVERSED) theNormal.Reverse();
+            return true;
+        };
+        // Half a degree: a round's side meets its flat neighbour at 0; a real
+        // corner is far more than that.
+        constexpr Standard_Real kSmoothAngle = 0.5 * M_PI / 180.0;
+        for (const Standard_Real aShare : {0.25, 0.5, 0.75}) {
+            const Standard_Real t = aFirst + (aLast - aFirst) * aShare;
+            gp_Vec a, b;
+            if (!normalAt(aFaces[0], t, a) || !normalAt(aFaces[1], t, b)
+                || a.Angle(b) > kSmoothAngle) {
+                return Standard_False;
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean TryResolveCanonicalBevelEdgeTopologyIndexBounded(
 	const TopoDS_Shape& theShape,
 	const Standard_Size theZeroBasedIndex,
@@ -1303,6 +1377,17 @@ private:
                 TopoDS_Shape aCandidate;
                 std::shared_ptr<const retained_edge_treatment::DetachedResult>
                     aRetainedResult;
+                // R9-C3 (CTO 22 Nov 18:47): an edge where the faces already meet
+                // smoothly can take no Bevel at any value; say so (the HintLine),
+                // never a bare failed preview.
+                if (!aSource.retainedInput) {
+                    for (const TopoDS_Edge& anEdge : aSource.edges) {
+                        if (IsSmoothBevelEdge(aSource.shape, anEdge)) {
+                            aResult.failureKind = BevelFailureKind::SmoothEdge;
+                            return aResult;
+                        }
+                    }
+                }
                 if (aSource.retainedInput) {
                     retained_edge_treatment::Refusal aRefusal;
                     aRetainedResult = theRequest.retainedAdapter
@@ -2493,7 +2578,8 @@ BevelOperationController::failureObservation() const noexcept
     if (myRoundOwned
         || myFailureObservation.kind == BevelFailureKind::RadiusRefused
         || myFailureObservation.kind
-            == BevelFailureKind::FlatSeamOnPaintedPart) {
+            == BevelFailureKind::FlatSeamOnPaintedPart
+        || myFailureObservation.kind == BevelFailureKind::SmoothEdge) {
         return myFailureObservation;
     }
     return BevelFailureObservation{myGeneration, BevelFailureKind::None};

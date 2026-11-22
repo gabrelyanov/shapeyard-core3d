@@ -44,6 +44,9 @@ enum class BevelFailureKind : std::uint8_t {
     //! looks. The seam is not merged there (a two-look side would come out in
     //! one look) and the chamfer builder refuses it at any distance.
     FlatSeamOnPaintedPart,
+    //! R9-C3 (CTO 22 Nov 18:47): a picked edge where two faces already meet
+    //! smoothly (the side of a round): no Bevel can be made there.
+    SmoothEdge,
 };
 
 struct BevelFailureObservation {
@@ -71,6 +74,15 @@ struct BevelSourceSelection {
 //! Frozen v1 rail eligibility shared by read-only selection capture and the
 //! controller's final source proof. It is observational and fails closed.
 Standard_Boolean IsBevelEdgeEligible(
+    const TopoDS_Edge& edge) noexcept;
+
+//! R9-C3 (CTO 22 Nov 18:47): true when the two faces of `shape` that meet at
+//! `edge` meet smoothly there (the same direction on both sides, as where a
+//! round meets a flat side), or when the edge is a seam inside one face. A
+//! Bevel can never be made on such an edge; Object and Face mode skip them.
+//! Unknown geometry counts as sharp (the Bevel then decides as before).
+Standard_Boolean IsSmoothBevelEdge(
+    const TopoDS_Shape& shape,
     const TopoDS_Edge& edge) noexcept;
 
 //! DEBUG/test selection seams resolve deterministic indices only after a

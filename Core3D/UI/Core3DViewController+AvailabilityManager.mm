@@ -472,10 +472,13 @@ Core3DModelCapability DocumentExportCapabilities(
         const BOOL canBeginShell = exposesShell && shellAdmission;
 		const BOOL canBeginRawR2Chamfer = exposesChamfer
 			&& [self core3d_canBeginVisibleRawR2Bevel];
+		// R9-C3 (CTO 22 Nov 18:47): Bevel is always offered on a solid part;
+		// past the edge limit it is offered dimmed with its reason.
 		const BOOL canBeginChamfer = exposesChamfer
 			&& (canBeginRawR2Chamfer
 				|| (shapeInteractor != nullptr
-					&& shapeInteractor->canBeginBevelSelection()));
+					&& (shapeInteractor->canBeginBevelSelection()
+						|| shapeInteractor->bevelSelectionOverEdgeLimit())));
 		if (hasSelectingChamfer) {
 			return canBeginChamfer
 				? @[@(PrimitiveGizmoTypeChamfer)]
@@ -506,6 +509,24 @@ Core3DModelCapability DocumentExportCapabilities(
         return [available copy];
     } catch (...) {
         return @[];
+    }
+}
+
+- (BOOL)bevelOverEdgeLimit {
+    if (![NSThread isMainThread] || GLController == nil) {
+        return NO;
+    }
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        const std::shared_ptr<core3d::ShapeInteractor> shapeInteractor =
+            viewer == nullptr ? nullptr : viewer->getShapeInteractor();
+        return shapeInteractor != nullptr
+            && CapabilitiesAllowGizmo(self.selectedModelCapabilities,
+                                      PrimitiveGizmoTypeChamfer)
+            && shapeInteractor->bevelSelectionOverEdgeLimit();
+    } catch (...) {
+        return NO;
     }
 }
 
