@@ -56,12 +56,15 @@
 #include <XCAFDoc_VisMaterial.hxx>
 #include <RWStl.hxx>
 #include <STEPCAFControl_Writer.hxx>
+#include <APIHeaderSection_MakeHeader.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <StdPrs_ToolTriangulatedShape.hxx>
 #include <StepData_ConfParameters.hxx>
 #include <StepData_StepModel.hxx>
+#include <TDF_Tool.hxx>
+#include <TDataStd_Name.hxx>
 #include <TColStd_IndexedDataMapOfStringString.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -140,6 +143,12 @@ struct NativeExportState {
     bool selectedObjectsOnly = false;
     bool usesSelectedRoots = false;
     std::set<std::string> selectedEntityIdentifiers;
+    //! Objects' name for a part that has none of its own ("Case 1"), keyed
+    //! by entity identifier; OBJ and STEP, set before start (round 3 lamp F10).
+    std::unordered_map<std::string, std::string> partNames;
+    //! The project's name for the STEP header, printable ASCII; set before
+    //! start; empty = "Shapeyard model".
+    std::string stepTitle;
     Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
     Standard_Real deviationCoefficient = 0.001;
     Standard_Real deviationAngle = 20.0 * M_PI / 180.0;
@@ -364,6 +373,14 @@ public:
         }
     }
 
+    //! The name Objects gives an unnamed root part ("Case 1"). Used only
+    //! where the part has no name of its own; named parts keep theirs.
+    void NameUnnamedPart(const TDF_Label& label, const std::string& name) {
+        TCollection_AsciiString entry;
+        TDF_Tool::Entry(label, entry);
+        myPartNames[entry.ToCString()] = name;
+    }
+
     Standard_Integer ExpectedTextureCount() const {
         return myCreatesMaterialFile ? myTextures.Extent() : 0;
     }
@@ -387,12 +404,19 @@ protected:
                     const TCollection_AsciiString& sourceName) override {
         // OCCT writes no g line for a part without a name (a Case, a
         // profile solid), so its faces fell into the previous part's group.
-        // Such a part is named the way the FBX writer names it.
+        // Such a part is named the way the FBX writer names it: by the name
+        // Objects shows for it ("Case 1") when the editor handed one in.
         const Standard_Integer ordinal = myLeafOrdinal++;
         TCollection_AsciiString name = sourceName;
         name.LeftAdjust();
         name.RightAdjust();
-        if (name.IsEmpty()) {
+        TCollection_AsciiString entry;
+        TDF_Tool::Entry(label, entry);
+        const auto objectsName = name.IsEmpty()
+            ? myPartNames.find(entry.ToCString()) : myPartNames.end();
+        if (objectsName != myPartNames.end()) {
+            name = TCollection_AsciiString(objectsName->second.c_str());
+        } else if (name.IsEmpty()) {
             char fallback[32];
             std::snprintf(fallback, sizeof(fallback), "Part_%04d", static_cast<int>(ordinal));
             name = TCollection_AsciiString(fallback);
@@ -590,6 +614,7 @@ private:
     Standard_Boolean myCreatesMaterialFile = Standard_False;
     bool myNestedStylesNeedMaterials = false;
     Standard_Integer myLeafOrdinal = 0;
+    std::unordered_map<std::string, std::string> myPartNames;
 };
 
 //! Rewrite only writer-owned coefficients under the captured convention.
@@ -2206,6 +2231,29 @@ void WriteSTEP(
                 Core3DNativeExportErrorWriterFailed,
                 "The committed geometry could not be translated to STEP.");
         }
+        // The header names the project and Shapeyard, not OCCT's defaults
+        // ('Open CASCADE Shape Model', 'Author', 'Open CASCADE'); round 8
+        // iPhone hand test. Geometry, part names and colours are unchanged.
+        // The setters edit the model's own header entities in place; each
+        // is guarded so a header without that entry keeps OCCT's.
+        {
+            APIHeaderSection_MakeHeader header(translatedModel);
+            if (header.HasFn()) {
+                header.SetName(new TCollection_HAsciiString(
+                    state->stepTitle.empty() ? "Shapeyard model" : state->stepTitle.c_str()));
+                if (header.NbAuthor() >= 1) {
+                    header.SetAuthorValue(1, new TCollection_HAsciiString(""));
+                }
+                if (header.NbOrganization() >= 1) {
+                    header.SetOrganizationValue(1, new TCollection_HAsciiString("Shapeyard"));
+                }
+                header.SetOriginatingSystem(new TCollection_HAsciiString("Shapeyard 3D"));
+                header.SetAuthorisation(new TCollection_HAsciiString(""));
+            }
+            if (header.HasFd() && header.NbDescription() >= 1) {
+                header.SetDescriptionValue(1, new TCollection_HAsciiString("Shapeyard model"));
+            }
+        }
         if (writer.Write(partialPath.c_str()) != IFSelect_RetDone) {
             throw NativeExportFailure(
                 Core3DNativeExportErrorWriterFailed,
@@ -2871,6 +2919,31 @@ NativeExportResult RunNativeExport(
         }
 
         if (state->exportType == ExportTypeStep) {
+            // A root part with no name of its own (a Case) gets the name
+            // Objects shows for it ("Case 1"), so the STEP PRODUCT carries
+            // it. Only this private snapshot's open export transaction is
+            // touched; parts with their own name keep it (lamp F10).
+            if (!state->partNames.empty()) {
+                for (TDF_LabelSequence::Iterator root(rootLabels); root.More(); root.Next()) {
+                    const TDF_Label& label = root.Value();
+                    const auto named = state->partNames.find(
+                        document->EntityIdentifierForLabel(label));
+                    if (named == state->partNames.end()) {
+                        continue;
+                    }
+                    Handle(TDataStd_Name) own;
+                    if (label.FindAttribute(TDataStd_Name::GetID(), own)) {
+                        TCollection_AsciiString text(own->Get());
+                        text.LeftAdjust();
+                        text.RightAdjust();
+                        if (!text.IsEmpty()) {
+                            continue;
+                        }
+                    }
+                    TDataStd_Name::Set(label, TCollection_ExtendedString(
+                        named->second.c_str(), Standard_True));
+                }
+            }
             WriteSTEP(
                 state,
                 document,
@@ -2972,6 +3045,15 @@ NativeExportResult RunNativeExport(
                     rootLabels,
                     "The OBJ color table is unavailable.");
                 ValidatedOBJWriter writer(state);
+                if (!state->partNames.empty()) {
+                    for (TDF_LabelSequence::Iterator root(rootLabels); root.More(); root.Next()) {
+                        const auto named = state->partNames.find(
+                            document->EntityIdentifierForLabel(root.Value()));
+                        if (named != state->partNames.end()) {
+                            writer.NameUnnamedPart(root.Value(), named->second);
+                        }
+                    }
+                }
                 writer.PrepareNestedLocationStyles(ocafDocument, rootLabels);
                 const bool writerSucceeded = writer.Perform(
                     ocafDocument,
@@ -3827,6 +3909,63 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
             completionCopy(nil, error);
         });
     });
+}
+
+- (BOOL)setExportPartNames:(NSDictionary<NSString *, NSString *> *)partNames {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr
+        || (state->exportType != ExportTypeObj && state->exportType != ExportTypeStep)
+        || partNames.count > 50'000) {
+        return NO;
+    }
+    std::unordered_map<std::string, std::string> names;
+    for (NSString *entity in partNames) {
+        NSString *name = [partNames[entity]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        const char *entityText = entity.UTF8String;
+        const char *nameText = name.UTF8String;
+        // One OBJ "g" line or one STEP string holds the name: no line
+        // breaks, no NUL.
+        if (entityText == nullptr || nameText == nullptr || name.length == 0
+            || name.length > 256
+            || [name rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound
+            || strlen(nameText) != [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) {
+            return NO;
+        }
+        names[entityText] = nameText;
+    }
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (state->started || state->finished
+        || state->cancelled.load(std::memory_order_acquire)) {
+        return NO;
+    }
+    state->partNames = std::move(names);
+    return YES;
+}
+
+- (BOOL)setExportTitle:(NSString *)title {
+    const std::shared_ptr<NativeExportState> state = _state;
+    NSString *trimmed = [title
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (state == nullptr || state->exportType != ExportTypeStep
+        || trimmed.length == 0 || trimmed.length > 256
+        || [trimmed rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound) {
+        return NO;
+    }
+    std::string ascii;
+    ascii.reserve(trimmed.length);
+    for (NSUInteger index = 0; index < trimmed.length; ++index) {
+        const unichar character = [trimmed characterAtIndex:index];
+        ascii.push_back(character >= 0x20 && character <= 0x7E
+            ? static_cast<char>(character) : '_');
+    }
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (state->started || state->finished
+        || state->cancelled.load(std::memory_order_acquire)) {
+        return NO;
+    }
+    state->stepTitle = std::move(ascii);
+    return YES;
 }
 
 - (void)cancel {
