@@ -560,7 +560,9 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
         }
 
         const BOOL hasDimensions =
-            state == Core3DTransformInspectorStateReady;
+            state == Core3DTransformInspectorStateReady
+            || (state == Core3DTransformInspectorStateMeasuring
+                && measurement.hasKnownDimensionsWhileMeasuring);
         if (hasDimensions && !Core3DHasValidDimensions(measurement)) {
             return Core3DMakeStateSnapshot(
                 Core3DTransformInspectorStateInvalid, selectedCount,
