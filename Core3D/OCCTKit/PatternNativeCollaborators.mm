@@ -3,6 +3,7 @@
 #include "PatternOwnerBridge.hxx"
 #include "NativeOpeningDependentReplay.hxx"
 
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Trsf.hxx>
 
@@ -76,8 +77,10 @@ bool DetachedShape(const Snapshot& opening, const pattern::Definition& value,
             shape = copy.Shape();
             return true;
         }
-        BRepBuilderAPI_Transform copy(opening.source.shape, placement,
-                                     Standard_True);
+        // NF4 (21 Nov 2026): every other member is an unshifted copy; its
+        // placement goes into its own transform (clone.memberPlacement below).
+        BRepBuilderAPI_Copy copy(opening.source.shape, Standard_True,
+                                 Standard_False);
         if (!copy.IsDone() || copy.Shape().IsNull()
             || copy.Shape().IsPartner(opening.source.shape)) return false;
         shape = FileStableMemberShape(copy.Shape());
@@ -412,6 +415,7 @@ PreparedEdit PrepareNative(OcctDocument& owner, const Snapshot& opening,
             clone.source = opening.allLabels->source;
             clone.detachedShape = shape;
             clone.representation = opening.allLabels->source.visibility.object.object.resolvedRepresentation;
+            clone.memberPlacement = transform;
             if (before) {
                 recipe.definitionIdentifier =
                     before->receipt.visibility.object.object.definitionIdentifier;
@@ -434,7 +438,8 @@ PreparedEdit PrepareNative(OcctDocument& owner, const Snapshot& opening,
                 mutation->labels.creates.push_back({issued[reservation], clone});
                 ++reservation;
             }
-            const std::optional<gp_Trsf> baked = transform;
+            // NF4: the shape is unshifted, so the recipe keeps the source's frame.
+            const std::optional<gp_Trsf> baked = std::nullopt;
             if (!pattern_recipe_clone::Prepare(opening.sourceRecipe, shape,
                     recipe.featureIdentifier, baked, recipe.prepared)) return refused;
             mutation->recipes.push_back(std::move(recipe));
