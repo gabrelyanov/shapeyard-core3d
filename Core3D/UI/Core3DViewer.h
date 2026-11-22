@@ -965,7 +965,10 @@ namespace core3d {
         TransformInspectorMeasurementPerformanceState
             transformInspectorMeasurementPerformanceState() const noexcept;
         //! Adds every part of an app-created import document at `path` as one creation (fault 3).
-        OrdinaryEditResult insertPartsFromImportedDocument(const std::string& path, int& inserted) noexcept;
+        //! Job 4 (22 Nov): with `solidify`, every closed triangle part (STL, OBJ) becomes one solid in the same
+        //! creation; a part whose surface is not closed sets *openSurface and adds nothing.
+        OrdinaryEditResult insertPartsFromImportedDocument(const std::string& path, int& inserted,
+            bool solidify = false, bool* openSurface = nullptr) noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
         //! Change projection while retaining target, direction and apparent
