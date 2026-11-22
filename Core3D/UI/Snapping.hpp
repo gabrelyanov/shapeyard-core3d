@@ -65,6 +65,14 @@ std::optional<GeometrySnapResult> SnapPointToGeometry(
     const GeometrySnapTarget& target, const gp_Pnt& point, double tolerance,
     unsigned kinds = AllGeometrySnapKinds,
     const std::optional<gp_Dir>& axis = std::nullopt) noexcept;
+// The edges and faces one query may measure (one-based map indices, sorted
+// ascending); corners are always considered. A Move drag step uses it to
+// spend its measurement budget on the nearest pieces first. Null = all.
+struct GeometrySnapPieces { std::vector<int> edges, faces; };
+std::optional<GeometrySnapResult> SnapPointToGeometry(
+    const GeometrySnapTarget& target, const gp_Pnt& point, double tolerance,
+    unsigned kinds, const std::optional<gp_Dir>& axis,
+    const GeometrySnapPieces* only) noexcept;
 }
 
 class SnappingHolder;

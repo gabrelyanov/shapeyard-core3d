@@ -468,6 +468,15 @@ __attribute__((objc_subclassing_restricted))
                 normalizedViewportRect:(CGRect)normalizedViewportRect
                            fillingRect:(BOOL)fillingRect
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:fillingRect:));
+//! As frameModel(selectedObjectsOnly:normalizedViewportRect:), first turning the
+//! camera to look at the model from `viewFromCenter` (eye minus target) with
+//! `up`. Camera only; NO (previous camera kept) for a zero, non-finite or
+//! parallel pair.
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)normalizedViewportRect
+                        viewFromCenter:(simd_double3)viewFromCenter
+                                    up:(simd_double3)up
+    NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:viewFromCenter:up:));
 //! Focus one visible model occurrence without selecting it. The expected
 //! publication stream, document generation and model revision must still match.
 //! Camera/selection-only changes do not invalidate this read-only request.
@@ -1219,6 +1228,10 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(createEnclosure(definition:expected:completion:));
 - (nullable Core3DStoredEnclosureSnapshot *)storedEnclosureWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedEnclosure(entityIdentifier:expected:));
+//! Lamp S6-F3: YES when the part carries a Case record, current or not (a Split leaves it out of date). Read-only,
+//! main thread, any selection mode. The Objects list names such an unnamed part "Case N".
+- (BOOL)partHoldsCaseRecordWithEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(partHoldsCaseRecord(entityIdentifier:));
 - (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
     definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
@@ -2548,6 +2561,13 @@ __attribute__((objc_subclassing_restricted))
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
     axis:(NSArray<NSNumber *> *)axis
     NS_SWIFT_NAME(debugGeometryAxisSnap(fixture:point:tolerance:kinds:axis:));
+//! Detached timing of the snap's cheap per-part work (CTO 18:40 point 1): 32-sided
+//! prisms are made until their topology nodes reach `nodes`; each is then located,
+//! boxed, counted and prepared as one Move drag step does for a part in reach.
+//! Returns parts, nodes, seconds (all the per-part work) and prepareSeconds
+//! (PrepareGeometrySnapTarget alone), each the fastest of three passes.
++ (NSDictionary<NSString *, id> *)debugGeometrySnapPrepareTimingForNodes:(NSInteger)nodes
+    NS_SWIFT_NAME(debugGeometrySnapPrepareTiming(nodes:));
 + (NSDictionary<NSString *, id> *)debugFaceSketchFixture:(NSInteger)fixture
     cut:(BOOL)cut depth:(double)depth fault:(NSInteger)fault
     NS_SWIFT_NAME(debugFaceSketch(fixture:cut:depth:fault:));

@@ -442,6 +442,11 @@ struct TransformInspectorBoundsValue {
     bool hasFloor = false;
     TransformInspectorQuaternion floorRotation;
     TransformInspectorVector3 floorLocalDimensions;
+    // The floor box for exactly `floorUnavailableRotation` could not be read
+    // (on a device the mesh sweep's watchdog cut it). The known own box is
+    // kept and shown, and that turn is not swept again on every refresh.
+    bool floorUnavailable = false;
+    TransformInspectorQuaternion floorUnavailableRotation;
 };
 
 enum class TransformInspectorNegativeBoundsReason : std::uint8_t {
@@ -540,6 +545,20 @@ bool FloorBoxMatches(
         && theBounds.floorRotation.y == theTurn.y
         && theBounds.floorRotation.z == theTurn.z
         && theBounds.floorRotation.w == theTurn.w;
+}
+
+// True when nothing more can be read for this turn: its floor box is cached,
+// or reading it was already cut short with the own box known.
+bool FloorBoxSettled(
+    const TransformInspectorBoundsValue& theBounds,
+    const TransformInspectorQuaternion& theTurn) noexcept
+{
+    return FloorBoxMatches(theBounds, theTurn)
+        || (theBounds.floorUnavailable
+            && theBounds.floorUnavailableRotation.x == theTurn.x
+            && theBounds.floorUnavailableRotation.y == theTurn.y
+            && theBounds.floorUnavailableRotation.z == theTurn.z
+            && theBounds.floorUnavailableRotation.w == theTurn.w);
 }
 
 bool TryFloorRotation(
@@ -1232,6 +1251,9 @@ struct TransformInspectorBoundsWorkerResult {
     BoundsWorkerOutcome outcome = BoundsWorkerOutcome::Failed;
     TransformInspectorBoundsValue bounds;
     Standard_Boolean computeWasMainThread = Standard_False;
+    // The request's turn, so a failed floor box read can mark it (M4).
+    bool wantsFloor = false;
+    TransformInspectorQuaternion floorTurn;
 };
 
 struct TransformInspectorBoundsWorkerEnqueueResult {
@@ -1404,6 +1426,8 @@ private:
         TransformInspectorBoundsWorkerResult aResult;
         aResult.generation = theRequest.generation;
         aResult.computeWasMainThread = pthread_main_np() != 0;
+        aResult.wantsFloor = theRequest.wantsFloor;
+        aResult.floorTurn = theRequest.floorTurn;
         if (theRequest.cancellation == nullptr
             || theRequest.cancellation->load(std::memory_order_relaxed)) {
             aResult.outcome = BoundsWorkerOutcome::Cancelled;
@@ -2198,19 +2222,38 @@ TransformInspectorMeasurementController::capture(
         constexpr bool forceBoundsFailure = false;
 #endif
         const bool aWantsFloor = NeedsFloorBox(aMeasurement.quaternion);
-        if (!forceBoundsFailure
-            && myImpl->lookup(aKey, aBounds)
-            && (!aWantsFloor
-                || FloorBoxMatches(aBounds, aMeasurement.quaternion))) {
-            if (!TryApplyBounds(aBounds, aMeasurement)) {
+        // A part's own box that is already known is never thrown away when
+        // only the floor box for a new turn is missing (Fable review 6, M1).
+        std::optional<TransformInspectorBoundsValue> aKnownOwnBounds;
+        if (!forceBoundsFailure && myImpl->lookup(aKey, aBounds)) {
+            if (!aWantsFloor
+                || FloorBoxSettled(aBounds, aMeasurement.quaternion)) {
+                if (!TryApplyBounds(aBounds, aMeasurement)) {
+                    aMeasurement.state =
+                        TransformInspectorMeasurementState::Invalid;
+                    return aMeasurement;
+                }
                 aMeasurement.state =
-                    TransformInspectorMeasurementState::Invalid;
+                    TransformInspectorMeasurementState::Ready;
                 return aMeasurement;
             }
-            aMeasurement.state =
-                TransformInspectorMeasurementState::Ready;
-            return aMeasurement;
+            aKnownOwnBounds = aBounds;
         }
+        // Shows the known own box (no floor box) instead of nothing. When
+        // `theMarkTurn`, this turn's floor box is not read again until the
+        // part's shape changes.
+        const auto keepKnownOwnBounds = [&](const bool theMarkTurn) {
+            TransformInspectorBoundsValue aKept = *aKnownOwnBounds;
+            if (theMarkTurn) {
+                aKept.floorUnavailable = true;
+                aKept.floorUnavailableRotation = aMeasurement.quaternion;
+                myImpl->insert(aKey, aKept);
+            }
+            aMeasurement.state = TryApplyBounds(aKept, aMeasurement)
+                ? TransformInspectorMeasurementState::Ready
+                : TransformInspectorMeasurementState::Invalid;
+            return aMeasurement;
+        };
         TransformInspectorNegativeBoundsReason aNegativeReason =
             TransformInspectorNegativeBoundsReason::ExactBoundsFailed;
         if (!forceBoundsFailure
@@ -2253,6 +2296,9 @@ TransformInspectorMeasurementController::capture(
                     aMaximumMeshSweepNodes,
                     anAdmittedMeshNodeCount);
             if (aMeshAdmission != TopologyAdmission::WithinLimit) {
+                if (aKnownOwnBounds.has_value()) {
+                    return keepKnownOwnBounds(false);
+                }
                 aMeasurement.state =
                     aMeshAdmission == TopologyAdmission::AboveLimit
                     ? TransformInspectorMeasurementState::BoundsUnavailable
@@ -2280,6 +2326,12 @@ TransformInspectorMeasurementController::capture(
                 if (aSweepOutcome
                     == TriangleMeshSweepOutcome::WatchdogAborted) {
                     ++myImpl->watchdogFireCount;
+                }
+                if (aKnownOwnBounds.has_value()) {
+                    return keepKnownOwnBounds(true);
+                }
+                if (aSweepOutcome
+                    == TriangleMeshSweepOutcome::WatchdogAborted) {
                     myImpl->insertNegative(
                         aKey,
                         TransformInspectorNegativeBoundsReason::SweepAborted);
@@ -2295,6 +2347,13 @@ TransformInspectorMeasurementController::capture(
                 }
                 return aMeasurement;
             }
+            // A good read ends any earlier cut's mark (Fable review 8, M3):
+            // the value came from the cache and may still carry the mark of
+            // another turn, which would then hide that turn's floor size.
+            aBounds.floorUnavailable = aWantsFloor && !aBounds.hasFloor;
+            aBounds.floorUnavailableRotation = aBounds.floorUnavailable
+                ? aMeasurement.quaternion
+                : TransformInspectorQuaternion{};
             myImpl->insert(aKey, aBounds);
             if (!TryApplyBounds(aBounds, aMeasurement)) {
                 aMeasurement.state =
@@ -2320,6 +2379,9 @@ TransformInspectorMeasurementController::capture(
                 aMaximumTopologyNodes,
                 aTopologyNodeCount);
         if (aTopologyAdmission != TopologyAdmission::WithinLimit) {
+            if (aKnownOwnBounds.has_value()) {
+                return keepKnownOwnBounds(false);
+            }
             aMeasurement.state =
                 aTopologyAdmission == TopologyAdmission::AboveLimit
                 ? TransformInspectorMeasurementState::BoundsUnavailable
@@ -2344,6 +2406,9 @@ TransformInspectorMeasurementController::capture(
         myImpl->lastBRepCopyMilliseconds =
             MillisecondsSince(aCopyStart);
         if (aCopiedShape.IsNull()) {
+            if (aKnownOwnBounds.has_value()) {
+                return keepKnownOwnBounds(true);
+            }
             myImpl->insertNegative(
                 aKey,
                 TransformInspectorNegativeBoundsReason::CopyFailed);
@@ -2397,6 +2462,14 @@ TransformInspectorMeasurementController::capture(
         aMeasurement.state =
             TransformInspectorMeasurementState::Measuring;
         myImpl->pendingMeasurement.state = aMeasurement.state;
+        // Only the floor box for a new turn is read: the own box is known,
+        // so By numbers keeps showing it instead of "Measuring" (M2).
+        if (aKnownOwnBounds.has_value()
+            && TryApplyBounds(*aKnownOwnBounds, aMeasurement)) {
+            aMeasurement.hasFloorDimensions = false;
+            aMeasurement.floorDimensions = {};
+            aMeasurement.hasKnownDimensionsWhileMeasuring = true;
+        }
         return aMeasurement;
     } catch (...) {
         myCompletion = {};
@@ -2980,16 +3053,37 @@ void TransformInspectorMeasurementController::acceptWorkerResult(
     // remain useful after selection/request staleness, but an old document
     // must never be retained again after that boundary has moved.
     myImpl->clearCacheForDocument(aCurrentDocument);
+    TransformInspectorBoundsValue aKnownOwnBounds;
+    bool hasKnownOwnBounds = false;
     if (theResult.outcome == BoundsWorkerOutcome::Success
         && !aCurrentDocument.IsNull()
         && aCurrentDocument == aResultKey->document) {
+        // A turn whose floor box could not be read is marked, so it is not
+        // copied and read again on every refresh (Fable review 8, M4).
+        theResult.bounds.floorUnavailable =
+            theResult.wantsFloor && !theResult.bounds.hasFloor;
+        if (theResult.bounds.floorUnavailable) {
+            theResult.bounds.floorUnavailableRotation = theResult.floorTurn;
+        }
         myImpl->insert(*aResultKey, theResult.bounds);
     } else if (theResult.outcome == BoundsWorkerOutcome::Failed
                && !aCurrentDocument.IsNull()
                && aCurrentDocument == aResultKey->document) {
-        myImpl->insertNegative(
-            *aResultKey,
-            TransformInspectorNegativeBoundsReason::ExactBoundsFailed);
+        // A failed floor box read never erases a known own box (M1), and
+        // marks the turn so it is not read again on every refresh (M4).
+        if (myImpl->lookup(*aResultKey, aKnownOwnBounds)) {
+            hasKnownOwnBounds = true;
+            if (theResult.wantsFloor) {
+                aKnownOwnBounds.floorUnavailable = true;
+                aKnownOwnBounds.floorUnavailableRotation =
+                    theResult.floorTurn;
+                myImpl->insert(*aResultKey, aKnownOwnBounds);
+            }
+        } else {
+            myImpl->insertNegative(
+                *aResultKey,
+                TransformInspectorNegativeBoundsReason::ExactBoundsFailed);
+        }
     }
 
     bool isCurrent = theResult.generation == myGeneration
@@ -3146,6 +3240,9 @@ void TransformInspectorMeasurementController::acceptWorkerResult(
             aMeasurement.state =
                 TransformInspectorMeasurementState::MeasurementFailed;
         }
+    } else if (hasKnownOwnBounds
+               && TryApplyBounds(aKnownOwnBounds, aMeasurement)) {
+        aMeasurement.state = TransformInspectorMeasurementState::Ready;
     } else {
         aMeasurement.state =
             TransformInspectorMeasurementState::MeasurementFailed;
@@ -3304,7 +3401,9 @@ debugSetMeshSweepWatchdog(
         myImpl->debugMeshSweepWatchdogDeadlineMilliseconds =
             aResolvedDeadline;
         myImpl->debugMeshSweepWatchdogPollNodes = aResolvedPollNodes;
-        myImpl->cache.clear();
+        // A finished sweep is exact whatever the deadline, so sizes already
+        // read stay known (as on a device, whose deadline never changes);
+        // only remembered cuts are forgotten.
         myImpl->negativeCache.clear();
     }
 }

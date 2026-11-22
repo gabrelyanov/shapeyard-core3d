@@ -5810,6 +5810,11 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 	std::vector<PendingStyle> pendingStyles;
     NSMutableArray* materials = [NSMutableArray array];
     NSMutableArray* colors = [NSMutableArray array];
+    // Object mode: a swatch is the part's own colour, and a colour painted on one face stays
+    // (round 3 S6-F4; Material > PBR already kept it). Face mode keeps its whole-part paint
+    // (62574950f, waiting on the founder's decision about painting one face).
+    const BOOL replacesFaceColours = wholeParts
+        && _currentSelectionType != PrimitiveSelectionTypeShape;
 
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         auto selected = context->SelectedInteractive();
@@ -5867,7 +5872,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 		}
 		for (const PendingStyle& style : pendingStyles) {
 
-            if (wholeParts && !doc->ClearPartSubshapeAppearance(style.label)) {
+            if (replacesFaceColours && !doc->ClearPartSubshapeAppearance(style.label)) {
                 Core3DAbortCommandNoThrow(transaction);
                 return;
             }
@@ -5889,7 +5894,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 	doc->NotifyChanges();
 
 	for (const PendingStyle& style : pendingStyles) {
-        if (wholeParts) {
+        if (replacesFaceColours) {
             const auto colored = Handle(AIS_ColoredShape)::DownCast(style.shape);
             if (!colored.IsNull()) {
                 for (AIS_DataMapOfShapeDrawer::Iterator entry(colored->CustomAspectsMap()); entry.More(); entry.Next()) {
@@ -14797,6 +14802,57 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     } catch (...) { return @{@"error": @"fixture-exception"}; }
 }
 
++ (NSDictionary<NSString *, id> *)debugGeometrySnapPrepareTimingForNodes:(NSInteger)nodes {
+    if (nodes < 1 || nodes > 65536) return @{@"error": @"fixture-input"};
+    try {
+        std::vector<TopoDS_Shape> parts;
+        std::size_t made = 0;
+        for (int part = 0; made < static_cast<std::size_t>(nodes); ++part) {
+            const double cx = 25.0 * (part % 16), cy = 25.0 * (part / 16);
+            BRepBuilderAPI_MakePolygon outline;
+            for (int side = 0; side < 32; ++side) {
+                const double angle = side * 2 * M_PI / 32;
+                outline.Add(gp_Pnt(cx + 10 * std::cos(angle),cy + 10 * std::sin(angle),0));
+            }
+            outline.Close();
+            BRepBuilderAPI_MakeFace face(outline.Wire());
+            if (!outline.IsDone() || !face.IsDone()) return @{@"error": @"fixture-shape"};
+            const auto prism = BRepPrimAPI_MakePrism(face.Face(),gp_Vec(0,0,5)).Shape();
+            TopTools_IndexedMapOfShape topology;
+            TopExp::MapShapes(prism,topology);
+            made += static_cast<std::size_t>(topology.Extent());
+            parts.push_back(prism);
+        }
+        gp_Trsf transform;
+        transform.SetTranslationPart(gp_Vec(1,2,3));
+        double fastest = std::numeric_limits<double>::infinity();
+        double fastestPrepare = std::numeric_limits<double>::infinity();
+        std::size_t counted = 0, prepared = 0;
+        for (int pass = 0; pass < 3; ++pass) {
+            double prepareSeconds = 0;
+            counted = 0; prepared = 0;
+            const auto start = std::chrono::steady_clock::now();
+            for (const auto& shape : parts) {
+                BRepBuilderAPI_Transform located(shape,transform,Standard_False);
+                if (!located.IsDone() || located.Shape().IsNull()) return @{@"error": @"fixture-locate"};
+                Bnd_Box nearby;
+                BRepBndLib::Add(located.Shape(),nearby);
+                TopTools_IndexedMapOfShape topology;
+                TopExp::MapShapes(shape,topology);
+                counted += static_cast<std::size_t>(topology.Extent());
+                const auto before = std::chrono::steady_clock::now();
+                const auto snap = core3d::PrepareGeometrySnapTarget(located.Shape());
+                prepareSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - before).count();
+                if (snap && !nearby.IsVoid()) ++prepared;
+            }
+            fastest = std::min(fastest,std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+            fastestPrepare = std::min(fastestPrepare,prepareSeconds);
+        }
+        return @{@"parts": @(parts.size()), @"prepared": @(prepared), @"nodes": @(counted),
+                 @"seconds": @(fastest), @"prepareSeconds": @(fastestPrepare)};
+    } catch (...) { return @{@"error": @"fixture-exception"}; }
+}
+
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData {
     return Core3DCreateDebugBinXCAFFixture(
         @"located-free-shape-fixture",
@@ -16519,6 +16575,35 @@ extern "C" int Core3DDebugMeshCopyRejectStage;
                                     fillingRect:fillingRect];
 }
 
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)rect
+                        viewFromCenter:(simd_double3)viewFromCenter
+                                    up:(simd_double3)up {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return NO;
+    }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1.0 || size.height < 1.0
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        return NO;
+    }
+    const double from[3] = {viewFromCenter.x, viewFromCenter.y, viewFromCenter.z};
+    const double upward[3] = {up.x, up.y, up.z};
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
+            nullptr, false, from, upward)) {
+        return NO;
+    }
+    [GLController requestRender];
+    [self viewDidInvalidateSceneSnapshot];
+    return YES;
+}
+
 - (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)rect {
@@ -17891,6 +17976,26 @@ extern "C" int Core3DDebugMeshCopyRejectStage;
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         return result ? [[Core3DStoredEnclosureSnapshot alloc] initWithNativeSnapshot:*result] : nil;
     } catch (...) { return nil; }
+}
+
+- (BOOL)partHoldsCaseRecordWithEntityIdentifier:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:[NSString class]]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128 || !entityIdentifier.UTF8String
+        || GLController == nil || GLController.viewer == nullptr) return NO;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return NO;
+        const auto document = owner->Document();
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(labels);
+        for (int i = 1; i <= labels.Length(); ++i) {
+            const auto label = labels.Value(i);
+            if (owner->EntityIdentifierForLabel(label) != entityIdentifier.UTF8String) continue;
+            core3d::enclosure::Record record;
+            return core3d::enclosure::Read(document, label, record) && !record.label.IsNull();
+        }
+    } catch (...) {}
+    return NO;
 }
 
 - (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
