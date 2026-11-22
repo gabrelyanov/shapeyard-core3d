@@ -3108,8 +3108,6 @@ bool ValidateAttachmentRigDocument(
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_DataMapOfShapeInteger.hxx>
-#include <TopTools_MapIteratorOfMapOfShape.hxx>
-#include <GeomAdaptor_Surface.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
@@ -13718,43 +13716,9 @@ bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& resu
                 else if (look != first) { seams.Add(facesOfEdge.FindKey(i)); break; }
             }
         }
-        // CTO 22 Nov 06:48: a flat side where two looks meet (a red tower joined flush on a grey cube) stays split
-        // exactly as before the tidy, so a flat Bevel sees the same pieces it always saw there; every edge and vertex
-        // of every face in such a plane is kept. Sides of one look are still tidied.
-        std::vector<gp_Pln> twoLookPlanes;
-        const auto planeOf = [](const TopoDS_Shape& face, gp_Pln& plane) {
-            const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(face));
-            if (surface.IsNull()) return false;
-            const GeomAdaptor_Surface adaptor(surface);
-            if (adaptor.GetType() != GeomAbs_Plane) return false;
-            plane = adaptor.Plane(); return true;
-        };
-        const auto samePlane = [](const gp_Pln& a, const gp_Pln& b) {
-            return a.Axis().Direction().IsParallel(b.Axis().Direction(), 1.0e-6)
-                && a.Distance(b.Location()) <= 1.0e-6;
-        };
-        for (TopTools_MapIteratorOfMapOfShape seam(seams); seam.More(); seam.Next()) {
-            const TopTools_ListOfShape& faces = facesOfEdge.FindFromKey(seam.Key());
-            if (faces.Extent() != 2) continue;
-            gp_Pln first, second;
-            if (planeOf(faces.First(), first) && planeOf(faces.Last(), second) && samePlane(first, second))
-                twoLookPlanes.push_back(first);
-        }
-        TopTools_MapOfShape keep = seams;
-        if (!twoLookPlanes.empty()) {
-            for (TopExp_Explorer face(result, TopAbs_FACE); face.More(); face.Next()) {
-                gp_Pln plane;
-                if (!planeOf(face.Current(), plane)) continue;
-                bool inTwoLookPlane = false;
-                for (const gp_Pln& other : twoLookPlanes) if (samePlane(plane, other)) { inTwoLookPlane = true; break; }
-                if (!inTwoLookPlane) continue;
-                for (TopExp_Explorer edge(face.Current(), TopAbs_EDGE); edge.More(); edge.Next()) keep.Add(edge.Current());
-                for (TopExp_Explorer vertex(face.Current(), TopAbs_VERTEX); vertex.More(); vertex.Next()) keep.Add(vertex.Current());
-            }
-        }
         ShapeUpgrade_UnifySameDomain unify(result, Standard_True, Standard_True, Standard_False);
         unify.AllowInternalEdges(Standard_False);
-        if (!keep.IsEmpty()) unify.KeepShapes(keep);
+        if (!seams.IsEmpty()) unify.KeepShapes(seams);
         unify.Build();
         const TopoDS_Shape merged = unify.Shape();
         if (merged.IsNull()) return false;
