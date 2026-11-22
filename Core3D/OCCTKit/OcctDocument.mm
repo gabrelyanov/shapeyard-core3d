@@ -8875,7 +8875,10 @@ OcctDocument::OcctDocument()
     myAuthorityApplication = new core3d::authority::NativeObservedApplication();
 #endif
     myApp = myAuthorityApplication;
+#if DEBUG
+    // READBACK B runs only in the engine's DEBUG configuration (Fable review 13 item 4): never in a user's build.
     core3d::part_boolean::owner::InstallCommitReadback();
+#endif
     std::array<std::uint8_t, 16> nonce{};
     [[NSUUID UUID] getUUIDBytes:nonce.data()];
     myNativeAuthority = std::make_shared<core3d::authority::NativeEditAuthority>(nonce);
