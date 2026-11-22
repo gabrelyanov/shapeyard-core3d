@@ -14,6 +14,8 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
+#include <cstdlib>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <gp_Pnt2d.hxx>
 #include <Geom2d_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -1058,25 +1060,25 @@ Standard_Boolean IsBevelEdgeEligible(
 }
 
 Standard_Boolean IsSmoothBevelEdge(
-    const TopoDS_Shape& theShape,
+    const TopTools_IndexedDataMapOfShapeListOfShape& theFacesOfEdge,
     const TopoDS_Edge& theEdge) noexcept
 {
-    if (theShape.IsNull() || theEdge.IsNull()) {
+    if (theEdge.IsNull()) {
         return Standard_False;
     }
     try {
         OCC_CATCH_SIGNALS
+        const Standard_Integer anIndex = theFacesOfEdge.FindIndex(theEdge);
+        if (anIndex <= 0) {
+            return Standard_False;
+        }
         std::vector<TopoDS_Face> aFaces;
-        for (TopExp_Explorer aFace(theShape, TopAbs_FACE); aFace.More(); aFace.Next()) {
-            for (TopExp_Explorer anEdge(aFace.Current(), TopAbs_EDGE); anEdge.More(); anEdge.Next()) {
-                if (anEdge.Current().IsSame(theEdge)) {
-                    const TopoDS_Face aCandidate = TopoDS::Face(aFace.Current());
-                    bool known = false;
-                    for (const TopoDS_Face& aSeen : aFaces) known = known || aSeen.IsSame(aCandidate);
-                    if (!known) aFaces.push_back(aCandidate);
-                    break;
-                }
-            }
+        for (TopTools_ListIteratorOfListOfShape aFace(theFacesOfEdge.FindFromIndex(anIndex));
+             aFace.More(); aFace.Next()) {
+            const TopoDS_Face aCandidate = TopoDS::Face(aFace.Value());
+            bool known = false;
+            for (const TopoDS_Face& aSeen : aFaces) known = known || aSeen.IsSame(aCandidate);
+            if (!known) aFaces.push_back(aCandidate);
             if (aFaces.size() > 2) return Standard_False;
         }
         if (aFaces.size() == 1) {
@@ -1126,6 +1128,36 @@ Standard_Boolean IsSmoothBevelEdge(
     } catch (...) {
         return Standard_False;
     }
+}
+
+Standard_Boolean IsSmoothBevelEdge(
+    const TopoDS_Shape& theShape,
+    const TopoDS_Edge& theEdge) noexcept
+{
+    if (theShape.IsNull() || theEdge.IsNull()) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        TopTools_IndexedDataMapOfShapeListOfShape aFacesOfEdge;
+        TopExp::MapShapesAndAncestors(theShape, TopAbs_EDGE, TopAbs_FACE, aFacesOfEdge);
+        return IsSmoothBevelEdge(aFacesOfEdge, theEdge);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Size BevelOperationController::MaxSelectedEdges() noexcept
+{
+#ifdef DEBUG
+    if (const char* aValue = std::getenv("SHAPEYARD_BEVEL_MAX_EDGES")) {
+        const long aLimit = std::strtol(aValue, nullptr, 10);
+        if (aLimit >= 1 && aLimit <= 1024) {
+            return static_cast<Standard_Size>(aLimit);
+        }
+    }
+#endif
+    return kMaxSelectedEdges;
 }
 
 Standard_Boolean TryResolveCanonicalBevelEdgeTopologyIndexBounded(
@@ -1381,8 +1413,11 @@ private:
                 // smoothly can take no Bevel at any value; say so (the HintLine),
                 // never a bare failed preview.
                 if (!aSource.retainedInput) {
+                    TopTools_IndexedDataMapOfShapeListOfShape aFacesOfEdge;
+                    TopExp::MapShapesAndAncestors(
+                        aSource.shape, TopAbs_EDGE, TopAbs_FACE, aFacesOfEdge);
                     for (const TopoDS_Edge& anEdge : aSource.edges) {
-                        if (IsSmoothBevelEdge(aSource.shape, anEdge)) {
+                        if (IsSmoothBevelEdge(aFacesOfEdge, anEdge)) {
                             aResult.failureKind = BevelFailureKind::SmoothEdge;
                             return aResult;
                         }
@@ -1711,7 +1746,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 || aSelection.documentLabel.Data()
                     != aDocument->GetData()
                 || aSelection.edges.empty()
-                || aSelection.edges.size() > kMaxSelectedEdges
+                || aSelection.edges.size() > MaxSelectedEdges()
                 || (!aSelection.edgeTopologyIndices.empty()
                     && aSelection.edgeTopologyIndices.size()
                         != aSelection.edges.size())
@@ -1800,7 +1835,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 aCanonicalEdgeIndices.push_back(
                     static_cast<Standard_Size>(anIndex - 1));
             }
-            if (anEdgeCount > kMaxSelectedEdges
+            if (anEdgeCount > MaxSelectedEdges()
                     - aCanonicalEdges.size()) {
                 return Standard_False;
             }

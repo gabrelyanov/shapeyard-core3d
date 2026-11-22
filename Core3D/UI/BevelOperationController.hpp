@@ -12,6 +12,7 @@
 
 #include <AIS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 
 #include <cstdint>
 #include <functional>
@@ -84,6 +85,12 @@ Standard_Boolean IsBevelEdgeEligible(
 Standard_Boolean IsSmoothBevelEdge(
     const TopoDS_Shape& shape,
     const TopoDS_Edge& edge) noexcept;
+//! The same with the part's edge-to-faces map built once by the caller
+//! (TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, map)), so a
+//! whole part's edges are judged in one pass (CTO 22 Nov 22:05).
+Standard_Boolean IsSmoothBevelEdge(
+    const TopTools_IndexedDataMapOfShapeListOfShape& facesOfEdge,
+    const TopoDS_Edge& edge) noexcept;
 
 //! DEBUG/test selection seams resolve deterministic indices only after a
 //! bounded occurrence walk, keeping the same pre-map work ceiling as admission.
@@ -139,6 +146,10 @@ class BevelOperationController
 public:
     static constexpr std::size_t kMaxSourceBodies = 8;
     static constexpr Standard_Size kMaxSelectedEdges = 64;
+    //! kMaxSelectedEdges; a DEBUG build may raise it with the environment
+    //! variable SHAPEYARD_BEVEL_MAX_EDGES (1...1024) to measure what a larger
+    //! limit costs (CTO 22 Nov 18:47). A user's build always takes 64.
+    static Standard_Size MaxSelectedEdges() noexcept;
     static constexpr Standard_Size kMaxSourceTopologyNodes = 1'024;
     static constexpr Standard_Size kMaxCaptureTopologyNodes = 8'192;
     static constexpr Standard_Size kMaxStyledSubshapeLabels = 1'024;

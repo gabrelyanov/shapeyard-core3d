@@ -5780,7 +5780,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 		|| ![edgeTopologyIndices isKindOfClass:NSArray.class]
 		|| edgeTopologyIndices.count < 1
 		|| edgeTopologyIndices.count
-			> BevelOperationController::kMaxSelectedEdges
+			> BevelOperationController::MaxSelectedEdges()
 		|| (_viewer->selectedCount() != 0 && !refreshesIdleBevel)
 		|| shapeInteractor->getSelectionMode() != ShapeSelectionMode::Edge
 		|| !shapeInteractor->selectionModeAuthorityIsExact()
