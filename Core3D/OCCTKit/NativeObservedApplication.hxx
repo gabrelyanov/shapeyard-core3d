@@ -10,6 +10,11 @@
 #include <utility>
 
 namespace core3d::authority {
+// READBACK B (CTO 21 Nov 09:50): after every committed command the joined or cut parts whose shape changed in
+// it are read back the way save reads them. Report only: a failure is counted (and traced in DEBUG), the
+// command stays as it is. Installed by OcctDocument.mm; nullptr until then.
+inline void (*gCommitReadback)(const Handle(TDocStd_Document)&) noexcept = nullptr;
+
 class NativeObservedApplication : public TDocStd_Application {
 public:
     bool ObserveAuthority(std::weak_ptr<NativeEditAuthority> state) noexcept {
@@ -21,7 +26,10 @@ public:
             && !foreignCallback_.load(std::memory_order_relaxed);
     }
     void OnOpenTransaction(const Handle(TDocStd_Document)& doc) override { Boundary(doc); }
-    void OnCommitTransaction(const Handle(TDocStd_Document)& doc) override { Boundary(doc); }
+    void OnCommitTransaction(const Handle(TDocStd_Document)& doc) override {
+        Boundary(doc);
+        if (gCommitReadback && OnOwner()) gCommitReadback(doc);
+    }
     void OnAbortTransaction(const Handle(TDocStd_Document)& doc) override { Boundary(doc); }
 private:
     bool OnOwner() noexcept {
