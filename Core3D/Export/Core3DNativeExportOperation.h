@@ -139,6 +139,20 @@ NS_SWIFT_SENDABLE
     operationOwnedRawEvidenceRecordForReturnedScene:
         (Core3DSceneSnapshot *)returnedScene
     NS_SWIFT_NAME(operationOwnedRawEvidenceRecord(returnedScene:));
+//! OBJ and STEP, before start: the name Objects shows for a part that has
+//! no name of its own ("Case 1"), keyed by entity identifier. The file
+//! names that part the same way (OBJ "g Case 1" instead of Part_0001, STEP
+//! PRODUCT 'Case 1'); a part with its own name keeps it. NO after start,
+//! for other formats, or for a name with a line break (round 3 lamp F10).
+- (BOOL)setExportPartNames:(NSDictionary<NSString *, NSString *> *)partNames
+    NS_SWIFT_NAME(setExportPartNames(_:));
+//! STEP only, before start: the project's name for the file header
+//! (FILE_NAME), which otherwise says 'Open CASCADE Shape Model' and author
+//! 'Author'. Characters outside printable ASCII become '_' (STEP header
+//! strings are ASCII). NO after start, for other formats, for an empty name
+//! or one with a line break (round 8 iPhone hand test, CTO 21 Nov 17:00).
+- (BOOL)setExportTitle:(NSString *)title
+    NS_SWIFT_NAME(setExportTitle(_:));
 
 #ifdef DEBUG
 //! Arms one operation-local E4 fault before the worker starts.

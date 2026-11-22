@@ -89,7 +89,10 @@ FOUNDATION_EXPORT const double
 //! Selection identity and transform properties are meaningful for Measuring,
 //! Ready, MeasurementUnavailable, and MeasurementFailed single-selection
 //! states. Bounds and dimensions are meaningful only when `hasDimensions` is
-//! true. All other states deliberately carry no model identity or geometry.
+//! true: always for Ready, and for Measuring when only a new turn's floor box
+//! is being read and the part's own box is already known (then
+//! `hasFloorDimensions` is NO). All other states deliberately carry no model
+//! identity or geometry.
 CORE3D_TRANSFORM_INSPECTOR_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DTransformInspectorSnapshot : NSObject
 
