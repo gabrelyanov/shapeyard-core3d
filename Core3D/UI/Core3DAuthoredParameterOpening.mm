@@ -1471,6 +1471,14 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     return viewer && viewer->isBooleanResult(entity.UTF8String ?: "") ? YES : NO;
 }
 
+- (BOOL)isTriangleMeshPartEntity:(NSString *)entity {
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class]) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    return viewer && viewer->isTriangleMeshPart(entity.UTF8String ?: "") ? YES : NO;
+}
+
 - (nullable NSArray<NSNumber *> *)partLocalAnchorForEntity:(NSString *)entity
     pointX:(double)px y:(double)py z:(double)pz
     directionX:(double)dx y:(double)dy z:(double)dz {

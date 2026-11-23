@@ -512,6 +512,8 @@ __attribute__((objc_subclassing_restricted))
     faceIndex:(uint32_t)faceIndex NS_SWIFT_NAME(holeAnchor(entity:faceIndex:));
 //! True when the part is a Join, Cut or Overlap result that keeps its originals.
 - (BOOL)isBooleanResultEntity:(NSString *)entity NS_SWIFT_NAME(isBooleanResult(entity:));
+//! True when the part is stored as a triangle mesh, not as a solid (read only).
+- (BOOL)isTriangleMeshPartEntity:(NSString *)entity NS_SWIFT_NAME(isTriangleMeshPart(entity:));
 //! A world point and direction in the part's own coordinates (document units,
 //! before its placement): [px, py, pz, dx, dy, dz].
 - (nullable NSArray<NSNumber *> *)partLocalAnchorForEntity:(NSString *)entity

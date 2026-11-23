@@ -2733,6 +2733,15 @@ bool Core3DViewer::isBooleanResult(const std::string& entity) noexcept {
     }catch(...){return false;}
 }
 
+bool Core3DViewer::isTriangleMeshPart(const std::string& entity) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        return FindEntityPresentation(myContext,myDoc,entity,presentation,label)
+            &&myDoc->GeometryRepresentationForLabel(label)==OcctGeometryRepresentation::TriangleMesh;
+    }catch(...){return false;}
+}
+
 bool Core3DViewer::partLocalAnchor(const std::string& entity, const gp_Pnt& worldPoint,
     const gp_Dir& worldDirection, gp_Pnt& localPoint, gp_Dir& localDirection) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
