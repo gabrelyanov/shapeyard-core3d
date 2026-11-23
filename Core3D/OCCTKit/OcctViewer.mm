@@ -150,6 +150,10 @@ void PrepareNativeLessonLighting(const Handle(AIS_InteractiveContext)& context,
 #include <SelectMgr_AndOrFilter.hxx>
 #include <SelectMgr_EntityOwner.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
+#include <StdSelect_BRepOwner.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
+#include <Precision.hxx>
 #include <vector>
 
 #include <StlAPI_Writer.hxx>
@@ -760,6 +764,139 @@ bool OcctViewer::ZoomByFactor(double theX, double theY, double theFactor) noexce
     } catch (...) { return restore(); }
 }
 
+namespace {
+
+// A face hit whose surface normal is at a right angle to the pick ray: the
+// face is seen exactly edge-on. Edges and points carry no normal (0 vector).
+bool IsEdgeOnFaceHit(const SelectMgr_SortCriterion& theHit, const gp_Dir& theRay)
+{
+    const Standard_Real aLength = theHit.Normal.Modulus();
+    if (!(aLength > 0.5)) { return false; }
+    const Standard_Real aCos = (theHit.Normal.x() * theRay.X() + theHit.Normal.y() * theRay.Y()
+                              + theHit.Normal.z() * theRay.Z()) / aLength;
+    return std::abs(aCos) < 1.0e-4;
+}
+
+bool IsCameraFacingFaceHit(const SelectMgr_SortCriterion& theHit, const gp_Dir& theRay)
+{
+    return theHit.Normal.Modulus() > 0.5 && !IsEdgeOnFaceHit(theHit, theRay)
+        && !Precision::IsInfinite(theHit.Point.X()) && !Precision::IsInfinite(theHit.Point.Y())
+        && !Precision::IsInfinite(theHit.Point.Z());
+}
+
+Standard_Integer PickedRank(const Handle(StdSelect_ViewerSelector3d)& theSelector,
+                            const Handle(SelectMgr_EntityOwner)& theOwner)
+{
+    const Standard_Integer aCount = std::min<Standard_Integer>(theSelector->NbPicked(), 256);
+    for (Standard_Integer aRank = 1; aRank <= aCount; ++aRank) {
+        if (theSelector->Picked(aRank) == theOwner) { return aRank; }
+    }
+    return 0;
+}
+
+enum class RayMeets { Unknown, No, Yes };
+
+// Where the exact pick ray meets the owner's own shape, nearest first, as a
+// position along the ray (in the part's frame, moved back to the world). No:
+// the ray passes beside it (the part is only near the tap, seen edge-on).
+// Unknown: no shape, or too large to test on a tap; OCCT's choice then stays.
+RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& theOwner,
+                            const gp_Pnt& theOrigin, const gp_Dir& theRay, Standard_Real& theAlong)
+{
+    const Handle(StdSelect_BRepOwner) aBRep = Handle(StdSelect_BRepOwner)::DownCast(theOwner);
+    if (aBRep.IsNull() || !aBRep->HasShape() || !aBRep->HasSelectable()) { return RayMeets::Unknown; }
+    const TopoDS_Shape& aShape = aBRep->Shape();
+    Standard_Integer aFaces = 0;
+    for (TopExp_Explorer anExp(aShape, TopAbs_FACE); anExp.More(); anExp.Next()) {
+        if (++aFaces > 4096) { return RayMeets::Unknown; }
+    }
+    if (aFaces == 0) { return RayMeets::Unknown; }
+    const gp_Trsf aToWorld = aBRep->Selectable()->Transformation();
+    const gp_Trsf aToPart = aToWorld.Inverted();
+    IntCurvesFace_ShapeIntersector anIntersector;
+    anIntersector.Load(aShape, 1.0e-7);
+    anIntersector.Perform(gp_Lin(theOrigin.Transformed(aToPart), theRay.Transformed(aToPart)),
+                          -1.0e7, 1.0e7);
+    if (!anIntersector.IsDone()) { return RayMeets::Unknown; }
+    bool aFound = false;
+    for (Standard_Integer anIndex = 1; anIndex <= anIntersector.NbPnt(); ++anIndex) {
+        const gp_Pnt aWorld = anIntersector.Pnt(anIndex).Transformed(aToWorld);
+        const Standard_Real anAlong = gp_Vec(theOrigin, aWorld).Dot(gp_Vec(theRay));
+        if (!aFound || anAlong < theAlong) { theAlong = anAlong; aFound = true; }
+    }
+    return aFound ? RayMeets::Yes : RayMeets::No;
+}
+
+} // namespace
+
+// =======================================================================
+// function : passEdgeOnFaceHit
+// purpose  : OCCT ranks a triangle seen exactly edge-on (its plane holds the
+//            view ray) at a false depth near 0, so a covered cutter's side
+//            face won a tap on the body's top 12 mm above it (toy car, measure's
+//            COVERED-CUTTER-TAP-TRACE.md items 6-8). When the first hit is such
+//            a face, the exact ray decides: the part keeps the tap only where
+//            the ray really meets it no farther than the next face that faces
+//            the camera; otherwise that next face is the detected one.
+// =======================================================================
+void OcctViewer::passEdgeOnFaceHit()
+{
+    if (myContext.IsNull() || myView.IsNull() || !myContext->HasDetected()) { return; }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(StdSelect_ViewerSelector3d)& aSelector = myContext->MainSelector();
+        if (aSelector.IsNull()) { return; }
+        const Handle(SelectMgr_EntityOwner) aFirst = myContext->DetectedOwner();
+        const Standard_Integer aFirstRank = PickedRank(aSelector, aFirst);
+        if (aFirstRank < 1 || Handle(StdSelect_BRepOwner)::DownCast(aFirst).IsNull()) { return; }
+        // The selector's own near/far ray: the pixel convention of the pick.
+        const auto& aVolume = aSelector->GetManager();
+        const gp_Pnt anOrigin = aVolume.GetNearPickedPnt(), aFar = aVolume.GetFarPickedPnt();
+        const Standard_Real aLength = anOrigin.Distance(aFar);
+        if (!std::isfinite(aLength) || aLength <= Precision::Confusion()) { return; }
+        const gp_Dir aRay(gp_Vec(anOrigin, aFar));
+        if (!IsEdgeOnFaceHit(aSelector->PickedData(aFirstRank), aRay)) { return; }
+
+        // The next detected face that faces the camera, in OCCT's order (the
+        // detected list already holds only what the filters let through).
+        Handle(SelectMgr_EntityOwner) aNext;
+        Standard_Integer aNextRank = 0;
+        bool aPassedFirst = false;
+        for (myContext->InitDetected(); myContext->MoreDetected(); myContext->NextDetected()) {
+            const Handle(SelectMgr_EntityOwner) anOwner = myContext->DetectedCurrentOwner();
+            if (anOwner == aFirst) { aPassedFirst = true; continue; }
+            if (!aPassedFirst || Handle(StdSelect_BRepOwner)::DownCast(anOwner).IsNull()) { continue; }
+            const Standard_Integer aRank = PickedRank(aSelector, anOwner);
+            if (aRank < 1 || !IsCameraFacingFaceHit(aSelector->PickedData(aRank), aRay)) { continue; }
+            aNext = anOwner; aNextRank = aRank;
+            break;
+        }
+        if (aNext.IsNull()) { return; }
+        const SelectMgr_SortCriterion& aNextHit = aSelector->PickedData(aNextRank);
+        const Standard_Real aNextAlong = gp_Vec(anOrigin, aNextHit.Point).Dot(gp_Vec(aRay));
+        Standard_Real aFirstAlong = 0.0;
+        const RayMeets aMeets = NearestRayHitAlong(aFirst, anOrigin, aRay, aFirstAlong);
+        if (aMeets == RayMeets::Unknown) { return; }
+        if (aMeets == RayMeets::Yes
+            && aFirstAlong <= aNextAlong + std::max(aNextHit.Tolerance, 1.0e-6)) {
+            return; // the edge-on part really is in front (a part standing on another)
+        }
+        // HilightNextDetected makes its owner the one SelectDetected takes.
+        const Standard_Integer aSteps = 2 * std::min<Standard_Integer>(aSelector->NbPicked(), 256) + 2;
+        for (Standard_Integer aStep = 0; aStep < aSteps && myContext->DetectedOwner() != aNext; ++aStep) {
+            if (myContext->HilightNextDetected(myView, Standard_False) == 0) { break; }
+        }
+        if (myContext->DetectedOwner() != aNext) {
+            // Not reachable through the detected list: leave OCCT's choice.
+            for (Standard_Integer aStep = 0; aStep < aSteps && myContext->DetectedOwner() != aFirst; ++aStep) {
+                if (myContext->HilightNextDetected(myView, Standard_False) == 0) { break; }
+            }
+        }
+        myView->RedrawImmediate();
+    } catch (...) {
+    }
+}
+
 // =======================================================================
 // function : Select
 // purpose  :
@@ -771,6 +908,7 @@ void OcctViewer::Select(int theX, int theY, AIS_SelectionScheme scheme)
     if (AIS_SOD_Nothing == myContext->MoveTo(theX, theY, myView, Standard_True)) {
         myContext->ClearSelected(Standard_True);
     }
+    passEdgeOnFaceHit();
     myContext->SelectDetected(scheme);
 }
 
