@@ -477,6 +477,12 @@ __attribute__((objc_subclassing_restricted))
                         viewFromCenter:(simd_double3)viewFromCenter
                                     up:(simd_double3)up
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:viewFromCenter:up:));
+//! Frame All while a tool is open: fills the rectangle with every visible part
+//! and the open tool's preview solids (Repeat copies, mirror, shell, bevel, Join
+//! parts). Camera only: no geometry, selection, operation or history change.
+//! NO (previous camera kept) when the scene cannot be read.
+- (BOOL)frameModelAndToolPreviewsInNormalizedViewportRect:(CGRect)normalizedViewportRect
+    NS_SWIFT_NAME(frameModelAndToolPreviews(normalizedViewportRect:));
 //! Focus one visible model occurrence without selecting it. The expected
 //! publication stream, document generation and model revision must still match.
 //! Camera/selection-only changes do not invalidate this read-only request.

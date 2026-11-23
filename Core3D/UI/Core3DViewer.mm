@@ -14874,7 +14874,8 @@ bool Core3DViewer::frameModel(
     const double targetX, const double targetY,
     const double targetWidth, const double targetHeight,
     const ObjectFrameIdentity* objectIdentity, const bool fillTarget,
-    const double* viewFromCenter, const double* viewUp) noexcept {
+    const double* viewFromCenter, const double* viewUp,
+    const bool includeToolPreviews) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -14883,7 +14884,14 @@ bool Core3DViewer::frameModel(
         || targetX + targetWidth > 1.0 || targetY + targetHeight > 1.0) {
         return false;
     }
-    if (![NSThread isMainThread] || !canBeginCommittedEdit()
+    // With includeToolPreviews (View > Frame All while a tool is open, CTO 22 Nov 22:05 item 3) the camera
+    // may move during an operation: it is camera only, and the snapshot below already refuses every
+    // unresolved outcome. Whole-scene only: no selected-only or single-object framing on that path.
+    if (includeToolPreviews && (selectedObjectsOnly || objectIdentity != nullptr
+            || viewFromCenter != nullptr || viewUp != nullptr)) {
+        return false;
+    }
+    if (![NSThread isMainThread] || (!includeToolPreviews && !canBeginCommittedEdit())
         || myView.IsNull() || myContext.IsNull()
         || viewportWidth == 0 || viewportHeight == 0) {
         return false;
@@ -14935,6 +14943,10 @@ bool Core3DViewer::frameModel(
                 }
             }
         }
+        // The open tool's preview solids live in the overlay, not in the
+        // scene above: add their shown shapes (Repeat copies, Shell, Bevel...).
+        if (includeToolPreviews
+            && !AddPresentationBounds(toolPreviewPresentations(), bounds)) { return false; }
         if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
         if ((viewFromCenter == nullptr) != (viewUp == nullptr)) { return false; }
         if (viewFromCenter == nullptr) {

@@ -981,7 +981,8 @@ namespace core3d {
                         const ObjectFrameIdentity* objectIdentity = nullptr,
                         bool fillTarget = false,
                         const double* viewFromCenter = nullptr,
-                        const double* viewUp = nullptr) noexcept;
+                        const double* viewUp = nullptr,
+                        bool includeToolPreviews = false) noexcept;
         //! Fit selected committed sources plus an exact Ready axis preview.
         //! Never changes the document, selection, operation or model history.
         bool frameMirrorPreview(const MirrorPreviewFrameIdentity& expected,

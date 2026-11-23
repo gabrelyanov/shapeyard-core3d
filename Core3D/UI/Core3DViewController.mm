@@ -16618,6 +16618,30 @@ namespace core3d::part_boolean::owner { int CommitReadbackFailureCount() noexcep
     return YES;
 }
 
+- (BOOL)frameModelAndToolPreviewsInNormalizedViewportRect:(CGRect)rect {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return NO;
+    }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1.0 || size.height < 1.0
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        return NO;
+    }
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr || !viewer->frameModel(false,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
+            nullptr, true, nullptr, nullptr, true)) {
+        return NO;
+    }
+    [GLController requestRender];
+    [self viewDidInvalidateSceneSnapshot];
+    return YES;
+}
+
 - (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)rect {
