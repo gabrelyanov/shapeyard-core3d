@@ -145,7 +145,7 @@ class BevelOperationController
     : public std::enable_shared_from_this<BevelOperationController> {
 public:
     static constexpr std::size_t kMaxSourceBodies = 8;
-    static constexpr Standard_Size kMaxSelectedEdges = 64;
+    static constexpr Standard_Size kMaxSelectedEdges = 128;
     //! kMaxSelectedEdges; a DEBUG build may raise it with the environment
     //! variable SHAPEYARD_BEVEL_MAX_EDGES (1...1024) to measure what a larger
     //! limit costs (CTO 22 Nov 18:47). A user's build always takes 64.
