@@ -873,6 +873,8 @@ void OcctViewer::passEdgeOnFaceHit()
         }
         if (aNext.IsNull()) { return; }
         const SelectMgr_SortCriterion& aNextHit = aSelector->PickedData(aNextRank);
+        // Layers drawn on top win by OCCT's own rule, whatever the depth.
+        if (aNextHit.ZLayerPosition != aSelector->PickedData(aFirstRank).ZLayerPosition) { return; }
         const Standard_Real aNextAlong = gp_Vec(anOrigin, aNextHit.Point).Dot(gp_Vec(aRay));
         Standard_Real aFirstAlong = 0.0;
         const RayMeets aMeets = NearestRayHitAlong(aFirst, anOrigin, aRay, aFirstAlong);
