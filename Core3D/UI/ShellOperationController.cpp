@@ -710,6 +710,27 @@ Standard_Boolean TryFaceOperationPlane(
         const BRepAdaptor_Surface surface(face, Standard_True);
         if (surface.GetType() == GeomAbs_Plane) {
             plane = surface.Plane();
+            // A flat face that is not a Geom_Plane (the base or top of a revolve is a
+            // surface of revolution) reports a plane along the revolve axis, which can
+            // be opposite to the face's own U x V normal. The face orientation is
+            // relative to U x V, so the plane must face the same way.
+            const Standard_Real u = 0.5 * surface.FirstUParameter()
+                + 0.5 * surface.LastUParameter();
+            const Standard_Real v = 0.5 * surface.FirstVParameter()
+                + 0.5 * surface.LastVParameter();
+            if (std::isfinite(u) && std::isfinite(v)) {
+                gp_Pnt point;
+                gp_Vec du, dv;
+                surface.D1(u, v, point, du, dv);
+                const gp_Vec normal = du.Crossed(dv);
+                if (std::isfinite(normal.SquareMagnitude())
+                    && normal.SquareMagnitude() > Precision::SquareConfusion()
+                    && normal.Dot(gp_Vec(plane.Axis().Direction())) < 0.0) {
+                    gp_Ax3 position = plane.Position();
+                    position.ZReverse();
+                    plane = gp_Pln(position);
+                }
+            }
             return Standard_True;
         }
         // A whole control net, rather than sampled surface points, proves
