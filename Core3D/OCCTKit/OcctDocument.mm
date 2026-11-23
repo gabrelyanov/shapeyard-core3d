@@ -13944,10 +13944,13 @@ Standard_Boolean OcctDocument::BuildThroughHole(
                 if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
                     || !composite.value || composite.label.IsNull()
                     || !OriginalsFeature(composite.value->definition)) return Standard_False;
-            } else if (!CanBakeSavedCutForFaceEdit(label)) {
+            } else {
                 // A part with an earlier saved hole takes a second one: that
                 // saved cut is baked in the same step (as Push-pull does).
-                return Standard_False;
+                // R9-S4: a part made by Case, Tube or a rectangular loft is drilled
+                // too, by the rule Join and Cut use (its recipe is baked in that step).
+                TDF_Label recipe;
+                if (!BakedBooleanAdmits(*this, label, recipe)) return Standard_False;
             }
         }
         // A current Profile may show this disposable result. Apply remains on
@@ -14066,15 +14069,14 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         TopoDS_Shape result;
         if (!BuildThroughHole(label, start, direction, radius, depth, result, refusal))
             return Standard_False;
-        // A previous Boolean result is baked: its record goes in the same step.
+        // A previous Boolean result is baked: its record goes in the same step. So is
+        // the recipe of a Case, Tube or rectangular loft (R9-S4; Undo brings it back).
         TDF_Label bakedRecord;
         if (RetainedRecipeCoverageForLabel(label)
                 == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-            && core3d::composite_recipe::HasRecord(label)) {
-            core3d::composite_recipe::Record composite;
-            if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
-                || composite.label.IsNull()) { refusal = "stale-source"; return Standard_False; }
-            bakedRecord = composite.label;
+            && !BakedBooleanAdmits(*this, label, bakedRecord)) {
+            refusal = "stale-source";
+            return Standard_False;
         }
         Handle(AIS_Shape) shown = new AIS_Shape(result);
         shown->SetLocalTransformation(presentation->LocalTransformation());
