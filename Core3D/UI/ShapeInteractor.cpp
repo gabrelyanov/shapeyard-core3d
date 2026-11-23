@@ -3046,9 +3046,9 @@ namespace core3d {
 						|| aPresentation->Shape().IsNull()
 						|| aTopologyIndices.empty()
 						|| aTopologyIndices.size()
-							> BevelOperationController::kMaxSelectedEdges
+							> BevelOperationController::MaxSelectedEdges()
 						|| anAggregateEdgeCount
-							> BevelOperationController::kMaxSelectedEdges
+							> BevelOperationController::MaxSelectedEdges()
 								- aTopologyIndices.size()) {
 						return Standard_False;
 					}
@@ -3241,6 +3241,9 @@ namespace core3d {
 			TopTools_IndexedMapOfShape edges;
 			TopTools_IndexedMapOfShape faces;
 			TopTools_IndexedMapOfShape selectedTopology;
+			// Built once per part, on first need (CTO 22 Nov 22:05).
+			TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
+			bool facesOfEdgeMapped = false;
 		};
 
 		try {
@@ -3264,7 +3267,7 @@ namespace core3d {
 			for (myContext->InitSelected(); myContext->MoreSelected();
 				 myContext->NextSelected()) {
 				if (++aRawOwnerCount
-					> BevelOperationController::kMaxSelectedEdges) {
+					> BevelOperationController::MaxSelectedEdges()) {
 					return Standard_False;
 				}
 				const Handle(SelectMgr_EntityOwner) anOwner =
@@ -3409,9 +3412,15 @@ namespace core3d {
 					// edges only; where a round already meets a side no Bevel can
 					// be made, and those edges used up the 64-edge limit. An edge
 					// picked on its own is kept: its Bevel says why it cannot.
-					if (_topAbsSelMode != TopAbs_EDGE
-						&& IsSmoothBevelEdge(aSource->shape, aCanonicalEdge)) {
-						return Standard_True;
+					if (_topAbsSelMode != TopAbs_EDGE) {
+						if (!aSource->facesOfEdgeMapped) {
+							TopExp::MapShapesAndAncestors(aSource->shape, TopAbs_EDGE,
+								TopAbs_FACE, aSource->facesOfEdge);
+							aSource->facesOfEdgeMapped = true;
+						}
+						if (IsSmoothBevelEdge(aSource->facesOfEdge, aCanonicalEdge)) {
+							return Standard_True;
+						}
 					}
 					++anOwnerEligibleEdgeCount;
 					for (const TopoDS_Edge& anExisting
@@ -3421,7 +3430,7 @@ namespace core3d {
 						}
 					}
 					if (anAggregateEdgeCount
-						>= BevelOperationController::kMaxSelectedEdges) {
+						>= BevelOperationController::MaxSelectedEdges()) {
 						if (theOverEdgeLimit != nullptr) {
 							*theOverEdgeLimit = Standard_True;
 						}
