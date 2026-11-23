@@ -2220,7 +2220,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     if (_debugForceSelectionOutlineFallback) { fallback(); return; }
 #endif
     std::vector<TopoDS_Shape> faces;
-    std::vector<TopoDS_Shape> faceParts;
+    // Each picked part once (Fable review 16): faces picked alternately on two parts no longer re-walk a part per face.
+    TopTools_IndexedMapOfShape faceParts;
+    bool facePartUnknown = false;
     const auto document = _viewer->getDocument();
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         if (document.IsNull() || faces.size() >= 50'000) {
@@ -2237,9 +2239,8 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         if (shape.IsNull() || (faceMode && shape.ShapeType() != TopAbs_FACE)) { fallback(); return; }
         faces.push_back(shape);
         const auto part = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
-        if (faceMode && !part.IsNull() && (faceParts.empty() || !faceParts.back().IsSame(part->Shape())))
-            faceParts.push_back(part->Shape());
-        else if (faceMode && part.IsNull()) faceParts.push_back(TopoDS_Shape());
+        if (faceMode && !part.IsNull()) faceParts.Add(part->Shape());
+        else if (faceMode && part.IsNull()) facePartUnknown = true;
     }
     if (faces.empty()) { [self clearSelectedFaceWash]; _selectedContourGeometry.clear(); return; }
     const auto camera = _viewer->ActiveView()->Camera();
@@ -2284,8 +2285,11 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     // The back of a face of a closed opaque part is never in view, so its wash must not be
     // drawn. Pulled forward as it is, the far side of a cup's outer wall showed through the
     // inner wall in streaks. The wash of an open or see-through part stays on both sides.
-    if (faceMode && !sameGeometry)
-        _selectedWashPartsClosed = std::all_of(faceParts.begin(), faceParts.end(), NativeIsClosedOutwardPart);
+    if (faceMode && !sameGeometry) {
+        _selectedWashPartsClosed = !facePartUnknown && faceParts.Extent() > 0;
+        for (int index = 1; _selectedWashPartsClosed && index <= faceParts.Extent(); ++index)
+            _selectedWashPartsClosed = NativeIsClosedOutwardPart(faceParts.FindKey(index));
+    }
     bool cullsWash = _selectedWashPartsClosed;
     for (const auto& item : scene->instances) {
         const auto selection = selected.find(item.entityIdentifier);
@@ -2300,8 +2304,10 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         for (const auto face : selection->second.faces) {
             if (!visibleFaces.count(face)) { fallback(); return; }
         }
+        // Every drawn face of the part, not only the picked ones (Fable review 16): a hidden or see-through face
+        // elsewhere on the part lets its inside, and so the back of the picked face, come into view.
         for (std::size_t index = 0; index < mesh.primitives.size(); ++index) {
-            if (!selection->second.faces.count(mesh.primitives[index].faceIndex)) continue;
+            if (!item.primitiveBindings[index].visible) { cullsWash = false; continue; }
             const auto material = item.primitiveBindings[index].materialIndex;
             if (material >= scene->materials.size()
                 || scene->materials[material].alphaMode != core3d::scene::AlphaMode::Opaque) cullsWash = false;
