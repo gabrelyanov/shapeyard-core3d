@@ -2657,6 +2657,10 @@ __attribute__((objc_subclassing_restricted))
 //! ray meets first on that part ("rayFace").
 - (NSDictionary<NSString *, id> *)debugDetectAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugDetectAtWorldPoint(x:y:z:));
+//! Fable review 17, finding 4 (DEBUG): milliseconds the edge-on rule's exact
+//! ray takes on one part of about faceCount faces; -1 when it could not run.
++ (double)debugEdgeOnRayMillisecondsWithFaceCount:(NSInteger)faceCount
+    NS_SWIFT_NAME(debugEdgeOnRayMilliseconds(faceCount:));
 //! Replay a reported camera eye without changing its direction or any model/selection state.
 - (BOOL)debugMoveCameraEyeX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugMoveCameraEye(x:y:z:));

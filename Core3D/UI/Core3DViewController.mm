@@ -15310,6 +15310,16 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return answer;
 }
 
++ (double)debugEdgeOnRayMillisecondsWithFaceCount:(NSInteger)faceCount {
+#ifdef DEBUG
+    if (faceCount < 6 || faceCount > 4096) return -1;
+    return Core3DContext::DebugEdgeOnRayMilliseconds(static_cast<int>(faceCount));
+#else
+    (void)faceCount;
+    return -1;
+#endif
+}
+
 - (NSArray<NSString *> *)debugNativeFaceTapTrace {
     return NSThread.isMainThread ? ([GLController debugNativeFaceTapTrace] ?: @[]) : @[];
 }

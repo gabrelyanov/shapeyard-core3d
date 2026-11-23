@@ -22,7 +22,11 @@
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
+#include <BRep_Builder.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <TopoDS_Compound.hxx>
 #include <algorithm>
+#include <chrono>
 #include <vector>
 #include <cmath>
 Core3DContext::Core3DContext(const Handle(V3d_Viewer)& MainViewer)
@@ -140,17 +144,13 @@ enum class RayMeets { Unknown, No, Yes };
 // position along the ray (in the part's frame, moved back to the world). No:
 // the ray passes beside it (the part is only near the tap, seen edge-on).
 // Unknown: no shape, or too large to test on a tap; OCCT's choice then stays.
-RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& entity,
-                            const gp_Pnt& origin, const gp_Dir& ray, Standard_Real& along)
+RayMeets NearestRayHitAlongShape(const TopoDS_Shape& shape, const gp_Trsf& toWorld,
+                                 const gp_Pnt& origin, const gp_Dir& ray, Standard_Real& along)
 {
-    const auto owner = Handle(StdSelect_BRepOwner)::DownCast(entity);
-    if (owner.IsNull() || !owner->HasShape() || !owner->HasSelectable()) return RayMeets::Unknown;
-    const TopoDS_Shape& shape = owner->Shape();
     Standard_Integer faces = 0;
     for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next())
         if (++faces > 4096) return RayMeets::Unknown;
     if (faces == 0) return RayMeets::Unknown;
-    const gp_Trsf toWorld = owner->Selectable()->Transformation();
     const gp_Trsf toPart = toWorld.Inverted();
     IntCurvesFace_ShapeIntersector intersector;
     intersector.Load(shape, 1.0e-7);
@@ -167,7 +167,46 @@ RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& entity,
     return found ? RayMeets::Yes : RayMeets::No;
 }
 
+RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& entity,
+                            const gp_Pnt& origin, const gp_Dir& ray, Standard_Real& along)
+{
+    const auto owner = Handle(StdSelect_BRepOwner)::DownCast(entity);
+    if (owner.IsNull() || !owner->HasShape() || !owner->HasSelectable()) return RayMeets::Unknown;
+    return NearestRayHitAlongShape(owner->Shape(), owner->Selectable()->Transformation(), origin, ray, along);
+}
+
 } // namespace
+
+#ifdef DEBUG
+// Fable review 17, finding 4: the cost of the exact ray on a tap, on one part of
+// about faceCount faces (a row of unit boxes, 6 faces each), the ray going down
+// through the last box. Milliseconds, slowest of three; -1 when it could not run.
+double Core3DContext::DebugEdgeOnRayMilliseconds(int faceCount) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        const int boxes = std::max(1, std::min(faceCount, 4096) / 6);
+        BRep_Builder builder;
+        TopoDS_Compound part;
+        builder.MakeCompound(part);
+        for (int index = 0; index < boxes; ++index)
+            builder.Add(part, BRepPrimAPI_MakeBox(gp_Pnt(2.0 * index, 0, 0), 1, 1, 1).Shape());
+        const gp_Pnt origin(2.0 * (boxes - 1) + 0.5, 0.5, 100);
+        double slowest = 0;
+        for (int round = 0; round < 3; ++round) {
+            Standard_Real along = 0;
+            const auto start = std::chrono::steady_clock::now();
+            const RayMeets meets = NearestRayHitAlongShape(part, gp_Trsf(), origin, gp_Dir(0, 0, -1), along);
+            const auto end = std::chrono::steady_clock::now();
+            if (meets != RayMeets::Yes || std::abs(along - 99.0) > 1.0e-6) return -1;
+            slowest = std::max(slowest, std::chrono::duration<double, std::milli>(end - start).count());
+        }
+        return slowest;
+    } catch (...) {
+        return -1;
+    }
+}
+#endif
 
 // OCCT ranks a triangle seen exactly edge-on (its plane holds the view ray) at
 // a false depth near 0, so a covered cutter's side face won a tap on the body's

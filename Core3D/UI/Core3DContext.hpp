@@ -48,6 +48,9 @@ public:
     //! continues to be owned exclusively by AIS_InteractiveContext::MoveTo().
     Standard_Boolean DebugSetDetectedOwner(
         const Handle(SelectMgr_EntityOwner)& owner) noexcept;
+    //! Fable review 17, finding 4: time of the edge-on rule's exact ray on
+    //! one part of about faceCount faces (at most 4096); -1 if it failed.
+    Standard_EXPORT static double DebugEdgeOnRayMilliseconds(int faceCount) noexcept;
 #endif
 };
 #endif /* Core3DContext_hpp */
