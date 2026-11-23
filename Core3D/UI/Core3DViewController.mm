@@ -15253,6 +15253,63 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return answer;
 }
 
+- (NSDictionary<NSString *, id> *)debugDetectAtWorldPointX:(double)x y:(double)y z:(double)z {
+    if (!NSThread.isMainThread || !GLController.viewer
+        || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return @{@"error":@"Invalid pick"};
+    const auto viewer = GLController.viewer;
+    const auto context = viewer->AisContext(); const auto view = viewer->ActiveView();
+    GLView *renderView = [GLController.view isKindOfClass:GLView.class] ? (GLView *)GLController.view : nil;
+    if (context.IsNull() || view.IsNull() || !renderView) return @{@"error":@"No viewport"};
+    __block NSMutableDictionary *answer = [NSMutableDictionary dictionary];
+    const BOOL current = [renderView performWithRenderingContext:^{
+        try {
+            int width=0,height=0; view->Window()->Size(width,height);
+            const gp_Pnt projected = view->Camera()->Project(gp_Pnt(x,y,z));
+            const int px = (int)lround((projected.X()+1)*0.5*width);
+            const int py = (int)lround((1-projected.Y())*0.5*height);
+            answer[@"x"]=@(px); answer[@"y"]=@(py);
+            answer[@"width"]=@(width); answer[@"height"]=@(height);
+            answer[@"continuousX"]=@((projected.X()+1)*0.5*width);
+            if (px<0 || py<0 || px>=width || py>=height) {
+                answer[@"error"]=@"Projected point outside viewport"; return;
+            }
+            // Core3DViewer::hitTest: Core3DContext::MoveTo, as the Shell tap.
+            answer[@"hit"]=@(viewer->hitTest(px,py));
+            answer[@"hasDetected"]=@(context->HasDetected());
+            if (!context->HasDetected()) return;
+            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->DetectedOwner());
+            const auto shape = Handle(AIS_Shape)::DownCast(context->DetectedInteractive());
+            if (owner.IsNull() || !owner->HasShape() || shape.IsNull()) return;
+            const auto document = viewer->getDocument();
+            if (!document.IsNull()) {
+                const TDF_Label label = document->ShapeLabel(shape);
+                if (!label.IsNull())
+                    answer[@"entity"]=[NSString stringWithUTF8String:document->EntityIdentifierForLabel(label).c_str()] ?: @"";
+            }
+            TopTools_IndexedMapOfShape faces; TopExp::MapShapes(shape->Shape(),TopAbs_FACE,faces);
+            answer[@"detectedFace"]=@(faces.FindIndex(owner->Shape())-1);
+            if (faces.Extent()>128) return;
+            double ox,oy,oz,dx,dy,dz;
+            view->ConvertWithProj(px,py,ox,oy,oz,dx,dy,dz);
+            const gp_Trsf inverse = shape->Transformation().Inverted();
+            IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
+            ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
+                               gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e6);
+            if (ray.IsDone()) {
+                double closest=1e6; int face=-1;
+                for (int i=1;i<=ray.NbPnt();++i) {
+                    if (ray.WParameter(i)>=0 && ray.WParameter(i)<closest) {
+                        closest=ray.WParameter(i); face=faces.FindIndex(ray.Face(i))-1;
+                    }
+                }
+                answer[@"rayFace"]=@(face);
+            }
+        } catch (...) { answer[@"error"]=@"Native pick exception"; }
+    }];
+    if (!current) answer[@"error"]=@"No rendering context";
+    return answer;
+}
+
 - (NSArray<NSString *> *)debugNativeFaceTapTrace {
     return NSThread.isMainThread ? ([GLController debugNativeFaceTapTrace] ?: @[]) : @[];
 }

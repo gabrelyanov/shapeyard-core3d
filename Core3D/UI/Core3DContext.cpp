@@ -18,6 +18,11 @@
 #include <TopExp_Explorer.hxx>
 #include <V3d_View.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Vec.hxx>
+#include <Precision.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <StdSelect_ViewerSelector3d.hxx>
+#include <algorithm>
 #include <vector>
 #include <cmath>
 Core3DContext::Core3DContext(const Handle(V3d_Viewer)& MainViewer)
@@ -87,7 +92,150 @@ static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
     return changed;
 }
 
+// Every pick path that reads the detected owner after its own MoveTo (a tap's
+// Select, the Cut/Join/Overlap and Shell taps' hitTest, the mirror-plane pick)
+// goes through here, so the edge-on rule is the same for all of them (Fable
+// review 17, finding 1).
 AIS_StatusOfDetection Core3DContext::MoveTo(
+    Standard_Integer x, Standard_Integer y,
+    const Handle(V3d_View)& view, Standard_Boolean redraw)
+{
+    const auto status = moveToRefiningCylinders(x, y, view, redraw);
+    passEdgeOnFaceHit(view, redraw);
+    return status;
+}
+
+namespace {
+
+// A face hit whose surface normal is at a right angle to the pick ray: the
+// face is seen exactly edge-on. Edges and points carry no normal (0 vector).
+bool IsEdgeOnFaceHit(const SelectMgr_SortCriterion& hit, const gp_Dir& ray)
+{
+    const Standard_Real length = hit.Normal.Modulus();
+    if (!(length > 0.5)) return false;
+    const Standard_Real cosine = (hit.Normal.x() * ray.X() + hit.Normal.y() * ray.Y()
+                                + hit.Normal.z() * ray.Z()) / length;
+    return std::abs(cosine) < 1.0e-4;
+}
+
+bool IsCameraFacingFaceHit(const SelectMgr_SortCriterion& hit, const gp_Dir& ray)
+{
+    return hit.Normal.Modulus() > 0.5 && !IsEdgeOnFaceHit(hit, ray)
+        && !Precision::IsInfinite(hit.Point.X()) && !Precision::IsInfinite(hit.Point.Y())
+        && !Precision::IsInfinite(hit.Point.Z());
+}
+
+Standard_Integer PickedRank(const Handle(StdSelect_ViewerSelector3d)& selector,
+                            const Handle(SelectMgr_EntityOwner)& owner)
+{
+    const Standard_Integer count = std::min<Standard_Integer>(selector->NbPicked(), 256);
+    for (Standard_Integer rank = 1; rank <= count; ++rank)
+        if (selector->Picked(rank) == owner) return rank;
+    return 0;
+}
+
+enum class RayMeets { Unknown, No, Yes };
+
+// Where the exact pick ray meets the owner's own shape, nearest first, as a
+// position along the ray (in the part's frame, moved back to the world). No:
+// the ray passes beside it (the part is only near the tap, seen edge-on).
+// Unknown: no shape, or too large to test on a tap; OCCT's choice then stays.
+RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& entity,
+                            const gp_Pnt& origin, const gp_Dir& ray, Standard_Real& along)
+{
+    const auto owner = Handle(StdSelect_BRepOwner)::DownCast(entity);
+    if (owner.IsNull() || !owner->HasShape() || !owner->HasSelectable()) return RayMeets::Unknown;
+    const TopoDS_Shape& shape = owner->Shape();
+    Standard_Integer faces = 0;
+    for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next())
+        if (++faces > 4096) return RayMeets::Unknown;
+    if (faces == 0) return RayMeets::Unknown;
+    const gp_Trsf toWorld = owner->Selectable()->Transformation();
+    const gp_Trsf toPart = toWorld.Inverted();
+    IntCurvesFace_ShapeIntersector intersector;
+    intersector.Load(shape, 1.0e-7);
+    intersector.Perform(gp_Lin(origin.Transformed(toPart), ray.Transformed(toPart)), -1.0e7, 1.0e7);
+    if (!intersector.IsDone()) return RayMeets::Unknown;
+    bool found = false;
+    for (Standard_Integer index = 1; index <= intersector.NbPnt(); ++index) {
+        const gp_Pnt world = intersector.Pnt(index).Transformed(toWorld);
+        const Standard_Real distance = gp_Vec(origin, world).Dot(gp_Vec(ray));
+        // Only what lies ahead of the pick's near point can be seen.
+        if (!std::isfinite(distance) || distance < -1.0e-3) continue;
+        if (!found || distance < along) { along = distance; found = true; }
+    }
+    return found ? RayMeets::Yes : RayMeets::No;
+}
+
+} // namespace
+
+// OCCT ranks a triangle seen exactly edge-on (its plane holds the view ray) at
+// a false depth near 0, so a covered cutter's side face won a tap on the body's
+// top 12 mm above it (toy car, measure's COVERED-CUTTER-TAP-TRACE.md items 6-8).
+// When the first hit is such a face, the exact ray decides: the part keeps the
+// tap only where the ray really meets it no farther than the next face that
+// faces the camera; otherwise that next face is the detected one. Edge and
+// vertex hits, gizmo owners, other drawing layers and parts over 4096 faces are
+// left to OCCT.
+void Core3DContext::passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boolean redraw)
+{
+    if (view.IsNull() || !HasDetected()) return;
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(StdSelect_ViewerSelector3d)& selector = MainSelector();
+        if (selector.IsNull()) return;
+        const Handle(SelectMgr_EntityOwner) first = DetectedOwner();
+        const Standard_Integer firstRank = PickedRank(selector, first);
+        if (firstRank < 1 || Handle(StdSelect_BRepOwner)::DownCast(first).IsNull()) return;
+        // The selector's own near/far ray: the pixel convention of the pick.
+        const auto& volume = selector->GetManager();
+        const gp_Pnt origin = volume.GetNearPickedPnt(), far = volume.GetFarPickedPnt();
+        const Standard_Real length = origin.Distance(far);
+        if (!std::isfinite(length) || length <= Precision::Confusion()) return;
+        const gp_Dir ray(gp_Vec(origin, far));
+        if (!IsEdgeOnFaceHit(selector->PickedData(firstRank), ray)) return;
+
+        // The next detected face that faces the camera, in OCCT's order (the
+        // detected list already holds only what the filters let through).
+        Handle(SelectMgr_EntityOwner) next;
+        Standard_Integer nextRank = 0;
+        bool passedFirst = false;
+        for (InitDetected(); MoreDetected(); NextDetected()) {
+            const Handle(SelectMgr_EntityOwner) owner = DetectedCurrentOwner();
+            if (owner == first) { passedFirst = true; continue; }
+            if (!passedFirst || Handle(StdSelect_BRepOwner)::DownCast(owner).IsNull()) continue;
+            const Standard_Integer rank = PickedRank(selector, owner);
+            if (rank < 1 || !IsCameraFacingFaceHit(selector->PickedData(rank), ray)) continue;
+            next = owner; nextRank = rank;
+            break;
+        }
+        if (next.IsNull()) return;
+        const SelectMgr_SortCriterion& nextHit = selector->PickedData(nextRank);
+        // Layers drawn on top win by OCCT's own rule, whatever the depth.
+        if (nextHit.ZLayerPosition != selector->PickedData(firstRank).ZLayerPosition) return;
+        const Standard_Real nextAlong = gp_Vec(origin, nextHit.Point).Dot(gp_Vec(ray));
+        Standard_Real firstAlong = 0.0;
+        const RayMeets meets = NearestRayHitAlong(first, origin, ray, firstAlong);
+        if (meets == RayMeets::Unknown) return;
+        if (meets == RayMeets::Yes && firstAlong <= nextAlong + std::max(nextHit.Tolerance, 1.0e-6))
+            return; // the edge-on part really is in front (a part standing on another)
+        // Public cycling keeps dynamic highlight, the detected index and XOR
+        // selection in agreement; SelectDetected then takes this owner.
+        const Standard_Integer steps = 2 * std::min<Standard_Integer>(selector->NbPicked(), 256) + 2;
+        for (Standard_Integer step = 0; step < steps && DetectedOwner() != next; ++step)
+            if (HilightNextDetected(view, Standard_False) == 0) break;
+        if (DetectedOwner() != next) {
+            // Not reachable through the detected list: leave OCCT's choice.
+            for (Standard_Integer step = 0; step < steps && DetectedOwner() != first; ++step)
+                if (HilightNextDetected(view, Standard_False) == 0) break;
+        }
+        if (redraw) view->RedrawImmediate();
+    } catch (...) {
+        // OCCT's own detection stays in charge; nothing was edited.
+    }
+}
+
+AIS_StatusOfDetection Core3DContext::moveToRefiningCylinders(
     Standard_Integer x, Standard_Integer y,
     const Handle(V3d_View)& view, Standard_Boolean redraw)
 {

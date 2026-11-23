@@ -28,10 +28,21 @@ public:
     //! Keep selection wireframes on real edges, including resized spline faces.
     Standard_EXPORT static void DisableSurfaceIsolines(const Handle(Prs3d_Drawer)& drawer);
     using AIS_InteractiveContext::MoveTo;
-    //! Refine cylindrical face candidates without replacing selection owners.
+    //! Refine cylindrical face candidates without replacing selection owners,
+    //! then pass a face seen exactly edge-on on to the face the ray meets.
     Standard_EXPORT AIS_StatusOfDetection MoveTo(
         Standard_Integer x, Standard_Integer y,
         const Handle(V3d_View)& view, Standard_Boolean redraw);
+private:
+    AIS_StatusOfDetection moveToRefiningCylinders(
+        Standard_Integer x, Standard_Integer y,
+        const Handle(V3d_View)& view, Standard_Boolean redraw);
+    //! After MoveTo: when the first hit is a face seen exactly edge-on (OCCT
+    //! gives it a false depth near 0), the next face that faces the camera
+    //! becomes the detected one unless the exact ray meets the first part no
+    //! farther away. Changes only which detected owner is current.
+    void passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boolean redraw);
+public:
 #ifdef DEBUG
     //! Deterministic test-only preselection publication. Production hover
     //! continues to be owned exclusively by AIS_InteractiveContext::MoveTo().

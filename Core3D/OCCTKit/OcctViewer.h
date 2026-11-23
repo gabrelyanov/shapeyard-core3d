@@ -149,11 +149,6 @@ public:
 #endif
 protected:
     void clearSession(const Handle(XSControl_WorkSession)& theSession);
-    //! After MoveTo: when the first hit is a face seen exactly edge-on (OCCT
-    //! gives it a false depth near 0), the next face that faces the camera
-    //! becomes the detected one unless the exact ray meets the first part no
-    //! farther away. Changes only which detected owner SelectDetected takes.
-    void passEdgeOnFaceHit();
     
     //! Display every leaf occurrence below a root as an independent AIS
     //! presentation. XCAFPrs_DocumentExplorer supplies the resolved inherited
