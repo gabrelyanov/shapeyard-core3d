@@ -14483,6 +14483,39 @@ static Standard_Boolean CloseHoleKeepingLines(
         for (TopExp_Explorer edge(merged, TopAbs_EDGE); edge.More(); edge.Next())
             if (edge.Current().Orientation() == TopAbs_INTERNAL || edge.Current().Orientation() == TopAbs_EXTERNAL)
                 return Standard_False;
+        // Fable engine review 18, finding 2: the face count alone can hide a lost line (one face fewer where a
+        // crossed line went, one more where a plug did not merge). So every kept line must still be an edge of the
+        // result, itself or its pieces, and no rim of the old hole may be left (a plug that did not merge leaves
+        // its ring seam around the new hole).
+        TopTools_IndexedMapOfShape mergedEdges;
+        TopExp::MapShapes(merged, TopAbs_EDGE, mergedEdges);
+        const Handle(BRepTools_History)& unified = unify.History();
+        const auto survives = [&](const TopoDS_Shape& edge) {
+            if (mergedEdges.Contains(edge)) return true;
+            if (unified.IsNull() || unified->IsRemoved(edge)) return false;
+            const TopTools_ListOfShape& pieces = unified->Modified(edge);
+            if (pieces.IsEmpty()) return false;
+            for (TopTools_ListIteratorOfListOfShape it(pieces); it.More(); it.Next())
+                if (!mergedEdges.Contains(it.Value())) return false;
+            return true;
+        };
+        const auto leftOver = [&](const TopoDS_Shape& edge) {
+            if (mergedEdges.Contains(edge)) return true;
+            if (unified.IsNull() || unified->IsRemoved(edge)) return false;
+            for (TopTools_ListIteratorOfListOfShape it(unified->Modified(edge)); it.More(); it.Next())
+                if (mergedEdges.Contains(it.Value())) return true;
+            return false;
+        };
+        for (TopTools_MapIteratorOfMapOfShape it(keep); it.More(); it.Next())
+            if (it.Key().ShapeType() == TopAbs_EDGE && !survives(it.Key())) return Standard_False;
+        for (Standard_Integer i = 1; i <= removedEdges.Extent(); ++i) {
+            const TopoDS_Shape& rim = removedEdges(i);
+            if (sourceEdges.Contains(rim) && fuse.IsDeleted(rim)) continue;
+            const TopTools_ListOfShape& images = fuse.Modified(rim);
+            if (images.IsEmpty()) { if (leftOver(rim)) return Standard_False; continue; }
+            for (TopTools_ListIteratorOfListOfShape it(images); it.More(); it.Next())
+                if (leftOver(it.Value())) return Standard_False;
+        }
         GProp_GProps closedMass, mergedMass;
         BRepGProp::VolumeProperties(closed, closedMass);
         BRepGProp::VolumeProperties(merged, mergedMass);
