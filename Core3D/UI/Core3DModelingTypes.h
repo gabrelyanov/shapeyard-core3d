@@ -1203,6 +1203,9 @@ typedef NS_ENUM(NSInteger, Core3DRoundFailureKind) {
     //! A flat Bevel over a seam between two faces in one plane on a part whose
     //! faces carry their own looks: refused at any value (Fable review 6 P1).
     Core3DRoundFailureKindFlatSeamOnPaintedPart,
+    //! R9-C3 (CTO 22 Nov 18:47): the picked edge is where two faces already
+    //! meet smoothly (the side of a round): no Bevel can be made there.
+    Core3DRoundFailureKindSmoothEdge,
 };
 
 typedef struct {
