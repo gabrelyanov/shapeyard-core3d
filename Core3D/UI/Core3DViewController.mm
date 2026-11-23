@@ -27217,9 +27217,9 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
             if (identifier.length == 0 || identifier.UTF8String == nullptr
                 || sourceIndices.count == 0
                 || sourceIndices.count
-                    > core3d::BevelOperationController::kMaxSelectedEdges
+                    > core3d::BevelOperationController::MaxSelectedEdges()
                 || aggregateEdgeCount
-                    > core3d::BevelOperationController::kMaxSelectedEdges
+                    > core3d::BevelOperationController::MaxSelectedEdges()
                         - sourceIndices.count) {
                 return NO;
             }

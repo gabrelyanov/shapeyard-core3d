@@ -3046,9 +3046,9 @@ namespace core3d {
 						|| aPresentation->Shape().IsNull()
 						|| aTopologyIndices.empty()
 						|| aTopologyIndices.size()
-							> BevelOperationController::kMaxSelectedEdges
+							> BevelOperationController::MaxSelectedEdges()
 						|| anAggregateEdgeCount
-							> BevelOperationController::kMaxSelectedEdges
+							> BevelOperationController::MaxSelectedEdges()
 								- aTopologyIndices.size()) {
 						return Standard_False;
 					}
@@ -3203,8 +3203,12 @@ namespace core3d {
 	}
 
 	Standard_Boolean ShapeInteractor::tryCaptureBevelSelection(
-		std::vector<BevelSourceSelection>& theSelection) const noexcept {
+		std::vector<BevelSourceSelection>& theSelection,
+		Standard_Boolean* theOverEdgeLimit) const noexcept {
 		theSelection.clear();
+		if (theOverEdgeLimit != nullptr) {
+			*theOverEdgeLimit = Standard_False;
+		}
 		if (myContext.IsNull() || myDoc.IsNull()
 			|| _bevelController == nullptr
 			|| !selectionModeAuthorityIsExact()) {
@@ -3237,6 +3241,9 @@ namespace core3d {
 			TopTools_IndexedMapOfShape edges;
 			TopTools_IndexedMapOfShape faces;
 			TopTools_IndexedMapOfShape selectedTopology;
+			// Built once per part, on first need (CTO 22 Nov 22:05).
+			TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
+			bool facesOfEdgeMapped = false;
 		};
 
 		try {
@@ -3260,7 +3267,7 @@ namespace core3d {
 			for (myContext->InitSelected(); myContext->MoreSelected();
 				 myContext->NextSelected()) {
 				if (++aRawOwnerCount
-					> BevelOperationController::kMaxSelectedEdges) {
+					> BevelOperationController::MaxSelectedEdges()) {
 					return Standard_False;
 				}
 				const Handle(SelectMgr_EntityOwner) anOwner =
@@ -3401,6 +3408,20 @@ namespace core3d {
 					if (!IsBevelEdgeEligible(aCanonicalEdge)) {
 						return Standard_True;
 					}
+					// R9-C3 (CTO 22 Nov 18:47): Object and Face mode take the sharp
+					// edges only; where a round already meets a side no Bevel can
+					// be made, and those edges used up the 64-edge limit. An edge
+					// picked on its own is kept: its Bevel says why it cannot.
+					if (_topAbsSelMode != TopAbs_EDGE) {
+						if (!aSource->facesOfEdgeMapped) {
+							TopExp::MapShapesAndAncestors(aSource->shape, TopAbs_EDGE,
+								TopAbs_FACE, aSource->facesOfEdge);
+							aSource->facesOfEdgeMapped = true;
+						}
+						if (IsSmoothBevelEdge(aSource->facesOfEdge, aCanonicalEdge)) {
+							return Standard_True;
+						}
+					}
 					++anOwnerEligibleEdgeCount;
 					for (const TopoDS_Edge& anExisting
 						 : aSource->selection.edges) {
@@ -3409,7 +3430,10 @@ namespace core3d {
 						}
 					}
 					if (anAggregateEdgeCount
-						>= BevelOperationController::kMaxSelectedEdges) {
+						>= BevelOperationController::MaxSelectedEdges()) {
+						if (theOverEdgeLimit != nullptr) {
+							*theOverEdgeLimit = Standard_True;
+						}
 						return Standard_False;
 					}
 					++anAggregateEdgeCount;
@@ -3470,6 +3494,15 @@ namespace core3d {
 		std::vector<BevelSourceSelection> aSelection;
 		return tryCaptureBevelSelection(aSelection)
 			&& _bevelController->canBegin(aSelection);
+	}
+
+	Standard_Boolean ShapeInteractor::bevelSelectionOverEdgeLimit() const noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		Standard_Boolean anOverLimit = Standard_False;
+		return !tryCaptureBevelSelection(aSelection, &anOverLimit) && anOverLimit;
 	}
 
 	Standard_Boolean ShapeInteractor::canBeginRoundSelection() const noexcept {
