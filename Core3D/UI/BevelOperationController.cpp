@@ -1889,6 +1889,8 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             aSource.bakedBooleanRecord = aBakedBooleanRecord;
             aSource.retainedCapture=aSelection.retainedCapture;
             aSource.bakesSavedCut=bakesSavedCut;
+            aSource.bakesRamp=myDoc->HasVariableRadiusFilletOwner(
+                aSelection.documentLabel);
             if (!aSelection.edgeTopologyIndices.empty()
                 && aSelection.edgeTopologyIndices
                     != aSource.edgeTopologyIndices) {
@@ -1939,6 +1941,8 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                     myDoc, aSource.label, aSource.bakesSavedCut)
                 || (aSource.bakesSavedCut
                     && !myDoc->CanBakeRecordForFaceEdit(aSource.label))
+                || (aSource.bakesRamp
+                    != myDoc->HasVariableRadiusFilletOwner(aSource.label))
                 || !myDoc->IsPresentationEditable(aSource.original)
                 || !myDoc->ShapeLabel(aSource.original).IsEqual(
                     aSource.label)
@@ -2966,6 +2970,8 @@ BevelApplyResult BevelOperationController::apply() noexcept
                 std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
                 staged=(!source.bakesSavedCut
                         ||myDoc->PrepareBooleanResultForFaceEdit(source.label))
+                    &&(!source.bakesRamp
+                        ||myDoc->ForgetVariableRadiusFilletOwner(source.label))
                     &&myDoc->CaptureFaceColours(source.label,1.0,faceLabels,colouredFaces)
                     &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex])
                     &&myDoc->CarryFaceColours(source.label,myPreviewResults[anIndex]->Shape(),

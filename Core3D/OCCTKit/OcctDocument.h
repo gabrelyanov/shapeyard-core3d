@@ -1977,6 +1977,15 @@ public:
     //! command (Undo brings the editable result back). False for every other part.
     Standard_EXPORT Standard_Boolean BooleanResultRecordForBake(
         const TDF_Label& label, TDF_Label& record) const noexcept;
+    //! R9-C3 Ramp (A) (CTO 23 Nov 00:55): true when the part carries an editable Ramp (its
+    //! variable-radius fillet carrier, one named-data array on the label). Bevel bakes it.
+    Standard_EXPORT Standard_Boolean HasVariableRadiusFilletOwner(
+        const TDF_Label& label) const noexcept;
+    //! Drops that carrier inside the open command, so the Ramp is baked into the solid by the
+    //! command that replaces the shape; Undo brings the editable Ramp back. False (nothing
+    //! dropped) unless the label holds exactly that one carrier.
+    Standard_EXPORT Standard_Boolean ForgetVariableRadiusFilletOwner(
+        const TDF_Label& label) noexcept;
     //! The same for several parts in ONE undoable command. Cut (1): every part in
     //! `targets` loses every part in `tools`; Join (0) and Overlap (2): one target
     //! (Overlap: one tool). Every tool is removed. Main thread.

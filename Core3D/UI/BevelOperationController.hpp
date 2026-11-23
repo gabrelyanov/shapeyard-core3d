@@ -245,6 +245,8 @@ private:
         std::shared_ptr<const RetainedBevelAdapter::Capture> retainedCapture;
         // A standalone saved Hole that Apply bakes in its own command.
         Standard_Boolean bakesSavedCut = Standard_False;
+        // R9-C3 Ramp (A): the part carries an editable Ramp; Apply bakes it.
+        Standard_Boolean bakesRamp = Standard_False;
         //! True when any face of the part carries its own look (a painted
         //! face, or a Join of parts that look different). A flat Bevel then
         //! never merges flat seams: the merge would give a two-look side one
