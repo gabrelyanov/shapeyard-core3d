@@ -2019,7 +2019,8 @@ public:
     //! Hole size for a hole that has no saved-cut record: the hole is closed and
     //! drilled again at `radius` on the same axis, from the same side, to the same
     //! floor. Refusals: "no-hole", "unchanged", "cannot-close", "hole-leaves-part",
-    //! "holes-overlap", "bad-values", "unsupported-source", "invalid-result".
+    //! "holes-overlap", "merges-faces" (a smaller hole where closing would melt faces),
+    //! "bad-values", "unsupported-source", "invalid-result".
     Standard_EXPORT Standard_Boolean BuildHoleResize(
         const TDF_Label& label, double radius, const gp_Pnt* nearPoint,
         TopoDS_Shape& result, std::string& refusal) const noexcept;

@@ -14469,6 +14469,53 @@ Standard_Boolean OcctDocument::BuildHoleResize(
             || !BRepCheck_Analyzer(closed, Standard_True).IsValid()) {
             refusal = "cannot-close"; return Standard_False;
         }
+        // Round 9 R9-C1: closing tidies the faces around the hole into one where they lie in one
+        // plane, so a Split line the hole crossed was wiped and one face's colour spread over
+        // both. Closing must give back every face but the removed ones; when it merged faces,
+        // a bigger hole is drilled straight into the part instead (a Cut keeps every face), and
+        // a smaller one is refused as before ("Undo the Hole and make it again at the new size").
+        TopTools_IndexedMapOfShape sourceFaces, closedFaces;
+        TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
+        TopExp::MapShapes(closed, TopAbs_FACE, closedFaces);
+        Standard_Integer removed = 0;
+        for (Standard_Integer i = 1; i <= sourceFaces.Extent(); ++i)
+            if (closing.IsDeleted(sourceFaces(i))) ++removed;
+        if (closedFaces.Extent() < sourceFaces.Extent() - removed) {
+            if (!(radius > hole.radius) || hole.depth > 0) { refusal = "merges-faces"; return Standard_False; }
+            // Along the old wall only (its length and a little past the far end, so no skin is
+            // left there), never on through the line into other material behind the part.
+            const double past = std::min(hole.radius, std::max(hole.length * 0.05, linear * 10));
+            TopoDS_Shape wider; std::string drillCode;
+            if (!(hole.length > linear)
+                || !DrillRoundHole(source, hole.entry, hole.into, radius, hole.length + past, wider, drillCode)) {
+                refusal = drillCode == "empty-result" ? "hole-leaves-part" : "invalid-result";
+                return Standard_False;
+            }
+            const TopoDS_Shape widerSolid = SingleSolidOf(wider);
+            GProp_GProps sourceMass, widerMass;
+            BRepGProp::VolumeProperties(source, sourceMass);
+            if (widerSolid.IsNull()) { refusal = "invalid-result"; return Standard_False; }
+            BRepGProp::VolumeProperties(widerSolid, widerMass);
+            // The wall's length is its longest reach along the axis, so on a slanted end the
+            // ring taken away is at most this much (and never nothing).
+            const double ring = M_PI * (radius * radius - hole.radius * hole.radius) * hole.length;
+            const double taken = sourceMass.Mass() - widerMass.Mass();
+            if (!(taken > linear) || taken > ring * (1 + 1e-3) + linear) {
+                refusal = "hole-leaves-part"; return Standard_False;
+            }
+            const gp_Pnt start = hole.entry;
+            const std::vector<RoundHoleOfSolid> widened = RoundHolesOfSolid(widerSolid);
+            if (!HasWholeRoundHole(widened, start, hole.into, radius, linear)) {
+                refusal = "hole-leaves-part"; return Standard_False;
+            }
+            if (widened.size() != holes.size()) { refusal = "holes-overlap"; return Standard_False; }
+            TopTools_IndexedMapOfShape widerFaces;
+            TopExp::MapShapes(widerSolid, TopAbs_FACE, widerFaces);
+            if (widerFaces.Extent() < sourceFaces.Extent()) { refusal = "merges-faces"; return Standard_False; }
+            output = widerSolid;
+            refusal.clear();
+            return Standard_True;
+        }
         GProp_GProps before, between;
         BRepGProp::VolumeProperties(source, before);
         BRepGProp::VolumeProperties(closed, between);
