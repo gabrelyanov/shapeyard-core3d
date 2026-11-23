@@ -480,6 +480,9 @@ namespace core3d {
 		const bool hasTrialMirrorObjects() const;
 		const bool hasUnresolvedMirrorObjects() const;
 		const bool hasActiveMirror() const noexcept;
+		//! The mirrored copies shown before the tick; empty unless the preview is Ready.
+		//! Read-only: Frame All with Mirror open fits them with the parts.
+		std::vector<Handle(AIS_Shape)> mirrorPreviewPresentations() const noexcept;
 		const bool canApplyMirror() const noexcept;
 		MirrorPreviewState mirrorPreviewState() const noexcept;
 		std::uint64_t mirrorPreviewGeneration() const noexcept;

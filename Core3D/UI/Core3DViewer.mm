@@ -15523,6 +15523,8 @@ std::vector<Handle(AIS_Shape)> Core3DViewer::toolPreviewPresentations() const no
         } else if (_objectInteractor->hasActiveRadialArray()) {
             RadialArrayPreviewCapture ring;
             if (_objectInteractor->captureRadialArrayPreview(ring)) copies = ring.previewObjects;
+        } else if (_objectInteractor->hasActiveMirror()) {
+            copies = _objectInteractor->mirrorPreviewPresentations();
         }
         for (const Handle(AIS_Shape)& copy : copies) {
             if (!copy.IsNull() && !copy->Shape().IsNull() && myContext->IsDisplayed(copy)) {

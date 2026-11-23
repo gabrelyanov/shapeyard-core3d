@@ -7384,6 +7384,15 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			|| hasUnresolvedMirrorObjects();
 	}
 
+	std::vector<Handle(AIS_Shape)> ObjectInteractor::mirrorPreviewPresentations() const noexcept {
+		try {
+			if (_mirrorPreviewState != MirrorPreviewState::Ready || !_trialMirrorObjectsValid) return {};
+			return _trialMirrorObjects;
+		} catch (...) {
+			return {};
+		}
+	}
+
 	const bool ObjectInteractor::canApplyMirror() const noexcept {
 		return !_mirrorPlanePicking
 			&& ((_mirrorPreviewState == MirrorPreviewState::Ready
