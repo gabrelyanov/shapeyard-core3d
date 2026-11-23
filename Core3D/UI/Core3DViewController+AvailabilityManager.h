@@ -18,6 +18,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)canRedo;
 - (NSArray<NSNumber *> *_Nonnull)availableGizmoTypes;
 - (BOOL)canApplyMaterial;
+//! R9-C3 (CTO 22 Nov 18:47): Bevel is offered for the selected solid part but
+//! cannot open, because its sharp edges are more than Bevel takes at once. The
+//! column shows Bevel dimmed and a tap says "Too many edges at once. Pick edges
+//! in Edge mode."
+- (BOOL)bevelOverEdgeLimit NS_SWIFT_NAME(bevelOverEdgeLimit());
 //! Export support is document-wide rather than selection-based. In
 //! particular, STEP is unavailable while any TriangleMesh definition remains.
 - (BOOL)canExportType:(ExportType)exportType

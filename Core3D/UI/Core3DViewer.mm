@@ -16132,9 +16132,9 @@ Standard_Boolean Core3DViewer::debugBeginBevelSelection(
                 theEdgeTopologyIndices[anIndex];
             if (anIdentifier.empty() || anEdges.empty()
                 || anEdges.size()
-                    > BevelOperationController::kMaxSelectedEdges
+                    > BevelOperationController::MaxSelectedEdges()
                 || anAggregateEdgeCount
-                    > BevelOperationController::kMaxSelectedEdges
+                    > BevelOperationController::MaxSelectedEdges()
                         - anEdges.size()
                 || !anIdentifierIndices.emplace(
                     anIdentifier, anIndex).second) {
