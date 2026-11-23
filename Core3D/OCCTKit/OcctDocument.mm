@@ -13814,6 +13814,8 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
     int operation, std::string& refusal) noexcept {
     refusal = "unsupported-source";
     try {
+        // One Cut / Join takes at most 32 parts in all; say so in its own word (CTO 23 Nov 03:55).
+        if (targets.size() + tools.size() > 32) { refusal = "too-many-parts"; return Standard_False; }
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || targets.empty() || tools.empty() || targets.size() + tools.size() > 32
             || operation < 0 || operation > 2
