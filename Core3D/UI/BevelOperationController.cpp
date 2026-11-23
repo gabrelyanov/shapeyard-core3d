@@ -4,6 +4,7 @@
 //
 
 #include "BevelOperationController.hpp"
+#include "CheckedBitsGuard.hxx"
 #include "../OCCTKit/FilletFailureClassifier.hxx"
 #include "PlaneFrameSettle.hpp"
 
@@ -2179,6 +2180,8 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             aSource.bakedBooleanRecord = aBakedBooleanRecord;
             aSource.retainedCapture=aSelection.retainedCapture;
             aSource.bakesSavedCut=bakesSavedCut;
+            aSource.bakesRamp=myDoc->HasVariableRadiusFilletOwner(
+                aSelection.documentLabel);
             if (!aSelection.edgeTopologyIndices.empty()
                 && aSelection.edgeTopologyIndices
                     != aSource.edgeTopologyIndices) {
@@ -2229,6 +2232,8 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                     myDoc, aSource.label, aSource.bakesSavedCut)
                 || (aSource.bakesSavedCut
                     && !myDoc->CanBakeRecordForFaceEdit(aSource.label))
+                || (aSource.bakesRamp
+                    != myDoc->HasVariableRadiusFilletOwner(aSource.label))
                 || !myDoc->IsPresentationEditable(aSource.original)
                 || !myDoc->ShapeLabel(aSource.original).IsEqual(
                     aSource.label)
@@ -2745,12 +2750,30 @@ void BevelOperationController::acceptWorkerResult(
     notifyPreviewStateChanged();
 }
 
+namespace {
+// Every stored shape this Bevel shows or hides (the parts as stored), for CheckedBitsGuard.
+template <typename Sources>
+std::vector<TopoDS_Shape> StoredShapesOf(const Sources& theSources) noexcept {
+    std::vector<TopoDS_Shape> shapes;
+    try { for (const auto& aSource : theSources) shapes.push_back(aSource.stored); } catch (...) { shapes.clear(); }
+    return shapes;
+}
+std::vector<TopoDS_Shape> ShapesOf(const std::vector<Handle(AIS_Shape)>& thePresentations) noexcept {
+    std::vector<TopoDS_Shape> shapes;
+    try { for (const auto& aShown : thePresentations) if (!aShown.IsNull()) shapes.push_back(aShown->Shape()); }
+    catch (...) { shapes.clear(); }
+    return shapes;
+}
+} // namespace
+
 Standard_Boolean BevelOperationController::installPreview(
     const std::vector<TopoDS_Shape>& theResults) noexcept
 {
     if (theResults.size() != mySources.size() || myContext.IsNull()) {
         return Standard_False;
     }
+    // Hiding the parts must not change their stored bytes (Fable review 16 item 1).
+    const core3d::CheckedBitsGuard keepStoredBits(StoredShapesOf(mySources));
     std::vector<Handle(AIS_Shape)> aPresentations;
     try {
         OCC_CATCH_SIGNALS
@@ -2809,6 +2832,8 @@ Standard_Boolean BevelOperationController::discardPreview(
     }
 #endif
     bool didResolveAll = true;
+    // Showing the parts again on Cancel must not change their stored bytes (review 16 item 1).
+    const core3d::CheckedBitsGuard keepStoredBits(StoredShapesOf(mySources));
     if (!myContext.IsNull()) {
         for (const Handle(AIS_Shape)& aPreview : myPreviewResults) {
             if (aPreview.IsNull()) {
@@ -3140,6 +3165,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
 		// Phase 3: adopt the canonical solids as this operation's preview
 		// shapes, replacing the old presentations in the context.
 		Standard_Boolean aCanonicalAdopted = Standard_True;
+		const core3d::CheckedBitsGuard keepStoredBits(StoredShapesOf(mySources));
 		try {
 			OCC_CATCH_SIGNALS
 			for (Standard_Size anIndex = 0;
@@ -3253,6 +3279,8 @@ BevelApplyResult BevelOperationController::apply() noexcept
                 std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
                 staged=(!source.bakesSavedCut
                         ||myDoc->PrepareBooleanResultForFaceEdit(source.label))
+                    &&(!source.bakesRamp
+                        ||myDoc->ForgetVariableRadiusFilletOwner(source.label))
                     &&myDoc->CaptureFaceColours(source.label,1.0,faceLabels,colouredFaces)
                     &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex])
                     &&myDoc->CarryFaceColours(source.label,myPreviewResults[anIndex]->Shape(),
@@ -3359,6 +3387,8 @@ BevelApplyResult BevelOperationController::apply() noexcept
     // each face, as after a reopen), so the part is redrawn as Shell and Hole do.
     bool needsRedraw = std::any_of(mySources.begin(), mySources.end(),
         [](const Source& aSource) { return aSource.hasFaceLooks; });
+    // The committed shapes are stored now: redrawing them must leave the bytes as committed.
+    const core3d::CheckedBitsGuard keepCommittedBits(ShapesOf(myPreviewResults));
     try {
         for (Standard_Size anIndex = 0;
              anIndex < myPreviewResults.size(); ++anIndex) {
