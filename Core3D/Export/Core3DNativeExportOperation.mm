@@ -83,6 +83,7 @@
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <XCAFPrs_IndexedDataMapOfShapeStyle.hxx>
 #include <NCollection_DataMap.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <XSControl_WorkSession.hxx>
 
@@ -2452,10 +2453,21 @@ Standard_Integer RemoveCollapsedExportTriangles(
     return removed;
 }
 
+// Round 9 R9-S17 (CTO 22 Nov 22:05, 23 Nov 00:55 A, Fine only): the whole scope
+// was meshed with one fineness taken from its overall size, so a part alone came
+// out finer than the same part inside the whole model. With an own-size floor
+// (document units, > 0) each part, a direct child of the scope, is meshed at Fine
+// by its own unplaced size, so it exports the same mesh whole or selected and
+// copies that share one shape agree; the floor keeps a tiny part from blowing up
+// the file. Without a floor (saved texture layouts) and at every other quality the
+// scope stays one piece as before.
+constexpr double kOwnSizeFloorMeters = 1.0e-5;
+
 void MeshPrivateExportSurfaces(
     const TopoDS_Shape& compound,
     const std::shared_ptr<NativeExportState>& state,
-    const Message_ProgressRange& progress) {
+    const Message_ProgressRange& progress,
+    const double ownSizeFloor = 0.0) {
     BRep_Builder builder;
     Message_ProgressScope whole(progress, "Prepare private export mesh", 4);
     Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
@@ -2464,24 +2476,22 @@ void MeshPrivateExportSurfaces(
     drawer->SetDeviationAngle(state->deviationAngle);
     drawer->SetMaximalChordialDeviation(
         state->maximalChordialDeviation);
-    const Standard_Real deflection =
+    const Standard_Real wholeDeflection =
         StdPrs_ToolTriangulatedShape::GetDeflection(
             compound,
             drawer);
-    if (!std::isfinite(deflection) || deflection <= 0.0) {
+    if (!std::isfinite(wholeDeflection) || wholeDeflection <= 0.0) {
         throw NativeExportFailure(
             Core3DNativeExportErrorMeshingFailed,
             "The mesh deflection is invalid.");
     }
 
+    const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
+
     // Only analytic faces are remeshed. Mesh-only faces carry
     // authored triangles/UVs and never enter the mesher or Clean.
     // Everything here belongs to the deserialized private document.
-    TopoDS_Compound geometricFaces;
-    builder.MakeCompound(geometricFaces);
-    TopoDS_Shape meshingShape = compound;
-    bool hasGeometricFaces = false;
-    if (state->meshQuality != Core3DExportMeshQualityViewport) {
+    if (qualityPreset) {
         Standard_Integer faceCount = 0;
         for (TopExp_Explorer faces(compound, TopAbs_FACE); faces.More(); faces.Next()) {
             ThrowIfCancelled(state);
@@ -2490,18 +2500,56 @@ void MeshPrivateExportSurfaces(
                     "Mesh quality presets support up to 4,096 faces. Use viewport quality for this model.");
             }
             const TopoDS_Face face = TopoDS::Face(faces.Current());
+            if (!BRep_Tool::Surface(face).IsNull()) { BRepTools::Clean(face); }
+        }
+    }
+    struct MeshPiece {
+        TopoDS_Shape shape;
+        Standard_Real deflection;
+    };
+    std::vector<MeshPiece> pieces;
+    const auto addPiece = [&](const TopoDS_Shape& source, const Standard_Real pieceDeflection) {
+        if (!qualityPreset) {
+            pieces.push_back({source, pieceDeflection});
+            return;
+        }
+        TopoDS_Compound geometricFaces;
+        builder.MakeCompound(geometricFaces);
+        bool hasGeometricFaces = false;
+        for (TopExp_Explorer faces(source, TopAbs_FACE); faces.More(); faces.Next()) {
+            const TopoDS_Face face = TopoDS::Face(faces.Current());
             if (!BRep_Tool::Surface(face).IsNull()) {
-                BRepTools::Clean(face);
                 builder.Add(geometricFaces, face);
                 hasGeometricFaces = true;
             }
         }
-        meshingShape = geometricFaces;
+        if (hasGeometricFaces) { pieces.push_back({geometricFaces, pieceDeflection}); }
+    };
+    if (std::isfinite(ownSizeFloor) && ownSizeFloor > 0.0
+        && state->deflectionType == Aspect_TOD_RELATIVE
+        && state->meshQuality == Core3DExportMeshQualityFine
+        && compound.ShapeType() == TopAbs_COMPOUND) {
+        TopTools_MapOfShape seenParts;
+        for (TopoDS_Iterator parts(compound); parts.More(); parts.Next()) {
+            ThrowIfCancelled(state);
+            const TopoDS_Shape part = parts.Value().Located(TopLoc_Location());
+            if (!seenParts.Add(part)) { continue; }
+            const Standard_Real own = StdPrs_ToolTriangulatedShape::GetDeflection(part, drawer);
+            addPiece(part, std::max<Standard_Real>(
+                std::isfinite(own) && own > 0.0 ? own : wholeDeflection, ownSizeFloor));
+        }
+    } else {
+        addPiece(compound, wholeDeflection);
     }
-    const bool needsMeshing = state->meshQuality == Core3DExportMeshQualityViewport
-        ? !BRepTools::Triangulation(compound, deflection) : hasGeometricFaces;
-    if (needsMeshing) {
-        const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
+
+    Message_ProgressScope piecesScope(whole.Next(4), "Refine export mesh",
+        std::max<Standard_Integer>(1, static_cast<Standard_Integer>(pieces.size())));
+    std::int64_t meshedNodes = 0, meshedTriangles = 0;
+    for (const MeshPiece& piece : pieces) {
+        const TopoDS_Shape& meshingShape = piece.shape;
+        const Standard_Real deflection = piece.deflection;
+        Message_ProgressRange pieceRange = piecesScope.Next();
+        if (!qualityPreset && BRepTools::Triangulation(meshingShape, deflection)) { continue; }
         // Four existing attempts stay byte-for-byte in order. STL, OBJ and glTF may
         // make a fifth, bounded original-surface parameter refinement attempt.
         const bool parametricRetry = qualityPreset
@@ -2513,7 +2561,7 @@ void MeshPrivateExportSurfaces(
         // kept mesh up to about 10 % coarser, which the check below then refuses
         // (joined mug, 18 Nov: a saved Join's drawn ring face at 0.58 vs 0.532).
         const int maximumAttempts = qualityPreset ? (parametricRetry ? 5 : 4) : 2;
-        Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
+        Message_ProgressScope meshScope(pieceRange, "Refine export mesh", maximumAttempts);
         bool validMesh = false;
         for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
             ThrowIfCancelled(state);
@@ -2571,7 +2619,7 @@ void MeshPrivateExportSurfaces(
             }
             ThrowIfCancelled(state);
             if (qualityPreset) {
-                std::int64_t nodes = 0, triangles = 0;
+                std::int64_t nodes = meshedNodes, triangles = meshedTriangles;
                 for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
                     ThrowIfCancelled(state);
                     TopLoc_Location location;
@@ -2616,9 +2664,12 @@ void MeshPrivateExportSurfaces(
 #else
             (void)removedCollapsed;
 #endif
+            for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                TopLoc_Location location;
+                const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+                if (!mesh.IsNull()) { meshedNodes += mesh->NbNodes(); meshedTriangles += mesh->NbTriangles(); }
+            }
         }
-    } else {
-        whole.Next(4).Close();
     }
     // Desk lamp E-MID (17 Nov): at Viewport quality the private document keeps
     // the display mesh, which carries the same collapsed fillet-corner
@@ -2743,7 +2794,8 @@ NativeExportResult RunNativeExport(
                         state->selectedObjectsOnly,
                         [&](const TopoDS_Shape& shape) {
                             MeshPrivateExportSurfaces(
-                                shape, state, whole.Next(4));
+                                shape, state, whole.Next(4),
+                                kOwnSizeFloorMeters / state->sourceScene->metersPerUnit);
                         }, [&] {
                             return state->cancelled.load(
                                 std::memory_order_acquire);
@@ -2963,7 +3015,13 @@ NativeExportResult RunNativeExport(
                 builder.Add(compound, shape);
             }
 
-            MeshPrivateExportSurfaces(compound, state, whole.Next(4));
+            Standard_Real floorMetersPerUnit = 0.001;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(ocafDocument, floorMetersPerUnit)
+                || !std::isfinite(floorMetersPerUnit) || floorMetersPerUnit <= 0.0) {
+                floorMetersPerUnit = 0.001;
+            }
+            MeshPrivateExportSurfaces(compound, state, whole.Next(4),
+                kOwnSizeFloorMeters / floorMetersPerUnit);
 
             if (state->exportType == ExportTypeStl) {
                 Standard_Real metersPerUnit = 0.001;
