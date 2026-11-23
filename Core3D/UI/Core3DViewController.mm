@@ -8270,6 +8270,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return @[@(box[0]), @(box[1]), @(box[2]), @(box[3]), @(box[4]), @(box[5]), @(count)];
 }
 
+- (NSArray<NSNumber *> *_Nullable)debugExtrusionFitBox {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    double box[6] = {0, 0, 0, 0, 0, 0};
+    if (!GLController.viewer->debugExtrusionFitBox(box)) { return nil; }
+    return @[@(box[0]), @(box[1]), @(box[2]), @(box[3]), @(box[4]), @(box[5])];
+}
+
 - (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions {
     if (![NSThread isMainThread] || GLController == nil
         || GLController.viewer == nullptr) { return nil; }

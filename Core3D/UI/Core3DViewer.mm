@@ -15525,6 +15525,9 @@ std::vector<Handle(AIS_Shape)> Core3DViewer::toolPreviewPresentations() const no
             if (_objectInteractor->captureRadialArrayPreview(ring)) copies = ring.previewObjects;
         } else if (_objectInteractor->hasActiveMirror()) {
             copies = _objectInteractor->mirrorPreviewPresentations();
+        } else if (_shapeInteractor != nullptr
+                   && !_shapeInteractor->extrusionPreviewPresentation().IsNull()) {
+            copies.push_back(_shapeInteractor->extrusionPreviewPresentation());
         }
         for (const Handle(AIS_Shape)& copy : copies) {
             if (!copy.IsNull() && !copy->Shape().IsNull() && myContext->IsDisplayed(copy)) {
@@ -15546,6 +15549,68 @@ bool Core3DViewer::toolPreviewBounds(double out[6], std::size_t& count) const no
     return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2])
         && std::isfinite(out[3]) && std::isfinite(out[4]) && std::isfinite(out[5]);
 }
+
+bool Core3DViewer::shownPartBounds(double out[6], std::size_t& count) const noexcept {
+    count = 0;
+    try {
+        OCC_CATCH_SIGNALS
+        if (myContext.IsNull() || myDoc.IsNull()) return false;
+        std::vector<Handle(AIS_Shape)> parts;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(displayed);
+        for (AIS_ListIteratorOfListOfInteractive item(displayed); item.More(); item.Next()) {
+            const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(item.Value());
+            if (shape.IsNull() || shape->Shape().IsNull()) continue;
+            // Only the document's own parts: handles, guides and preview solids have no label in it.
+            if (Handle(CafShapePrs)::DownCast(shape).IsNull()
+                && myDoc->ShapeLabel(shape).IsNull()) continue;
+            parts.push_back(shape);
+        }
+        Bnd_Box box;
+        if (parts.empty() || !AddPresentationBounds(parts, box)
+            || box.IsVoid() || box.IsWhole() || box.IsOpen()) return false;
+        box.Get(out[0], out[1], out[2], out[3], out[4], out[5]);
+        for (int index = 0; index < 6; ++index) {
+            if (!std::isfinite(out[index])) return false;
+        }
+        count = parts.size();
+        return true;
+    } catch (...) {
+        count = 0;
+        return false;
+    }
+}
+
+#ifdef DEBUG
+bool Core3DViewer::debugExtrusionFitBox(double out[6]) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (myView.IsNull() || myView->Camera().IsNull() || _shapeInteractor == nullptr
+            || _shapeInteractor->extrusionPreviewPresentation().IsNull()) return false;
+        double box[2][6];
+        std::size_t parts = 0, previews = 0;
+        if (!shownPartBounds(box[0], parts) || !toolPreviewBounds(box[1], previews)) return false;
+        double low[2] = {1e9, 1e9}, high[2] = {-1e9, -1e9};
+        for (const auto& b : box) {
+            for (int corner = 0; corner < 8; ++corner) {
+                const gp_Pnt shown = myView->Camera()->Project(gp_Pnt(
+                    b[(corner & 1) ? 3 : 0], b[(corner & 2) ? 4 : 1], b[(corner & 4) ? 5 : 2]));
+                const double at[2] = {(shown.X() + 1.0) / 2.0, (1.0 - shown.Y()) / 2.0};
+                for (int axis = 0; axis < 2; ++axis) {
+                    if (!std::isfinite(at[axis])) return false;
+                    low[axis] = std::min(low[axis], at[axis]);
+                    high[axis] = std::max(high[axis], at[axis]);
+                }
+            }
+        }
+        out[0] = low[0]; out[1] = low[1]; out[2] = high[0]; out[3] = high[1];
+        out[4] = static_cast<double>(parts); out[5] = static_cast<double>(previews);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+#endif
 
 std::vector<Handle(AIS_Shape)> Core3DViewer::previewedResultPresentations() const noexcept {
     std::vector<Handle(AIS_Shape)> shown;

@@ -1853,6 +1853,9 @@ __attribute__((objc_subclassing_restricted))
 //! results): @[minX, minY, minZ, maxX, maxY, maxZ, count] in world units; nil
 //! when the tool shows none. Read-only evidence for Frame All with a tool open.
 - (NSArray<NSNumber *> *_Nullable)debugToolPreviewBounds;
+//! The same evidence while a Push-pull or Split preview is open (no scene snapshot
+//! then): @[minX, minY, maxX, maxY (viewport fractions), parts, previews]; nil otherwise.
+- (NSArray<NSNumber *> *_Nullable)debugExtrusionFitBox;
 //! The attached Move handles' Z arrow direction (world, unit); nil when none (K13 check).
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection;
 //! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).

@@ -346,6 +346,9 @@ namespace core3d {
         //! Read-only graphics source for Split's native boundary overlay. While
         //! the distance is zero/invalid, use the unchanged source presentation.
         Handle(AIS_Shape) splitBoundaryPresentation() const noexcept;
+        //! The result Push-pull or Split shows before its tick; null unless that
+        //! preview is Ready. Read-only.
+        Handle(AIS_Shape) extrusionPreviewPresentation() const noexcept;
         ExtrusionPreviewState extrusionPreviewState() const noexcept;
         Standard_Boolean applyExtrusion() noexcept;
         //! Return false only when an owned preview command could not be

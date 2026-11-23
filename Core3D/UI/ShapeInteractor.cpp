@@ -2585,6 +2585,11 @@ namespace core3d {
             ? _extrusion.originalPresentation : _extrusion.candidatePresentation;
     }
 
+    Handle(AIS_Shape) ShapeInteractor::extrusionPreviewPresentation() const noexcept {
+        return extrusionPreviewState() == ExtrusionPreviewState::Ready
+            ? _extrusion.candidatePresentation : Handle(AIS_Shape)();
+    }
+
 	ExtrusionPreviewState
 	ShapeInteractor::extrusionPreviewState() const noexcept {
 		if (!_extrusion.IsReady()) {
