@@ -79,6 +79,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
 #include <XCAFPrs.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <XCAFPrs_IndexedDataMapOfShapeStyle.hxx>
@@ -382,6 +383,13 @@ public:
         myPartNames[entry.ToCString()] = name;
     }
 
+    //! Round 10 R10P-S9: materials BridgeMetalPresetMaterials made for metal
+    //! presets. Their Kd stays the sRGB colour OCCT wrote for the preset
+    //! before, in every convention but Linear; they only gain Pm and Pr.
+    void MarkPresetMaterials(const std::vector<TDF_Label>& labels) {
+        myPresetMaterials = labels;
+    }
+
     Standard_Integer ExpectedTextureCount() const {
         return myCreatesMaterialFile ? myTextures.Extent() : 0;
     }
@@ -520,7 +528,11 @@ protected:
                 : (!material.IsNull() ? material->BaseColor().GetRGB()
                                      : XCAFDoc_VisMaterialCommon().DiffuseColor);
             double r = color.Red(), g = color.Green(), b = color.Blue();
-            if (myConvention == Core3DOBJColorConventionEncoded) {
+            const bool presetMetal = hasPBR && std::any_of(
+                myPresetMaterials.begin(), myPresetMaterials.end(),
+                [&material](const TDF_Label& label) { return material->Label().IsEqual(label); });
+            if (myConvention == Core3DOBJColorConventionEncoded
+                || (presetMetal && myConvention == Core3DOBJColorConventionCurrent)) {
                 color.Values(r, g, b, Quantity_TOC_sRGB);
             }
             const PBRScalars values{r, g, b,
@@ -606,6 +618,7 @@ private:
     }
 
     Core3DOBJColorConvention myConvention;
+    std::vector<TDF_Label> myPresetMaterials;
     std::shared_ptr<NativeExportState> myState;
     std::filesystem::path myPositionsPath;
     std::ofstream myPositions;
@@ -2084,6 +2097,82 @@ bool BridgeLegacySurfaceColors(
     return bridgedColor;
 }
 
+//! Round 10 R10P-S9: a metal preset from the Material tab (Chrome, Steel,
+//! Gold ...) lives in the part's label as an OCCT material number that the
+//! OBJ writer never reads, so OBJ wrote the blaster's Chrome barrel as a plain
+//! grey "mat_1". In this private export copy only, give such a part the metal
+//! the drawn scene shows (OcctSceneSnapshotBuilder ApplyPreset: the preset's
+//! PBR colour, metallic and roughness), named after the preset, so the writer
+//! emits "newmtl Chrome" with Pm and Pr. A colour picked over the preset stays
+//! the face colour (BridgeLegacySurfaceColors), as on screen. Parts with an
+//! authored PBR colour, plain parts and non-metal presets are not touched, so
+//! their bytes stay as before.
+std::vector<TDF_Label> BridgeMetalPresetMaterials(
+    const Handle(OcctDocument)& document,
+    const Handle(TDocStd_Document)& ocafDocument,
+    const TDF_LabelSequence& rootLabels) {
+    std::vector<TDF_Label> made;
+    const Handle(XCAFDoc_VisMaterialTool) materialTool =
+        XCAFDoc_DocumentTool::VisMaterialTool(ocafDocument->Main());
+    if (materialTool.IsNull()) {
+        return made;
+    }
+    // One material per preset and picked colour: the colour a user picks over
+    // a preset is the part's colour on screen (ApplyPreset, then the colour),
+    // and a VisMaterial hides the surface colour from the writer.
+    std::map<std::pair<int, int>, TDF_Label> presetMaterials;
+    std::map<int, int> presetUses;
+    for (Standard_Integer index = 1;
+         index <= rootLabels.Length();
+         ++index) {
+        const TDF_Label& label = rootLabels.Value(index);
+        XCAFDoc_VisMaterialPBR localPBR;
+        Graphic3d_NameOfMaterial preset = Graphic3d_NameOfMaterial_DEFAULT;
+        if (document->TryPBRMaterialForLabel(label, localPBR)
+            || !document->TryMaterialNameForLabel(label, preset)
+            || preset < Graphic3d_NameOfMaterial_Brass
+            || preset > Graphic3d_NameOfMaterial_Transparent) {
+            continue;
+        }
+        const Graphic3d_MaterialAspect aspect(preset);
+        const Graphic3d_PBRMaterial& pbr = aspect.PBRMaterial();
+        if (!aspect.MaterialType(Graphic3d_MATERIAL_PHYSIC)
+            || !(pbr.Metallic() > 0.5f)) {
+            continue;
+        }
+        Quantity_NameOfColor picked = Quantity_NOC_GRAY80;
+        const bool hasPicked = document->TryColorNameForLabel(label, picked)
+            && picked >= Quantity_NOC_BLACK && picked <= Quantity_NOC_WHITE;
+        TDF_Label& materialLabel = presetMaterials[{
+            static_cast<int>(preset), hasPicked ? static_cast<int>(picked) : -1}];
+        if (materialLabel.IsNull()) {
+            XCAFDoc_VisMaterialPBR metal;
+            metal.IsDefined = Standard_True;
+            metal.BaseColor = hasPicked
+                ? Quantity_ColorRGBA(Quantity_Color(picked), pbr.Color().Alpha())
+                : pbr.Color();
+            metal.Metallic = pbr.Metallic();
+            metal.Roughness = pbr.NormalizedRoughness();
+            metal.RefractionIndex = pbr.IOR();
+            Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+            material->SetPbrMaterial(metal);
+            // "Chrome", then "Chrome 2" ... for the same preset in another colour.
+            TCollection_AsciiString name(aspect.MaterialName());
+            const int sameName = presetUses[static_cast<int>(preset)]++;
+            if (sameName > 0) {
+                name += TCollection_AsciiString(" ") + TCollection_AsciiString(sameName + 1);
+            }
+            materialLabel = materialTool->AddMaterial(material, name);
+            if (materialLabel.IsNull()) {
+                continue;
+            }
+            made.push_back(materialLabel);
+        }
+        materialTool->SetShapeMaterial(label, materialLabel);
+    }
+    return made;
+}
+
 bool HasSTEPColorExpectation(
     const Handle(TDocStd_Document)& ocafDocument,
     const TDF_LabelSequence& rootLabels) {
@@ -3096,6 +3185,8 @@ NativeExportResult RunNativeExport(
                 // publishes the staged directory only after bundle validation.
                 TColStd_IndexedDataMapOfStringString fileInfo;
                 fileInfo.Add("Author", "Shapeyard 3D");
+                const std::vector<TDF_Label> presetMaterials =
+                    BridgeMetalPresetMaterials(document, ocafDocument, rootLabels);
                 const bool bridgedLegacySurfaceColor =
                     BridgeLegacySurfaceColors(
                     document,
@@ -3103,6 +3194,7 @@ NativeExportResult RunNativeExport(
                     rootLabels,
                     "The OBJ color table is unavailable.");
                 ValidatedOBJWriter writer(state);
+                writer.MarkPresetMaterials(presetMaterials);
                 if (!state->partNames.empty()) {
                     for (TDF_LabelSequence::Iterator root(rootLabels); root.More(); root.Next()) {
                         const auto named = state->partNames.find(
