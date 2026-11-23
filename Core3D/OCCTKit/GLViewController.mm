@@ -162,15 +162,26 @@ void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
     structure.Nullify();
 }
 
-// One depth step of GLView's supported ES2 16-bit fallback keeps coplanar
-// native edges visible. Two steps can expose a hidden edge in perspective
-// when the near plane is small compared with the model's camera distance.
+// Coplanar native edges stay visible by a small depth lead: in perspective a
+// pull toward the eye of a thousandth of the line's distance (independent of
+// the fitted near plane), in orthographic one ES2 16-bit depth step.
 // This only resolves coincident lines: normal scene depth testing stays on,
 // widths/model coordinates stay unchanged, and occColor supplies each style.
+#if DEBUG
+// DEBUG only: draw committed boundaries with the old fixed depth step (before round 10's repair), so a
+// picture check can show the fault and the repair in one run. Read when a boundary structure is built.
+static bool gDebugLegacyBoundaryDepthStep = false;
+#endif
 Handle(Graphic3d_ShaderProgram) NativeBoundaryLineShader(bool screenContour = false)
 {
     Handle(Graphic3d_ShaderProgram) program = new Graphic3d_ShaderProgram();
-    program->SetId(screenContour ? "shapeyard-native-contour-depth-v2" : "shapeyard-native-boundary-depth-v3");
+#if DEBUG
+    const bool legacyStep = !screenContour && gDebugLegacyBoundaryDepthStep;
+#else
+    constexpr bool legacyStep = false;
+#endif
+    program->SetId(screenContour ? "shapeyard-native-contour-depth-v2"
+        : (legacyStep ? "shapeyard-native-boundary-depth-v3" : "shapeyard-native-boundary-depth-v4"));
     program->SetHeader("#version 100");
     program->SetDefaultSampler(Standard_False);
     program->SetNbLightsMax(0);
@@ -187,14 +198,33 @@ void main() {
     if (gl_Position.z >= -gl_Position.w)
         gl_Position.z = max(-gl_Position.w, gl_Position.z - gl_Position.w * (2.0 / 65535.0));
 }
-)GLSL" : R"GLSL(
+)GLSL" : legacyStep ? R"GLSL(
 varying vec3 syBoundaryWorld;
 void main() {
     vec4 world = occModelWorldMatrix * occVertex;
     syBoundaryWorld = world.xyz / world.w;
     gl_Position = occProjectionMatrix * occWorldViewMatrix * world;
-    // OpenGL NDC spans [-1,1]: two NDC steps are one framebuffer step.
     gl_Position.z -= gl_Position.w * (2.0 / 65535.0);
+}
+)GLSL" : R"GLSL(
+varying vec3 syBoundaryWorld;
+void main() {
+    vec4 world = occModelWorldMatrix * occVertex;
+    syBoundaryWorld = world.xyz / world.w;
+    vec4 view = occWorldViewMatrix * world;
+    if (occProjectionMatrix[3][3] == 0.0) {
+        // Perspective: pull the line toward the eye along its own view ray by a thousandth of its
+        // distance (0.1 mm at 100 mm). It stays on the same pixel; only its depth moves, by a world
+        // distance that does not depend on the fitted near plane. The fixed depth-buffer step below
+        // did depend on it: with the near plane close to the eye it let lines many millimetres
+        // behind a surface draw through it (round 10 R10P-S11 = R9-S1).
+        view.xyz *= (1.0 - 1.0e-3);
+        gl_Position = occProjectionMatrix * view;
+    } else {
+        gl_Position = occProjectionMatrix * view;
+        // Orthographic depth is linear: OpenGL NDC spans [-1,1], two NDC steps are one framebuffer step.
+        gl_Position.z -= gl_Position.w * (2.0 / 65535.0);
+    }
 }
 )GLSL"));
     program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_FRAGMENT, R"GLSL(
@@ -6869,6 +6899,10 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 - (BOOL)debugMutateFirstBevelSourcePersistedTransform {
     return _viewer != nullptr
         && _viewer->DebugMutateFirstBevelSourcePersistedTransform();
+}
+
++ (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy {
+    gDebugLegacyBoundaryDepthStep = legacy;
 }
 
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {
