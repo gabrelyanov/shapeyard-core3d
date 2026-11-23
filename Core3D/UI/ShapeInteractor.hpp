@@ -245,6 +245,10 @@ namespace core3d {
 			//! Pure, fail-closed admission for the current Shape/Face/Edge
 			//! selection. Availability and begin share the same fresh capture.
 			Standard_Boolean canBeginBevelSelection() const noexcept;
+			//! R9-C3 (CTO 22 Nov 18:47): the selected part(s) are refused only
+			//! because more sharp edges than Bevel takes at once (64) would be
+			//! picked. Bevel stays offered then, dimmed with its reason.
+			Standard_Boolean bevelSelectionOverEdgeLimit() const noexcept;
 			Standard_Boolean canBeginRoundSelection() const noexcept;
 			Standard_Boolean beginRoundSelectionFromCurrentSelection() noexcept;
 			Standard_Boolean setRoundRadiusForSelection(Standard_Real radius) noexcept;
@@ -446,7 +450,8 @@ namespace core3d {
             ShapeSelectionMode mode,
             TopAbs_ShapeEnum topAbsMode) const noexcept;
 			Standard_Boolean tryCaptureBevelSelection(
-				std::vector<BevelSourceSelection>& selection) const noexcept;
+				std::vector<BevelSourceSelection>& selection,
+				Standard_Boolean* overEdgeLimit = nullptr) const noexcept;
 			Standard_Boolean captureRetainedBevelSource(
 				BevelSourceSelection& selection) const noexcept;
 			Standard_Boolean beginBevelSelectionFromCurrentSelection() noexcept;

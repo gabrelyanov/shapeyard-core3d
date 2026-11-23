@@ -4211,6 +4211,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         case BevelFailureKind::FlatSeamOnPaintedPart:
             result.kind = Core3DRoundFailureKindFlatSeamOnPaintedPart;
             break;
+        case BevelFailureKind::SmoothEdge:
+            result.kind = Core3DRoundFailureKindSmoothEdge;
+            break;
     }
     return result;
 }
@@ -5777,7 +5780,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 		|| ![edgeTopologyIndices isKindOfClass:NSArray.class]
 		|| edgeTopologyIndices.count < 1
 		|| edgeTopologyIndices.count
-			> BevelOperationController::kMaxSelectedEdges
+			> BevelOperationController::MaxSelectedEdges()
 		|| (_viewer->selectedCount() != 0 && !refreshesIdleBevel)
 		|| shapeInteractor->getSelectionMode() != ShapeSelectionMode::Edge
 		|| !shapeInteractor->selectionModeAuthorityIsExact()
