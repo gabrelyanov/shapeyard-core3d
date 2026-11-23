@@ -247,7 +247,7 @@ namespace core3d {
 			Standard_Boolean canBeginBevelSelection() const noexcept;
 			//! R9-C3 (CTO 22 Nov 18:47, 23 Nov 00:55): the selected solid part(s)
 			//! are refused only because more sharp edges than Bevel takes at once
-			//! (64) would be picked, or because a part is past Bevel's piece budget
+			//! (128) would be picked, or because a part is past Bevel's piece budget
 			//! (1,024). Bevel stays offered then, dimmed with its reason.
 			Standard_Boolean bevelSelectionOverEdgeLimit() const noexcept;
 			Standard_Boolean canBeginRoundSelection() const noexcept;
