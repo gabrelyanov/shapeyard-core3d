@@ -15150,6 +15150,25 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return moved;
 }
 
+- (BOOL)debugTurnCameraDegrees:(double)degrees {
+    if (!NSThread.isMainThread || !GLController.viewer || !std::isfinite(degrees)
+        || std::abs(degrees) > 90) return NO;
+    const auto view = GLController.viewer->ActiveView();
+    GLView *renderView = [GLController.view isKindOfClass:GLView.class] ? (GLView *)GLController.view : nil;
+    if (view.IsNull() || !renderView) return NO;
+    __block BOOL turned = NO;
+    [renderView performWithRenderingContext:^{
+        try {
+            const Handle(Graphic3d_Camera)& camera = view->Camera();
+            gp_Trsf turn;
+            turn.SetRotation(gp_Ax1(camera->Center(), camera->OrthogonalizedUp()), degrees * M_PI / 180.0);
+            camera->Transform(turn);
+            view->ZFitAll(); view->Redraw(); turned = YES;
+        } catch (...) {}
+    }];
+    return turned;
+}
+
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z {
     return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:NO];
 }
