@@ -52,6 +52,8 @@
 @property (nonatomic, readonly) CGSize drawableSize;
 @property (nonatomic, readonly, getter=isRenderLoopRunning) BOOL renderLoopRunning;
 @property (nonatomic, readonly) EAGLRenderingAPI renderingAPI;
+//! Depth bits of the drawable framebuffer: 24, or 16 on the ES2 fallback. 0 before it exists.
+@property (nonatomic, readonly) NSInteger depthBufferBits;
 
 //! One bounded main-thread observer. A successful actual presentation supplies
 //! its post-Draw camera; a later invalidation supplies nil exactly once and

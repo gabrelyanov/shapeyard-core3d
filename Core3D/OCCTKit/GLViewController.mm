@@ -57,6 +57,7 @@
 #include <TColStd_ListIteratorOfListOfInteger.hxx>
 #include <TColStd_ListOfInteger.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #ifdef DEBUG
@@ -167,15 +168,24 @@ void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
 // when the near plane is small compared with the model's camera distance.
 // This only resolves coincident lines: normal scene depth testing stays on,
 // widths/model coordinates stay unchanged, and occColor supplies each style.
-Handle(Graphic3d_ShaderProgram) NativeBoundaryLineShader(bool screenContour = false)
+// The floor grid keeps the near plane close to the eye (about 0.1 mm for a mug
+// 200 mm away), so one 16-bit step is there about 5 mm: an inside edge then shows
+// through a 3 mm wall. A 24-bit drawable takes a sixteenth of that step, which is
+// still sixteen of its own steps. Unknown depth keeps the 16-bit step.
+Handle(Graphic3d_ShaderProgram) NativeBoundaryLineShader(bool fineDepth, bool screenContour = false)
 {
     Handle(Graphic3d_ShaderProgram) program = new Graphic3d_ShaderProgram();
-    program->SetId(screenContour ? "shapeyard-native-contour-depth-v2" : "shapeyard-native-boundary-depth-v3");
+    // Programs are shared by identifier: the two depths must not share one.
+    program->SetId(screenContour
+        ? (fineDepth ? "shapeyard-native-contour-depth24-v1" : "shapeyard-native-contour-depth-v2")
+        : (fineDepth ? "shapeyard-native-boundary-depth24-v1" : "shapeyard-native-boundary-depth-v3"));
     program->SetHeader("#version 100");
     program->SetDefaultSampler(Standard_False);
     program->SetNbLightsMax(0);
     program->SetNbClipPlanesMax(8);
-    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_VERTEX, screenContour ? R"GLSL(
+    const TCollection_AsciiString depthStep(fineDepth
+        ? "#define SY_DEPTH_STEP (2.0 / 1048575.0)\n" : "#define SY_DEPTH_STEP (2.0 / 65535.0)\n");
+    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_VERTEX, depthStep + (screenContour ? R"GLSL(
 varying vec3 syBoundaryWorld;
 void main() {
     vec4 world = occModelWorldMatrix * occVertex;
@@ -185,7 +195,7 @@ void main() {
     // with the final draw matrix; AutoZFit can update depth after preparation.
     gl_Position.xy += occTexCoord.xy * gl_Position.w;
     if (gl_Position.z >= -gl_Position.w)
-        gl_Position.z = max(-gl_Position.w, gl_Position.z - gl_Position.w * (2.0 / 65535.0));
+        gl_Position.z = max(-gl_Position.w, gl_Position.z - gl_Position.w * SY_DEPTH_STEP);
 }
 )GLSL" : R"GLSL(
 varying vec3 syBoundaryWorld;
@@ -194,9 +204,9 @@ void main() {
     syBoundaryWorld = world.xyz / world.w;
     gl_Position = occProjectionMatrix * occWorldViewMatrix * world;
     // OpenGL NDC spans [-1,1]: two NDC steps are one framebuffer step.
-    gl_Position.z -= gl_Position.w * (2.0 / 65535.0);
+    gl_Position.z -= gl_Position.w * SY_DEPTH_STEP;
 }
-)GLSL"));
+)GLSL")));
     program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_FRAGMENT, R"GLSL(
 varying vec3 syBoundaryWorld;
 void main() {
@@ -216,6 +226,37 @@ void main() {
 }
 )GLSL"));
     return program;
+}
+
+// A part made of solids only, each with closed shells, whose triangles face outwards.
+// An inside-out or open import is not one, and keeps the wash on both sides.
+bool NativeIsClosedOutwardPart(const TopoDS_Shape& part)
+{
+    if (part.IsNull()) return false;
+    bool hasSolid = false;
+    for (TopExp_Explorer loose(part,TopAbs_FACE,TopAbs_SHELL); loose.More(); loose.Next()) return false;
+    for (TopExp_Explorer loose(part,TopAbs_SHELL,TopAbs_SOLID); loose.More(); loose.Next()) return false;
+    for (TopExp_Explorer solid(part,TopAbs_SOLID); solid.More(); solid.Next()) {
+        hasSolid = true;
+        for (TopExp_Explorer shell(solid.Current(),TopAbs_SHELL); shell.More(); shell.Next())
+            if (!BRep_Tool::IsClosed(shell.Current())) return false;
+        double volume = 0;
+        for (TopExp_Explorer face(solid.Current(),TopAbs_FACE); face.More(); face.Next()) {
+            TopLoc_Location location;
+            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(face.Current()),location);
+            if (mesh.IsNull()) return false;
+            const gp_Trsf placement = location.Transformation();
+            const bool turned = (face.Current().Orientation() == TopAbs_REVERSED) != placement.IsNegative();
+            for (int index=1; index<=mesh->NbTriangles(); ++index) {
+                int a,b,c; mesh->Triangle(index).Get(a,b,c);
+                if (turned) std::swap(b,c);
+                volume += mesh->Node(a).Transformed(placement).XYZ().Dot(
+                    mesh->Node(b).Transformed(placement).XYZ().Crossed(mesh->Node(c).Transformed(placement).XYZ()));
+            }
+        }
+        if (!(volume > 0)) return false;
+    }
+    return hasSolid;
 }
 
 // Optional selection geometry, built only from an already-published mesh.
@@ -1457,6 +1498,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     BOOL _selectedSurfaceAppearanceDirty;
     BOOL _debugForceSelectionOutlineFallback;
     BOOL _selectedSurfaceWasFace;
+    BOOL _selectedWashPartsClosed;
     Handle(Graphic3d_Structure) _selectedFaceWash;
     std::vector<TopoDS_Shape> _selectedWashFaces;
     std::vector<NativeContourGeometry> _selectedContourGeometry;
@@ -1589,6 +1631,11 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 - (GLView *)viewportView
 {
     return [self.view isKindOfClass:GLView.class] ? (GLView *)self.view : nil;
+}
+
+- (BOOL)hasFineDepth
+{
+    return [self viewportView].depthBufferBits >= 24;
 }
 
 - (CGFloat)drawableScale
@@ -2014,7 +2061,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             for (const auto& point : points) lines->AddVertex(gp_Pnt(point.XYZ()-origin));
             const auto group = boundaries->NewGroup();
             const Handle(Prs3d_LineAspect) aspect = new Prs3d_LineAspect(Quantity_NOC_BLACK,Aspect_TOL_SOLID,1);
-            aspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+            aspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader([self hasFineDepth]));
             group->SetGroupPrimitivesAspect(aspect->Aspect());
             group->AddPrimitiveArray(lines);
             boundaries->CalculateBoundBox();
@@ -2120,7 +2167,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             const auto group = boundaries->NewGroup();
             // Existing committed-edge look shared with Metal: black, one drawable pixel.
             const Handle(Prs3d_LineAspect) aspect = new Prs3d_LineAspect(Quantity_NOC_BLACK,Aspect_TOL_SOLID,1);
-            aspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+            aspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader([self hasFineDepth]));
             group->SetGroupPrimitivesAspect(aspect->Aspect());
             group->AddPrimitiveArray(lines);
             boundaries->CalculateBoundBox();
@@ -2173,6 +2220,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     if (_debugForceSelectionOutlineFallback) { fallback(); return; }
 #endif
     std::vector<TopoDS_Shape> faces;
+    std::vector<TopoDS_Shape> faceParts;
     const auto document = _viewer->getDocument();
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         if (document.IsNull() || faces.size() >= 50'000) {
@@ -2188,6 +2236,10 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         }
         if (shape.IsNull() || (faceMode && shape.ShapeType() != TopAbs_FACE)) { fallback(); return; }
         faces.push_back(shape);
+        const auto part = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+        if (faceMode && !part.IsNull() && (faceParts.empty() || !faceParts.back().IsSame(part->Shape())))
+            faceParts.push_back(part->Shape());
+        else if (faceMode && part.IsNull()) faceParts.push_back(TopoDS_Shape());
     }
     if (faces.empty()) { [self clearSelectedFaceWash]; _selectedContourGeometry.clear(); return; }
     const auto camera = _viewer->ActiveView()->Camera();
@@ -2229,6 +2281,12 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     std::vector<NativeContourVertex> contourTriangles;
     if (!sameGeometry) _selectedContourGeometry.clear();
     std::size_t contourVertexBudget=0, contourIndexBudget=0;
+    // The back of a face of a closed opaque part is never in view, so its wash must not be
+    // drawn. Pulled forward as it is, the far side of a cup's outer wall showed through the
+    // inner wall in streaks. The wash of an open or see-through part stays on both sides.
+    if (faceMode && !sameGeometry)
+        _selectedWashPartsClosed = std::all_of(faceParts.begin(), faceParts.end(), NativeIsClosedOutwardPart);
+    bool cullsWash = _selectedWashPartsClosed;
     for (const auto& item : scene->instances) {
         const auto selection = selected.find(item.entityIdentifier);
         if (selection == selected.end() || !item.visible) continue;
@@ -2241,6 +2299,12 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         }
         for (const auto face : selection->second.faces) {
             if (!visibleFaces.count(face)) { fallback(); return; }
+        }
+        for (std::size_t index = 0; index < mesh.primitives.size(); ++index) {
+            if (!selection->second.faces.count(mesh.primitives[index].faceIndex)) continue;
+            const auto material = item.primitiveBindings[index].materialIndex;
+            if (material >= scene->materials.size()
+                || scene->materials[material].alphaMode != core3d::scene::AlphaMode::Opaque) cullsWash = false;
         }
         const auto& m = item.worldFromObject.values;
         const auto world = [&](float x, float y, float z) {
@@ -2323,7 +2387,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             for (const auto& point : points) lines->AddVertex(gp_Pnt(point.XYZ()-origin));
             const auto lineGroup = wash->NewGroup();
             const Handle(Prs3d_LineAspect) lineAspect = new Prs3d_LineAspect(color,Aspect_TOL_SOLID,pixels);
-            lineAspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+            lineAspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader([self hasFineDepth]));
             lineGroup->SetGroupPrimitivesAspect(lineAspect->Aspect());
             lineGroup->AddPrimitiveArray(lines);
         }
@@ -2335,7 +2399,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             shading->SetColor(color);
             shading->Aspect()->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
             shading->Aspect()->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_DoubleSided);
-            shading->Aspect()->SetShaderProgram(NativeBoundaryLineShader(true));
+            shading->Aspect()->SetShaderProgram(NativeBoundaryLineShader([self hasFineDepth], true));
             const auto group = wash->NewGroup();
             group->SetGroupPrimitivesAspect(shading->Aspect());
             group->AddPrimitiveArray(triangles);
@@ -2348,6 +2412,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             aspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
             aspect->SetAlphaMode(Graphic3d_AlphaMode_Blend);
             aspect->SetPolygonOffsets(Aspect_POM_Fill,-1,-1);
+            // Auto would not cull: this aspect is translucent.
+            aspect->SetFaceCulling(cullsWash ? Graphic3d_TypeOfBackfacingModel_BackCulled
+                                             : Graphic3d_TypeOfBackfacingModel_DoubleSided);
             std::size_t vertices = 0, indices = 0;
             for (const auto& shape : faces) {
                 TopLoc_Location location;
@@ -2366,7 +2433,8 @@ static BOOL PlainTapsSelectBehindMoveHandles()
                 }
                 for (int index=1; index<=triangulation->NbTriangles(); ++index) {
                     int a,b,c; triangulation->Triangle(index).Get(a,b,c);
-                    if (shape.Orientation() == TopAbs_REVERSED) std::swap(b,c);
+                    // A mirrored placement turns the winding round, as StdPrs_ShadedShape does.
+                    if ((shape.Orientation() == TopAbs_REVERSED) != location.Transformation().IsNegative()) std::swap(b,c);
                     triangles->AddEdges(a,b,c);
                 }
                 const auto group = wash->NewGroup();
@@ -2441,7 +2509,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         _selectedEdgeStyle->SetColor(color);
         _selectedEdgeStyle->SetTransparency(1.0f - a);
         const Handle(Prs3d_LineAspect) line = new Prs3d_LineAspect(color, Aspect_TOL_SOLID, pixels);
-        line->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+        line->Aspect()->SetShaderProgram(NativeBoundaryLineShader([self hasFineDepth]));
         _selectedEdgeStyle->SetLineAspect(line);
         _selectedEdgeStyle->SetWireAspect(line);
         _selectedEdgeStyle->SetFreeBoundaryAspect(line);
@@ -2451,7 +2519,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         const Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d();
         aspect->SetInteriorColor(Quantity_ColorRGBA(color, a));
         aspect->SetLineWidth(pixels);
-        aspect->SetShaderProgram(NativeBoundaryLineShader());
+        aspect->SetShaderProgram(NativeBoundaryLineShader([self hasFineDepth]));
         aspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
         _selectedEdgeStyle->SetBasicFillAreaAspect(aspect);
         _selectedEdgeWidthPixels = pixels;

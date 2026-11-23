@@ -351,6 +351,9 @@ private:
         NSLog(@"Failed to make complete framebuffer object %u", status);
         return;
     }
+    GLint depthBits = 0;
+    glGetIntegerv(GL_DEPTH_BITS, &depthBits);
+    _depthBufferBits = glGetError() == GL_NO_ERROR ? depthBits : 0;
     glViewport(0, 0, myBackingWidth, myBackingHeight);
 }
 
