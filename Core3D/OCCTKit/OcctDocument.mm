@@ -13151,6 +13151,44 @@ TopoDS_Shape WorkingCopy(const TopoDS_Shape& shape) noexcept {
     return copy;
 }
 
+// Rebuilds only the faces, shells, solids and compounds that hold a child of a kind the
+// document does not store (IsAllowedGeometryTopologyChild), leaving those children out.
+// Everything else (and every edge and vertex) is shared, not copied. Returns how many were left out.
+static int DropLooseBooleanPieces(TopoDS_Shape& shape)
+{
+    int dropped = 0;
+    std::function<TopoDS_Shape(const TopoDS_Shape&)> rebuild = [&](const TopoDS_Shape& s) -> TopoDS_Shape {
+        if (s.IsNull() || s.ShapeType() >= TopAbs_WIRE) return s;
+        bool changed = false;
+        std::vector<TopoDS_Shape> kept;
+        for (TopoDS_Iterator it(s, Standard_False, Standard_False); it.More(); it.Next()) {
+            const TopoDS_Shape& child = it.Value();
+            if (!IsAllowedGeometryTopologyChild(s.ShapeType(), child.ShapeType())) {
+                ++dropped; changed = true; continue;
+            }
+            const TopoDS_Shape made = rebuild(child);
+            if (!made.IsEqual(child)) changed = true;
+            kept.push_back(made);
+        }
+        if (!changed) return s;
+        // Built FORWARD at the origin: the builder would otherwise turn each child by the
+        // parent's own orientation and placement. Both are given back at the end.
+        TopoDS_Shape copy = s.EmptyCopied();
+        copy.Orientation(TopAbs_FORWARD);
+        copy.Location(TopLoc_Location());
+        BRep_Builder builder;
+        for (const auto& child : kept) builder.Add(copy, child);
+        copy.Closed(s.Closed());
+        copy.Orientable(s.Orientable());
+        copy.Location(s.Location());
+        copy.Orientation(s.Orientation());
+        return copy;
+    };
+    const TopoDS_Shape made = rebuild(shape);
+    if (dropped > 0) shape = made;
+    return dropped;
+}
+
 bool BakedBooleanShapeOfManyCopies(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
     const std::vector<std::pair<TopoDS_Shape, gp_Trsf>>& toolsStored, int operation,
     TopoDS_Shape& result, std::string& refusal, double* removedShare, bool fileCopies) noexcept {
@@ -13232,6 +13270,11 @@ bool BakedBooleanShapeOfManyCopies(const TopoDS_Shape& targetStored, const gp_Tr
                 // A part that was several pieces may stay several pieces; one piece stays a solid.
                 result = solids == 1 ? only : (severalPieces && solids >= 2 ? TopoDS_Shape(pieces) : TopoDS_Shape());
             }
+            // A part that only touches another (a ring standing on the grid at a cylinder's
+            // foot, R9-S1) can leave loose points or lines hanging straight off a face or a
+            // solid. They are no border of anything, and the document cannot store them
+            // (the Join was refused as 'stale-source'): drop them before the checks below.
+            if (!result.IsNull()) DropLooseBooleanPieces(result);
             GProp_GProps mass;
             if (!result.IsNull()) BRepGProp::VolumeProperties(result, mass);
             if (result.IsNull() || !BRepCheck_Analyzer(result, Standard_True).IsValid()
