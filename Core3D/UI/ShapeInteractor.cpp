@@ -3313,13 +3313,21 @@ namespace core3d {
 						|| !IsBRepModelingLabel(myDoc, aLabel, Standard_True)
 						|| !myDoc->IsPresentationEditable(aPresentation)
 						|| aStoredShape.IsNull()
-						|| !aStoredShape.IsEqual(aShape)
-						|| !ConsumeBevelSourceTopologyBudget(
+						|| !aStoredShape.IsEqual(aShape)) {
+						return Standard_False;
+					}
+					if (!ConsumeBevelSourceTopologyBudget(
 							aShape,
 							aPerSourceTopologyLimit,
 							anAggregateTopologyLimit,
 							anAggregateTopologyCount,
 							aSourceTopologyCount)) {
+						// CTO 23 Nov 00:55 (3b): a solid part past Bevel's piece budget
+						// keeps Bevel offered, dimmed with the same reason as the
+						// edge limit.
+						if (theOverEdgeLimit != nullptr) {
+							*theOverEdgeLimit = Standard_True;
+						}
 						return Standard_False;
 					}
 
@@ -3452,8 +3460,13 @@ namespace core3d {
 						 anEdge.More(); anEdge.Next()) {
 						if (++anEdgeOccurrenceCount
 								> BevelOperationController::
-									kMaxSourceTopologyNodes
-							|| !captureEdge(TopoDS::Edge(anEdge.Current()))) {
+									kMaxSourceTopologyNodes) {
+							if (theOverEdgeLimit != nullptr) {
+								*theOverEdgeLimit = Standard_True;
+							}
+							return Standard_False;
+						}
+						if (!captureEdge(TopoDS::Edge(anEdge.Current()))) {
 							return Standard_False;
 						}
 					}
