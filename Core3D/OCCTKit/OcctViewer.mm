@@ -822,6 +822,8 @@ RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& theOwner,
     for (Standard_Integer anIndex = 1; anIndex <= anIntersector.NbPnt(); ++anIndex) {
         const gp_Pnt aWorld = anIntersector.Pnt(anIndex).Transformed(aToWorld);
         const Standard_Real anAlong = gp_Vec(theOrigin, aWorld).Dot(gp_Vec(theRay));
+        // Only what lies ahead of the pick's near point can be seen (as Core3DContext::MoveTo's ray).
+        if (!std::isfinite(anAlong) || anAlong < -1.0e-3) { continue; }
         if (!aFound || anAlong < theAlong) { theAlong = anAlong; aFound = true; }
     }
     return aFound ? RayMeets::Yes : RayMeets::No;
