@@ -14424,6 +14424,75 @@ Standard_Boolean OcctDocument::BuildHoleRow(
     } catch (...) { output.Nullify(); refusal = "invalid-result"; return Standard_False; }
 }
 
+// Build 11 red S2F1 (CTO 23 Nov 12:04): closing a hole with Defeaturing also tidies the faces around it into one
+// where they lie in one plane, even across lines the hole never touched: the flat seams of a part Joined by the
+// retained route (that route keeps them; only the baked Join tidies), or a Split line beside the hole. R9-C1 then
+// refused every smaller Hole size there. Here the closed part is made again from the part itself: a Fuse of the
+// part with its Defeaturing-closed form splits the closed faces back along every line of the part, and only the
+// faces that filled the hole's mouth may merge into the face around them (every edge and vertex of the part is
+// kept, except those of the removed wall and floor). A line the hole crosses ends on the mouth, so the mouth
+// would join the faces on both sides of it: the face count then falls short, and the caller refuses as before.
+static Standard_Boolean CloseHoleKeepingLines(
+    const TopoDS_Shape& source, const TopoDS_Shape& closed, const TopTools_IndexedMapOfShape& removedFaces,
+    const Standard_Integer expectedFaces, TopoDS_Shape& kept) noexcept {
+    kept.Nullify();
+    try {
+        OCC_CATCH_SIGNALS
+        if (source.IsNull() || closed.IsNull() || removedFaces.IsEmpty() || expectedFaces < 1) return Standard_False;
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(source); tools.Append(closed);
+        BRepAlgoAPI_Fuse fuse;
+        fuse.SetArguments(arguments); fuse.SetTools(tools);
+        fuse.SetRunParallel(Standard_False);
+        fuse.SetNonDestructive(Standard_True);
+        fuse.SetFuzzyValue(Precision::Confusion());
+        fuse.Build();
+        if (!fuse.IsDone() || fuse.HasErrors()) return Standard_False;
+        const TopoDS_Shape fused = SingleSolidOf(fuse.Shape());
+        if (fused.IsNull() || fused.ShapeType() != TopAbs_SOLID) return Standard_False;
+        // The part's own lines and corners, as the Fuse gave them back; the hole's wall and floor are not kept.
+        TopTools_IndexedMapOfShape removedEdges, removedVertices;
+        for (Standard_Integer i = 1; i <= removedFaces.Extent(); ++i) {
+            TopExp::MapShapes(removedFaces(i), TopAbs_EDGE, removedEdges);
+            TopExp::MapShapes(removedFaces(i), TopAbs_VERTEX, removedVertices);
+        }
+        TopTools_MapOfShape keep;
+        const auto keepImages = [&](const TopoDS_Shape& shape) {
+            const TopTools_ListOfShape& images = fuse.Modified(shape);
+            if (images.IsEmpty()) { if (!fuse.IsDeleted(shape)) keep.Add(shape); return; }
+            for (TopTools_ListIteratorOfListOfShape it(images); it.More(); it.Next()) keep.Add(it.Value());
+        };
+        TopTools_IndexedMapOfShape sourceEdges, sourceVertices;
+        TopExp::MapShapes(source, TopAbs_EDGE, sourceEdges);
+        TopExp::MapShapes(source, TopAbs_VERTEX, sourceVertices);
+        for (Standard_Integer i = 1; i <= sourceEdges.Extent(); ++i)
+            if (!removedEdges.Contains(sourceEdges(i))) keepImages(sourceEdges(i));
+        for (Standard_Integer i = 1; i <= sourceVertices.Extent(); ++i)
+            if (!removedVertices.Contains(sourceVertices(i))) keepImages(sourceVertices(i));
+        ShapeUpgrade_UnifySameDomain unify(fused, Standard_True, Standard_True, Standard_False);
+        unify.AllowInternalEdges(Standard_False);
+        if (!keep.IsEmpty()) unify.KeepShapes(keep);
+        unify.Build();
+        const TopoDS_Shape merged = SingleSolidOf(unify.Shape());
+        if (merged.IsNull() || merged.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(merged, Standard_True).IsValid()) return Standard_False;
+        TopTools_IndexedMapOfShape mergedFaces;
+        TopExp::MapShapes(merged, TopAbs_FACE, mergedFaces);
+        if (mergedFaces.Extent() != expectedFaces) return Standard_False;
+        // No line left loose inside a face (a crossed line kept as an inner edge is a lost line too).
+        for (TopExp_Explorer edge(merged, TopAbs_EDGE); edge.More(); edge.Next())
+            if (edge.Current().Orientation() == TopAbs_INTERNAL || edge.Current().Orientation() == TopAbs_EXTERNAL)
+                return Standard_False;
+        GProp_GProps closedMass, mergedMass;
+        BRepGProp::VolumeProperties(closed, closedMass);
+        BRepGProp::VolumeProperties(merged, mergedMass);
+        if (!(closedMass.Mass() > 0)
+            || std::abs(mergedMass.Mass() - closedMass.Mass()) > 1.0e-6 * closedMass.Mass()) return Standard_False;
+        kept = merged;
+        return Standard_True;
+    } catch (...) { kept.Nullify(); return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::BuildHoleResize(
     const TDF_Label& label, double radius, const gp_Pnt* nearPoint,
     TopoDS_Shape& output, std::string& refusal) const noexcept {
@@ -14466,7 +14535,7 @@ Standard_Boolean OcctDocument::BuildHoleResize(
         closing.SetRunParallel(Standard_False);
         closing.Build();
         if (!closing.IsDone() || closing.HasErrors()) { refusal = "cannot-close"; return Standard_False; }
-        const TopoDS_Shape closed = SingleSolidOf(closing.Shape());
+        TopoDS_Shape closed = SingleSolidOf(closing.Shape());
         if (closed.IsNull() || closed.ShapeType() != TopAbs_SOLID
             || !BRepCheck_Analyzer(closed, Standard_True).IsValid()) {
             refusal = "cannot-close"; return Standard_False;
@@ -14479,10 +14548,16 @@ Standard_Boolean OcctDocument::BuildHoleResize(
         TopTools_IndexedMapOfShape sourceFaces, closedFaces;
         TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
         TopExp::MapShapes(closed, TopAbs_FACE, closedFaces);
-        Standard_Integer removed = 0;
+        TopTools_IndexedMapOfShape removedFaces;
         for (Standard_Integer i = 1; i <= sourceFaces.Extent(); ++i)
-            if (closing.IsDeleted(sourceFaces(i))) ++removed;
-        if (closedFaces.Extent() < sourceFaces.Extent() - removed) {
+            if (closing.IsDeleted(sourceFaces(i))) removedFaces.Add(sourceFaces(i));
+        const Standard_Integer removed = removedFaces.Extent();
+        // Build 11 S2F1: a smaller hole, or a blind hole, first tries closing that keeps every line the hole does
+        // not cross (a Join's flat seam, a Split line beside it); only when that too loses a line is it refused.
+        TopoDS_Shape keptLines;
+        if (closedFaces.Extent() < sourceFaces.Extent() - removed
+            && ((radius > hole.radius && hole.depth <= 0)
+                || !CloseHoleKeepingLines(source, closed, removedFaces, sourceFaces.Extent() - removed, keptLines))) {
             if (!(radius > hole.radius) || hole.depth > 0) { refusal = "merges-faces"; return Standard_False; }
             // Along the old wall only (its length and a little past the far end, so no skin is
             // left there), never on through the line into other material behind the part.
@@ -14518,6 +14593,7 @@ Standard_Boolean OcctDocument::BuildHoleResize(
             refusal.clear();
             return Standard_True;
         }
+        if (!keptLines.IsNull()) closed = keptLines;
         GProp_GProps before, between;
         BRepGProp::VolumeProperties(source, before);
         BRepGProp::VolumeProperties(closed, between);
