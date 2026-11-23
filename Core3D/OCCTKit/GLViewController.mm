@@ -1499,6 +1499,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     BOOL _debugForceSelectionOutlineFallback;
     BOOL _selectedSurfaceWasFace;
     BOOL _selectedWashPartsClosed;
+    // What the last built wash did (test readout): back faces left out, hidden primitives seen on its parts.
+    BOOL _selectedWashCulled;
+    NSInteger _selectedWashHiddenPrimitives;
     Handle(Graphic3d_Structure) _selectedFaceWash;
     std::vector<TopoDS_Shape> _selectedWashFaces;
     std::vector<NativeContourGeometry> _selectedContourGeometry;
@@ -1967,6 +1970,12 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     const Quantity_Color colour = style->Color();
     return @[@(colour.Red()), @(colour.Green()), @(colour.Blue())];
 }
+
+- (nullable NSArray<NSNumber *> *)debugSelectedFaceWashState {
+    if (!NSThread.isMainThread || _viewer == nullptr) return nil;
+    return @[@(_selectedFaceWash.IsNull() ? 0 : 1), @(_selectedWashCulled ? 1 : 0),
+             @(_selectedWashPartsClosed ? 1 : 0), @(_selectedWashHiddenPrimitives)];
+}
 #endif
 
 - (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity {
@@ -2291,6 +2300,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             _selectedWashPartsClosed = NativeIsClosedOutwardPart(faceParts.FindKey(index));
     }
     bool cullsWash = _selectedWashPartsClosed;
+    NSInteger hiddenPrimitives = 0;
     for (const auto& item : scene->instances) {
         const auto selection = selected.find(item.entityIdentifier);
         if (selection == selected.end() || !item.visible) continue;
@@ -2307,7 +2317,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         // Every drawn face of the part, not only the picked ones (Fable review 16): a hidden or see-through face
         // elsewhere on the part lets its inside, and so the back of the picked face, come into view.
         for (std::size_t index = 0; index < mesh.primitives.size(); ++index) {
-            if (!item.primitiveBindings[index].visible) { cullsWash = false; continue; }
+            if (!item.primitiveBindings[index].visible) { cullsWash = false; ++hiddenPrimitives; continue; }
             const auto material = item.primitiveBindings[index].materialIndex;
             if (material >= scene->materials.size()
                 || scene->materials[material].alphaMode != core3d::scene::AlphaMode::Opaque) cullsWash = false;
@@ -2419,6 +2429,8 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             aspect->SetAlphaMode(Graphic3d_AlphaMode_Blend);
             aspect->SetPolygonOffsets(Aspect_POM_Fill,-1,-1);
             // Auto would not cull: this aspect is translucent.
+            _selectedWashCulled = cullsWash;
+            _selectedWashHiddenPrimitives = hiddenPrimitives;
             aspect->SetFaceCulling(cullsWash ? Graphic3d_TypeOfBackfacingModel_BackCulled
                                              : Graphic3d_TypeOfBackfacingModel_DoubleSided);
             std::size_t vertices = 0, indices = 0;
