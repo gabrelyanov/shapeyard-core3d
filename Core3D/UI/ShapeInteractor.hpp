@@ -250,6 +250,9 @@ namespace core3d {
 			//! (128) would be picked, or because a part is past Bevel's piece budget
 			//! (1,024). Bevel stays offered then, dimmed with its reason.
 			Standard_Boolean bevelSelectionOverEdgeLimit() const noexcept;
+			//! CTO 23 Nov 03:55 (1): the refusal above is the piece budget (the
+			//! part is too detailed), not the edge limit; its own sentence.
+			Standard_Boolean bevelSelectionTooDetailed() const noexcept;
 			Standard_Boolean canBeginRoundSelection() const noexcept;
 			Standard_Boolean beginRoundSelectionFromCurrentSelection() noexcept;
 			Standard_Boolean setRoundRadiusForSelection(Standard_Real radius) noexcept;
@@ -449,7 +452,8 @@ namespace core3d {
             TopAbs_ShapeEnum topAbsMode) const noexcept;
 			Standard_Boolean tryCaptureBevelSelection(
 				std::vector<BevelSourceSelection>& selection,
-				Standard_Boolean* overEdgeLimit = nullptr) const noexcept;
+				Standard_Boolean* overEdgeLimit = nullptr,
+				Standard_Boolean* tooDetailed = nullptr) const noexcept;
 			Standard_Boolean captureRetainedBevelSource(
 				BevelSourceSelection& selection) const noexcept;
 			Standard_Boolean beginBevelSelectionFromCurrentSelection() noexcept;

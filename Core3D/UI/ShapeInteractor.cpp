@@ -3204,10 +3204,14 @@ namespace core3d {
 
 	Standard_Boolean ShapeInteractor::tryCaptureBevelSelection(
 		std::vector<BevelSourceSelection>& theSelection,
-		Standard_Boolean* theOverEdgeLimit) const noexcept {
+		Standard_Boolean* theOverEdgeLimit,
+		Standard_Boolean* theTooDetailed) const noexcept {
 		theSelection.clear();
 		if (theOverEdgeLimit != nullptr) {
 			*theOverEdgeLimit = Standard_False;
+		}
+		if (theTooDetailed != nullptr) {
+			*theTooDetailed = Standard_False;
 		}
 		if (myContext.IsNull() || myDoc.IsNull()
 			|| _bevelController == nullptr
@@ -3342,6 +3346,9 @@ namespace core3d {
 						// edge limit.
 						if (theOverEdgeLimit != nullptr) {
 							*theOverEdgeLimit = Standard_True;
+						}
+						if (theTooDetailed != nullptr) {
+							*theTooDetailed = Standard_True;
 						}
 						return Standard_False;
 					}
@@ -3479,6 +3486,9 @@ namespace core3d {
 							if (theOverEdgeLimit != nullptr) {
 								*theOverEdgeLimit = Standard_True;
 							}
+							if (theTooDetailed != nullptr) {
+								*theTooDetailed = Standard_True;
+							}
 							return Standard_False;
 						}
 						if (!captureEdge(TopoDS::Edge(anEdge.Current()))) {
@@ -3531,6 +3541,15 @@ namespace core3d {
 		std::vector<BevelSourceSelection> aSelection;
 		Standard_Boolean anOverLimit = Standard_False;
 		return !tryCaptureBevelSelection(aSelection, &anOverLimit) && anOverLimit;
+	}
+
+	Standard_Boolean ShapeInteractor::bevelSelectionTooDetailed() const noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		Standard_Boolean aTooDetailed = Standard_False;
+		return !tryCaptureBevelSelection(aSelection, nullptr, &aTooDetailed) && aTooDetailed;
 	}
 
 	Standard_Boolean ShapeInteractor::canBeginRoundSelection() const noexcept {
