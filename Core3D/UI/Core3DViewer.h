@@ -1056,10 +1056,11 @@ namespace core3d {
         //! World box (min x,y,z, max x,y,z) of toolPreviewPresentations(); false
         //! when there is none. `count` is the number of preview solids. Read-only.
         bool toolPreviewBounds(double out[6], std::size_t& count) const noexcept;
-        //! World box of the document's parts that are on screen, read from their
-        //! presentations (no scene snapshot: that refuses while Push-pull or Split
-        //! holds its preview command). `count` is the number of parts. Read-only.
-        bool shownPartBounds(double out[6], std::size_t& count) const noexcept;
+        //! Adds the world box of the document's parts that are on screen, read from
+        //! their presentations (no scene snapshot: that refuses while Push-pull or
+        //! Split holds its preview command). `count` is the number of parts; 0 is
+        //! not a failure (Split hides its one source part). Read-only.
+        bool addShownPartBounds(Bnd_Box& bounds, std::size_t& count) const noexcept;
 #ifdef DEBUG
         //! Push-pull or Split preview open: the box on screen of the shown parts
         //! and the preview, as viewport fractions (minX, minY, maxX, maxY; origin

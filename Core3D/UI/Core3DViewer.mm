@@ -14901,6 +14901,21 @@ bool Core3DViewer::frameModel(
     Handle(Graphic3d_Camera) previous;
     try {
         OCC_CATCH_SIGNALS
+        // A Ready Push-pull or Split preview holds its own document command, and
+        // the scene snapshot refuses during one (unchanged). Camera only: fit the
+        // parts on screen and that preview from their presentations instead.
+        if (includeToolPreviews && _shapeInteractor != nullptr
+            && !_shapeInteractor->extrusionPreviewPresentation().IsNull()) {
+            if ((_nativeOpeningState && _nativeOpeningState->loftRollbackUnproven)
+                || hasUnresolvedEdit()) { return false; }
+            std::size_t partCount = 0;
+            Bnd_Box bounds;
+            if (!addShownPartBounds(bounds, partCount)
+                || !AddPresentationBounds(toolPreviewPresentations(), bounds)
+                || bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
+            return FitCameraToBounds(myView, bounds,
+                targetX, targetY, targetWidth, targetHeight, fillTarget);
+        }
         // Reuse the bounded, document-authoritative extraction contract. This
         // reads existing triangulations only and excludes gizmos/preview actors.
         const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
@@ -15550,7 +15565,7 @@ bool Core3DViewer::toolPreviewBounds(double out[6], std::size_t& count) const no
         && std::isfinite(out[3]) && std::isfinite(out[4]) && std::isfinite(out[5]);
 }
 
-bool Core3DViewer::shownPartBounds(double out[6], std::size_t& count) const noexcept {
+bool Core3DViewer::addShownPartBounds(Bnd_Box& bounds, std::size_t& count) const noexcept {
     count = 0;
     try {
         OCC_CATCH_SIGNALS
@@ -15566,13 +15581,8 @@ bool Core3DViewer::shownPartBounds(double out[6], std::size_t& count) const noex
                 && myDoc->ShapeLabel(shape).IsNull()) continue;
             parts.push_back(shape);
         }
-        Bnd_Box box;
-        if (parts.empty() || !AddPresentationBounds(parts, box)
-            || box.IsVoid() || box.IsWhole() || box.IsOpen()) return false;
-        box.Get(out[0], out[1], out[2], out[3], out[4], out[5]);
-        for (int index = 0; index < 6; ++index) {
-            if (!std::isfinite(out[index])) return false;
-        }
+        // None is not a failure: Split hides its one source part while it shows its result.
+        if (!AddPresentationBounds(parts, bounds)) return false;
         count = parts.size();
         return true;
     } catch (...) {
@@ -15589,7 +15599,13 @@ bool Core3DViewer::debugExtrusionFitBox(double out[6]) const noexcept {
             || _shapeInteractor->extrusionPreviewPresentation().IsNull()) return false;
         double box[2][6];
         std::size_t parts = 0, previews = 0;
-        if (!shownPartBounds(box[0], parts) || !toolPreviewBounds(box[1], previews)) return false;
+        Bnd_Box shownParts;
+        if (!addShownPartBounds(shownParts, parts) || !toolPreviewBounds(box[1], previews)) return false;
+        if (shownParts.IsVoid()) {
+            std::copy(box[1], box[1] + 6, box[0]);
+        } else {
+            shownParts.Get(box[0][0], box[0][1], box[0][2], box[0][3], box[0][4], box[0][5]);
+        }
         double low[2] = {1e9, 1e9}, high[2] = {-1e9, -1e9};
         for (const auto& b : box) {
             for (int corner = 0; corner < 8; ++corner) {
