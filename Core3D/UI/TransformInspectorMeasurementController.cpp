@@ -2846,6 +2846,7 @@ TransformInspectorMeasurementController::commitPosition(
         gp_Trsf aCandidateTransform = exactBaseline.transform;
         TopoDS_Shape candidateShape = aStoredShape;
         int inspectorPrimitiveKind = 0;
+        std::optional<OrdinaryRotationAroundPivot> pivotTurn;
         if(unchangedPlacement) {
             // Reserved no-op proceeds with the exact original transform to
             // ordinary source/catalog proof, without a receipt-only command.
@@ -2925,6 +2926,35 @@ TransformInspectorMeasurementController::commitPosition(
             rotation.Normalize();
             aCandidateTransform.SetRotationPart(rotation);
             aCandidateTransform.SetScaleFactor(exactBaseline.transform.ScaleFactor());
+            // R9-C2 (CTO 22 Nov 13:58): a turn typed in By numbers turns the part round its own
+            // centre (the middle of its box), as the ring does, never round its stored origin
+            // (the base of a new Cube, Cylinder or Cone). By numbers shows that centre as Position,
+            // so the typed Position stays true. The plain Rotation entry keeps its origin pivot.
+            if (displayedRotation) {
+                TransformInspectorBoundsValue localBox;
+                bool hasBox = myImpl->lookup({anEditContext.document, anEditContext.storedShape}, localBox);
+                if (!hasBox) {
+                    Bnd_Box aBounds;
+                    BRepBndLib::AddOptimal(aStoredShape, aBounds, Standard_False, Standard_False);
+                    WidenBoundsToFreeformFaceExtremes(aStoredShape, aBounds);
+                    hasBox = TryBoundsValue(aBounds, localBox);
+                }
+                if (hasBox) {
+                    const gp_Pnt localCentre(
+                        localBox.bounds[0] * 0.5 + localBox.bounds[3] * 0.5,
+                        localBox.bounds[1] * 0.5 + localBox.bounds[4] * 0.5,
+                        localBox.bounds[2] * 0.5 + localBox.bounds[5] * 0.5);
+                    OrdinaryRotationAroundPivot turn;
+                    turn.pivot = localCentre.Transformed(exactBaseline.transform);
+                    gp_Quaternion step = rotation * exactBaseline.transform.GetRotation().Inverted();
+                    step.Normalize();
+                    turn.delta.SetRotation(step);
+                    turn.delta.SetTranslationPart(
+                        turn.pivot.XYZ() - turn.pivot.Transformed(turn.delta).XYZ());
+                    aCandidateTransform = turn.delta * exactBaseline.transform;
+                    pivotTurn = turn;
+                }
+            }
         } else {
             aCandidateTransform.SetTranslationPart(gp_XYZ(
                 aCandidatePosition.x, aCandidatePosition.y, aCandidatePosition.z));
@@ -2956,6 +2986,7 @@ TransformInspectorMeasurementController::commitPosition(
             change.inspectorPrimitiveBounds = dimensionBounds;
         }
         change.transform = aCandidateTransform;
+        change.rotationAroundPivot = pivotTurn;
         change.bakeSavedCut = sizes && !unchangedPlacement && bool(retainedPlacement.value);
         change.operation = (scales || sizes) ? OrdinaryTransformOperation::Scale
             : rotates ? OrdinaryTransformOperation::Rotate : OrdinaryTransformOperation::Translate;
