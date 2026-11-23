@@ -15169,6 +15169,28 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return turned;
 }
 
+// The ray the selector really used for the last pick (its near and far
+// picked points): the tap's pixel goes through OCCT's own pixel convention,
+// which can lie a pixel away from the projected world point. Reported as
+// pickNearX/Y/Z; ConvertWithProj's origin as projX/Y/Z. Falls back to
+// ConvertWithProj when the selector has no ray.
+static void DebugPickRay(const Handle(V3d_View)& view, const Handle(AIS_InteractiveContext)& context,
+                         int px, int py, NSMutableDictionary *answer,
+                         double& ox, double& oy, double& oz, double& dx, double& dy, double& dz)
+{
+    view->ConvertWithProj(px,py,ox,oy,oz,dx,dy,dz);
+    answer[@"projX"]=@(ox); answer[@"projY"]=@(oy); answer[@"projZ"]=@(oz);
+    const auto selector = context->MainSelector();
+    if (selector.IsNull()) return;
+    const auto& volume = selector->GetManager();
+    const gp_Pnt near = volume.GetNearPickedPnt(), far = volume.GetFarPickedPnt();
+    if (!(near.Distance(far) > Precision::Confusion())) return;
+    const gp_Dir direction(gp_Vec(near, far));
+    ox = near.X(); oy = near.Y(); oz = near.Z();
+    dx = direction.X(); dy = direction.Y(); dz = direction.Z();
+    answer[@"pickNearX"]=@(ox); answer[@"pickNearY"]=@(oy); answer[@"pickNearZ"]=@(oz);
+}
+
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z {
     return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:NO];
 }
@@ -15244,14 +15266,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
                     // small diagnostic fixtures. It cannot change detection.
                     if (faces.Extent()<=128) {
                         double ox,oy,oz,dx,dy,dz;
-                        view->ConvertWithProj(px,py,ox,oy,oz,dx,dy,dz);
+                        DebugPickRay(view, context, px, py, answer, ox,oy,oz,dx,dy,dz);
                         // Intersect in the stored shape's frame: TopoDS::Moved
                         // rejects authored scale, while an inverse ray preserves
                         // face identity without modifying/copying the geometry.
                         const gp_Trsf inverse = shape->Transformation().Inverted();
                         IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
                         ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
-                                           gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e6);
+                                           gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e7);
                         if (ray.IsDone()) {
                             double closest=1e6; int face=-1;
                             for (int i=1;i<=ray.NbPnt();++i) {
@@ -15309,11 +15331,11 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
             answer[@"detectedFace"]=@(faces.FindIndex(owner->Shape())-1);
             if (faces.Extent()>128) return;
             double ox,oy,oz,dx,dy,dz;
-            view->ConvertWithProj(px,py,ox,oy,oz,dx,dy,dz);
+            DebugPickRay(view, context, px, py, answer, ox,oy,oz,dx,dy,dz);
             const gp_Trsf inverse = shape->Transformation().Inverted();
             IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
             ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
-                               gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e6);
+                               gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e7);
             if (ray.IsDone()) {
                 double closest=1e6; int face=-1;
                 for (int i=1;i<=ray.NbPnt();++i) {

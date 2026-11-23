@@ -234,25 +234,46 @@ void Core3DContext::passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boo
         const gp_Dir ray(gp_Vec(origin, far));
         if (!IsEdgeOnFaceHit(selector->PickedData(firstRank), ray)) return;
 
-        // The next detected face that faces the camera, in OCCT's order (the
-        // detected list already holds only what the filters let through).
-        Handle(SelectMgr_EntityOwner) next;
-        Standard_Integer nextRank = 0;
-        bool passedFirst = false;
-        for (InitDetected(); MoreDetected(); NextDetected()) {
+        // The next detected face that faces the camera (the detected list
+        // already holds only what the filters let through). OCCT's order can
+        // put a face that only lies within the pick tolerance (a rim a pixel
+        // beside the ray) before the face the ray really meets, so among the
+        // first few facing faces in the first's layer the one the exact ray
+        // meets nearest is taken; when the ray meets none of them, or one of
+        // them is too large to test, OCCT's first facing face and its own hit
+        // point stay.
+        const Standard_Integer firstLayer = selector->PickedData(firstRank).ZLayerPosition;
+        Handle(SelectMgr_EntityOwner) next, occtNext;
+        Standard_Integer nextRank = 0, occtNextRank = 0;
+        Standard_Real nextAlong = 0.0, occtNextAlong = 0.0;
+        bool nextMet = false, passedFirst = false, unknown = false;
+        Standard_Integer looked = 0;
+        for (InitDetected(); MoreDetected() && looked < 16; NextDetected()) {
             const Handle(SelectMgr_EntityOwner) owner = DetectedCurrentOwner();
             if (owner == first) { passedFirst = true; continue; }
             if (!passedFirst || Handle(StdSelect_BRepOwner)::DownCast(owner).IsNull()) continue;
             const Standard_Integer rank = PickedRank(selector, owner);
             if (rank < 1 || !IsCameraFacingFaceHit(selector->PickedData(rank), ray)) continue;
-            next = owner; nextRank = rank;
-            break;
+            // Layers drawn on top win by OCCT's own rule, whatever the depth.
+            if (selector->PickedData(rank).ZLayerPosition != firstLayer) {
+                if (next.IsNull()) return;
+                break;
+            }
+            ++looked;
+            if (next.IsNull()) {
+                next = occtNext = owner; nextRank = occtNextRank = rank;
+                nextAlong = occtNextAlong = gp_Vec(origin, selector->PickedData(rank).Point).Dot(gp_Vec(ray));
+            }
+            Standard_Real along = 0.0;
+            const RayMeets candidate = NearestRayHitAlong(owner, origin, ray, along);
+            if (candidate == RayMeets::Unknown) { unknown = true; break; }
+            if (candidate == RayMeets::Yes && (!nextMet || along < nextAlong)) {
+                next = owner; nextRank = rank; nextAlong = along; nextMet = true;
+            }
         }
         if (next.IsNull()) return;
+        if (unknown) { next = occtNext; nextRank = occtNextRank; nextAlong = occtNextAlong; }
         const SelectMgr_SortCriterion& nextHit = selector->PickedData(nextRank);
-        // Layers drawn on top win by OCCT's own rule, whatever the depth.
-        if (nextHit.ZLayerPosition != selector->PickedData(firstRank).ZLayerPosition) return;
-        const Standard_Real nextAlong = gp_Vec(origin, nextHit.Point).Dot(gp_Vec(ray));
         Standard_Real firstAlong = 0.0;
         const RayMeets meets = NearestRayHitAlong(first, origin, ray, firstAlong);
         if (meets == RayMeets::Unknown) return;
