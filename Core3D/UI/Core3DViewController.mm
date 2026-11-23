@@ -8308,11 +8308,6 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return [GLController debugSelectedPartHighlightRGB];
 }
 
-- (NSArray<NSNumber *> *_Nullable)debugSelectedFaceWashState {
-    if (![NSThread isMainThread] || GLController == nil) { return nil; }
-    return [GLController debugSelectedFaceWashState];
-}
-
 - (NSInteger)debugPartsWithOwnHighlightStyle {
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return -1; }
     const Handle(AIS_InteractiveContext) context = GLController.viewer->AisContext();

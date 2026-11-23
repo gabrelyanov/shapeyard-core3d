@@ -1854,8 +1854,6 @@ __attribute__((objc_subclassing_restricted))
 - (void)debugSetForceSelectionOutlineFallback:(BOOL)force;
 //! The colour (r, g, b, 0...1) the engine highlight draws the first selected part in.
 - (NSArray<NSNumber *> *_Nullable)debugSelectedPartHighlightRGB;
-//! The last Face-mode wash: [built 0/1, back faces left out 0/1, picked parts closed 0/1, hidden primitives seen].
-- (NSArray<NSNumber *> *_Nullable)debugSelectedFaceWashState;
 //! Where the real hit test finds each Scale handle (X, Y, Z cube, uniform sphere) as
 //! fractions of the viewport [x0,y0,...,x3,y3], -1 when not found; nil without a gizmo.
 - (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions;
