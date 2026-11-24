@@ -176,6 +176,10 @@ static bool gDebugLegacyBoundaryDepthStep = false;
 #endif
 // Fable review 22 P1: set only by a DEBUG check (debugSetSelectedOutlineKeyedOnProjectionCounter).
 static bool gDebugOutlineKeyedOnProjectionCounter = false;
+#if DEBUG
+// CTO 24 Nov 06:48 (hand-in proof 1): selected-outline rebuilds (scene snapshot + wash) counted for the checks.
+static NSUInteger gDebugSelectedOutlineRebuilds = 0;
+#endif
 Handle(Graphic3d_ShaderProgram) NativeBoundaryLineShader(bool screenContour = false)
 {
     Handle(Graphic3d_ShaderProgram) program = new Graphic3d_ShaderProgram();
@@ -2264,6 +2268,9 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
         return;
     }
     if (drawable.width <= 0 || drawable.height <= 0) { fallback(); return; }
+#if DEBUG
+    ++gDebugSelectedOutlineRebuilds;
+#endif
     const auto scene = _viewer->captureSceneSnapshot(drawable.width, drawable.height);
     if (!scene) { fallback(); return; }
     struct SelectedFaces { bool object = false; std::unordered_set<std::uint32_t> faces; };
@@ -6927,6 +6934,25 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
 
 + (void)debugSetSelectedOutlineKeyedOnProjectionCounter:(BOOL)legacy {
     gDebugOutlineKeyedOnProjectionCounter = legacy;
+}
+
+// CTO 24 Nov 06:48 (hand-in proofs 1 and 2): draws `count` whole frames back to back, each finished
+// by a one-pixel readback (so the GPU work of the frame is inside the time), and answers how many
+// frames were drawn, their wall time, the time inside RenderFrame and the selected-outline rebuilds.
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugDrawFrames:(NSInteger)count {
+    GLView *view = self.isViewLoaded ? [self viewportView] : nil;
+    if (!NSThread.isMainThread || _viewer == nullptr || view == nil || count <= 0 || count > 1000) return nil;
+    const double calls = _debugHistoryDrawingCosts[0], render = _debugHistoryDrawingCosts[3];
+    const NSUInteger rebuilds = gDebugSelectedOutlineRebuilds;
+    const auto start = std::chrono::steady_clock::now();
+    for (NSInteger index = 0; index < count; ++index) {
+        if ([view debugDrawAndReadCenteredRGBAWithWidth:1 height:1] == nil) return nil;
+    }
+    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    return @{ @"frames": @(_debugHistoryDrawingCosts[0] - calls),
+              @"wallSeconds": @(wall),
+              @"renderSeconds": @(_debugHistoryDrawingCosts[3] - render),
+              @"outlineRebuilds": @(gDebugSelectedOutlineRebuilds - rebuilds) };
 }
 
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {

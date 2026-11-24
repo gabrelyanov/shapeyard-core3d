@@ -2633,6 +2633,11 @@ __attribute__((objc_subclassing_restricted))
 //! Fable review 22 P1, checks only: YES keys the selected outline's cache on the camera's
 //! ProjectionState() counter (before the repair); NO (default) on the projection's values.
 + (void)debugSetSelectedOutlineKeyedOnProjectionCounter:(BOOL)legacy;
+//! CTO 24 Nov 06:48, checks only: draw `count` whole frames back to back, each finished by a
+//! one-pixel readback. Answers frames, wallSeconds, renderSeconds (inside RenderFrame) and
+//! outlineRebuilds (selected-outline rebuilds in those frames); nil when nothing could be drawn.
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugDrawViewportFrames:(NSInteger)count
+    NS_SWIFT_NAME(debugDrawViewportFrames(_:));
 //! Round 10 (founder a, d), picture checks only: YES draws with OCCT's own fitted near plane
 //! (before the repair); NO (default) with the near plane lifted toward the model for each frame.
 + (void)debugSetLegacyNearPlane:(BOOL)legacy;
