@@ -816,6 +816,11 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
                 || !myDoc->IsPresentationEditable(aPart)) { continue; }
             if (!myContext->GlobalFilter().IsNull()
                 && !myContext->GlobalFilter()->IsOk(anOwner)) { continue; }
+            // A face seen exactly edge-on gets a false depth near 0 in OCCT's
+            // order (a covered cutter's side beside the tap): the same rule as
+            // a plain tap decides whether the ray really reaches it (Fable
+            // review 20 finding 2).
+            if (myContext->IsEdgeOnHitPassedBy(myView, aRank)) { continue; }
             aBehind = anOwner;
             break;
         }

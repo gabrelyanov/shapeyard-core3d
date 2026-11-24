@@ -43,6 +43,11 @@ private:
     //! farther away. Changes only which detected owner is current.
     void passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boolean redraw);
 public:
+    //! The edge-on rule for a walk over the selector's raw hit list (after a
+    //! Pick without MoveTo): true when the hit at rank is a face seen exactly
+    //! edge-on that the exact ray does not meet before the next face that
+    //! faces the camera, so the walk goes past it.
+    Standard_EXPORT bool IsEdgeOnHitPassedBy(const Handle(V3d_View)& view, Standard_Integer rank);
 #ifdef DEBUG
     //! Deterministic test-only preselection publication. Production hover
     //! continues to be owned exclusively by AIS_InteractiveContext::MoveTo().
