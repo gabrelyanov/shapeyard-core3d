@@ -2667,9 +2667,19 @@ __attribute__((objc_subclassing_restricted))
 - (NSString *)debugLastFacePBRRefusal;
 - (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
+//! Detection only, at UIKit's rounded projected pixel: the viewer's own hit
+//! test (the MoveTo the Shell and Cut/Join/Overlap taps read), nothing selected.
+//! Answers the detected part ("entity"), its face index and the face the exact
+//! ray meets first on that part ("rayFace").
+- (NSDictionary<NSString *, id> *)debugDetectAtWorldPointX:(double)x y:(double)y z:(double)z
+    NS_SWIFT_NAME(debugDetectAtWorldPoint(x:y:z:));
 //! Replay a reported camera eye without changing its direction or any model/selection state.
 - (BOOL)debugMoveCameraEyeX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugMoveCameraEye(x:y:z:));
+//! Turn the camera about its own up axis through its centre by degrees (Fable
+//! review 17, finding 2: a view turned slightly off an exact top view).
+- (BOOL)debugTurnCameraDegrees:(double)degrees
+    NS_SWIFT_NAME(debugTurnCamera(degrees:));
 //! Valid imported BRep fixture: Shell-3 cup with an upright R22/r4.5 half-ring.
 - (nullable NSData *)debugJoinedHalfRingCupFixtureData;
 - (nullable NSData *)debugHalfRingHandleFixtureData;
