@@ -23,6 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
 //! column shows Bevel dimmed and a tap says "Too many edges at once. Pick edges
 //! in Edge mode."
 - (BOOL)bevelOverEdgeLimit NS_SWIFT_NAME(bevelOverEdgeLimit());
+//! CTO 23 Nov 03:55: with bevelOverEdgeLimit, true when the part is past Bevel's
+//! piece budget (too detailed), not past the edge limit: its own sentence.
+- (BOOL)bevelTooDetailed NS_SWIFT_NAME(bevelTooDetailed());
 //! Export support is document-wide rather than selection-based. In
 //! particular, STEP is unavailable while any TriangleMesh definition remains.
 - (BOOL)canExportType:(ExportType)exportType

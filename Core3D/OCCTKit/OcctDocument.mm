@@ -13661,6 +13661,42 @@ std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::GrownF
     return grown;
 }
 
+Standard_Boolean OcctDocument::HasVariableRadiusFilletOwner(
+    const TDF_Label& label) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || label.IsNull() || label.Data() != myOcafDoc->GetData())
+            return Standard_False;
+        Handle(TDataStd_NamedData) properties;
+        return label.FindAttribute(TDataStd_NamedData::GetID(), properties)
+            && !properties.IsNull()
+            && properties->HasArrayOfIntegers(
+                TCollection_ExtendedString(core3d::variable_radius_fillet::owner::PropertyKey));
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ForgetVariableRadiusFilletOwner(
+    const TDF_Label& label) noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)
+            || !HasVariableRadiusFilletOwner(label)) return Standard_False;
+        Handle(TDataStd_NamedData) properties;
+        if (!label.FindAttribute(TDataStd_NamedData::GetID(), properties)
+            || properties.IsNull()
+            // The file reader admits exactly this one array; anything else on the label is kept.
+            || properties->HasIntegers() || properties->HasReals()
+            || properties->HasStrings() || properties->HasBytes()
+            || properties->HasArraysOfReals()
+            || properties->GetArraysOfIntegersContainer().Size() != 1)
+            return Standard_False;
+        label.ForgetAttribute(TDataStd_NamedData::GetID());
+        return !HasVariableRadiusFilletOwner(label);
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::BooleanResultRecordForBake(
     const TDF_Label& label, TDF_Label& record) const noexcept {
     record.Nullify();
@@ -13778,6 +13814,8 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
     int operation, std::string& refusal) noexcept {
     refusal = "unsupported-source";
     try {
+        // One Cut / Join takes at most 32 parts in all; say so in its own word (CTO 23 Nov 03:55).
+        if (targets.size() + tools.size() > 32) { refusal = "too-many-parts"; return Standard_False; }
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || targets.empty() || tools.empty() || targets.size() + tools.size() > 32
             || operation < 0 || operation > 2
@@ -27217,6 +27255,30 @@ core3d::dependent_replay::Refusal OcctDocument::ReadDependentReplayPlan(
     } catch (...) { return Refusal::ReadbackFailed; }
 }
 
+namespace {
+// The exact text of a shape with every Checked bit written as 0. Checked is a cache (validating or
+// meshing sets it), not geometry, so a Ramp's record compares shapes without it (as the kept-
+// originals proof does, K28 / CTO 18 Nov 21:56): a Bevel preview that is cancelled must not make
+// the Ramp unreadable (found with R9-C3, 23 Nov). The live bits are put back before returning.
+bool ExactShapeBytesWithoutCacheBits(const TopoDS_Shape& shape, std::vector<std::uint8_t>& bytes) noexcept {
+    std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> kept;
+    bool ok = false;
+    try {
+        TopTools_IndexedMapOfShape all;
+        TopExp::MapShapes(shape, all);
+        for (int index = 1; index <= all.Extent(); ++index) {
+            const Handle(TopoDS_TShape)& tshape = all(index).TShape();
+            if (tshape.IsNull() || !tshape->Checked()) continue;
+            kept.emplace_back(tshape, Standard_True);
+            tshape->Checked(Standard_False);
+        }
+        ok = core3d::variable_radius_fillet::owner::ExactShapeBytes(shape, bytes);
+    } catch (...) { ok = false; }
+    for (auto& entry : kept) entry.first->Checked(entry.second);
+    return ok;
+}
+} // namespace
+
 Standard_Boolean OcctDocument::CaptureVariableRadiusFilletOwner(
     const TDF_Label& label,
     core3d::variable_radius_fillet::owner::Capture& capture) const noexcept {
@@ -27270,10 +27332,13 @@ Standard_Boolean OcctDocument::CaptureVariableRadiusFilletOwner(
             rebuilt = vrf::BuildMultiStationDeterministically(
                 capture.base, stations, cancelled);
         else return Standard_False;
-        std::vector<std::uint8_t> rebuiltBytes;
+        // The Checked bits are a cache (a validation or a mesh sets them), never geometry: compare
+        // without them so a cancelled preview cannot make the Ramp unreadable.
+        std::vector<std::uint8_t> rebuiltBytes, currentGeometryBytes;
         if (!rebuilt.built()
-            || !owner::ExactShapeBytes(rebuilt.solid, rebuiltBytes)
-            || rebuiltBytes != capture.currentBytes) return Standard_False;
+            || !ExactShapeBytesWithoutCacheBits(rebuilt.solid, rebuiltBytes)
+            || !ExactShapeBytesWithoutCacheBits(capture.current, currentGeometryBytes)
+            || rebuiltBytes != currentGeometryBytes) return Standard_False;
         capture.present = true;
         return capture.valid();
     } catch (...) { capture = {}; return Standard_False; }
