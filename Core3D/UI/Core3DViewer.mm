@@ -2529,6 +2529,7 @@ bool Core3DViewer::cutRemovesNothing(const std::string& targetEntity,
 bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
     const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";
+    if(targetEntities.size()+toolEntities.size()>32){refusal="too-many-parts";return false;}
     if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||targetEntities.empty()
         ||toolEntities.empty()||targetEntities.size()+toolEntities.size()>32
         ||operation<0||operation>2||(operation!=1&&targetEntities.size()!=1))return false;
@@ -2654,6 +2655,7 @@ bool Core3DViewer::applyBakedBoolean(const std::string& targetEntity,
 bool Core3DViewer::applyBakedBooleanBatch(const std::vector<std::string>& targetEntities,
     const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";
+    if(targetEntities.size()+toolEntities.size()>32){refusal="too-many-parts";return false;}
     if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()
         ||targetEntities.empty()||toolEntities.empty())return false;
     try{

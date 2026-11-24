@@ -1375,6 +1375,9 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation {
     if ([NSThread isMainThread]) sLastBakedBooleanPreviewRefusal = @"unsupported-source";
+    // One Cut / Join takes at most 32 parts in all; say so in its own word (CTO 23 Nov 03:55).
+    if ([NSThread isMainThread] && [targets isKindOfClass:NSArray.class] && [tools isKindOfClass:NSArray.class]
+        && targets.count + tools.count > 32) { sLastBakedBooleanPreviewRefusal = @"too-many-parts"; return NO; }
     if (![NSThread isMainThread] || ![targets isKindOfClass:NSArray.class]
         || ![tools isKindOfClass:NSArray.class] || targets.count == 0 || tools.count == 0
         || targets.count + tools.count > 32) return NO;
@@ -1406,6 +1409,8 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     operation:(Core3DPartBooleanOperation)operation
     refusal:(NSString * _Nullable * _Nullable)refusal {
     if (refusal) *refusal = @"unsupported-source";
+    if ([targets isKindOfClass:NSArray.class] && [tools isKindOfClass:NSArray.class]
+        && targets.count + tools.count > 32) { if (refusal) *refusal = @"too-many-parts"; return NO; }
     if (![NSThread isMainThread] || ![targets isKindOfClass:NSArray.class]
         || ![tools isKindOfClass:NSArray.class] || targets.count == 0 || tools.count == 0
         || targets.count + tools.count > 32) return NO;
