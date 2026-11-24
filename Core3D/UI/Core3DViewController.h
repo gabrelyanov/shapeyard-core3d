@@ -2630,9 +2630,6 @@ __attribute__((objc_subclassing_restricted))
 //! Round 10 (R10P-S11), picture checks only: YES draws committed boundaries built from now on
 //! with the old fixed depth step; NO (default) with the perspective pull toward the eye.
 + (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy;
-//! Round 10 (founder a, d), picture checks only: YES draws with OCCT's own fitted near plane
-//! (before the repair); NO (default) with the near plane lifted toward the model for each frame.
-+ (void)debugSetLegacyNearPlane:(BOOL)legacy;
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics;
 //! Read-only last native tangent-preparation failure and render counters.
 - (NSDictionary<NSString *, NSNumber *> *)debugNativeFramePreparationState;

@@ -15025,14 +15025,6 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 #endif
 }
 
-+ (void)debugSetLegacyNearPlane:(BOOL)legacy {
-#if DEBUG
-    Core3DView::debugSetLegacyNearPlane(legacy);
-#else
-    (void)legacy;
-#endif
-}
-
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {
     return [GLController debugViewportRGBA];
 }
