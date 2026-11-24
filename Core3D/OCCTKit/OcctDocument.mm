@@ -13786,19 +13786,22 @@ bool JoinInputCarriesPicture(const Handle(TDocStd_Document)& document, const TDF
     } catch (...) { return true; }
 }
 
-bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& result,
-    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks, TopoDS_Shape& tidied) noexcept {
-    tidied.Nullify();
+} // namespace
+
+// The edges of `shape` that lie between two faces of different looks (colour, material): the lines a
+// user sees on a part. `looks` are painted faces as CaptureFaceColours gives them; every other face has
+// the part's own look. Pictures on faces are not looks here (see JoinInputCarriesPicture). Used by the
+// Join tidy (never merges across them) and by Hole size (keeps them; push-pull, Fable review 18 finding 1).
+std::vector<TopoDS_Edge> LookBorderEdges(const OcctDocument& document, const TopoDS_Shape& shape,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) noexcept {
+    std::vector<TopoDS_Edge> borders;
     try {
         OCC_CATCH_SIGNALS
-        if (result.IsNull()) return false;
-#if DEBUG
-        if (std::getenv("SHAPEYARD_JOIN_TIDY_OFF")) return false;
-#endif
+        if (shape.IsNull()) return borders;
         // Each face's look: an index into the distinct looks, -1 for the part's own look.
         std::vector<XCAFDoc_VisMaterialPBR> distinct;
         TopTools_DataMapOfShapeInteger lookOfFace;
-        for (const auto& [face, material] : document.MatchFaceLooks(result, looks, Standard_False)) {
+        for (const auto& [face, material] : document.MatchFaceLooks(shape, looks, Standard_False)) {
             int index = -1;
             for (std::size_t i = 0; i < distinct.size(); ++i)
                 if (distinct[i].IsEqual(material)) { index = int(i); break; }
@@ -13809,17 +13812,44 @@ bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& resu
             return lookOfFace.IsBound(face) ? lookOfFace.Find(face) : -1;
         };
         TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
-        TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
-        TopTools_MapOfShape seams;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
         for (int i = 1; i <= facesOfEdge.Extent(); ++i) {
             const TopTools_ListOfShape& faces = facesOfEdge.FindFromIndex(i);
             int first = -2;
             for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
                 const int look = lookOf(it.Value());
                 if (first == -2) first = look;
-                else if (look != first) { seams.Add(facesOfEdge.FindKey(i)); break; }
+                else if (look != first) { borders.push_back(TopoDS::Edge(facesOfEdge.FindKey(i))); break; }
             }
         }
+    } catch (...) { borders.clear(); }
+    return borders;
+}
+
+// The look borders of a stored part, in the part's own frame (the label's shape). For push-pull's
+// Hole size: together with their Split-line mark, these are the user's lines a resize must keep.
+std::vector<TopoDS_Edge> LookBorderEdgesOfPart(const OcctDocument& document, const TDF_Label& part) noexcept {
+    try {
+        if (part.IsNull()) return {};
+        std::vector<TDF_Label> unusedLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> looks;
+        if (!document.CaptureFaceColours(part, 1.0, unusedLabels, looks)) return {};
+        return LookBorderEdges(document, XCAFDoc_ShapeTool::GetShape(part), looks);
+    } catch (...) { return {}; }
+}
+
+namespace {
+bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& result,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks, TopoDS_Shape& tidied) noexcept {
+    tidied.Nullify();
+    try {
+        OCC_CATCH_SIGNALS
+        if (result.IsNull()) return false;
+#if DEBUG
+        if (std::getenv("SHAPEYARD_JOIN_TIDY_OFF")) return false;
+#endif
+        TopTools_MapOfShape seams;
+        for (const TopoDS_Edge& edge : LookBorderEdges(document, result, looks)) seams.Add(edge);
         ShapeUpgrade_UnifySameDomain unify(result, Standard_True, Standard_True, Standard_False);
         unify.AllowInternalEdges(Standard_False);
         if (!seams.IsEmpty()) unify.KeepShapes(seams);
