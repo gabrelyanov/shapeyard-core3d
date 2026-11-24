@@ -185,6 +185,8 @@ private:
         OcctReferenceAxis expectedReferenceAxis;
         profile::Record expectedProfile;
         enclosure::Record expectedEnclosure;
+        // Round 10 F11: each named copy's own name ("Sight 2", "Sight 3", ...).
+        TCollection_ExtendedString expectedName;
         pattern_recipe_clone::Candidate expectedSweepLoft;
         Standard_Boolean sweepLoftCandidateSealed = Standard_False;
         Standard_Boolean profileCandidateSealed = Standard_False;

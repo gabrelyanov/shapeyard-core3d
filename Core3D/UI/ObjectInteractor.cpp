@@ -1705,7 +1705,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     || actualEnclosure.IsCurrent(document, duplicate.resultLabel) != duplicate.originalEnclosureCurrent
                     || !myDoc->CaptureObjectNameStateForLabel(duplicate.resultLabel, actualName)
                     || actualName.namePresent != duplicate.originalName.namePresent
-                    || (actualName.namePresent && !actualName.name.IsEqual(duplicate.originalName.name))
+                    || (actualName.namePresent && !actualName.name.IsEqual(duplicate.copyName))
                     || !actualProfile.IsEqual(duplicate.candidateProfile)
                     || actualProfile.IsCurrent(document, duplicate.resultLabel) != duplicate.originalProfileCurrent
                     || duplicate.expectedShape.IsNull()
@@ -2101,7 +2101,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         double metersPerUnit = 0;
         bool hasLengthUnit = false;
         if (!ReadMirrorDocumentUnits(doc, metersPerUnit, hasLengthUnit)) { return; }
-        const double nudge = std::max(w, 0.001 / metersPerUnit);
+        // Round 10 F11: the step is that width rounded UP to 0.1 mm, so a copy
+        // of a 5.998 mm part lands 6 mm along, not at 180,998 mm.
+        const double widthMillimetres = w * metersPerUnit * 1000.0;
+        const double stepMillimetres = std::max(1.0, std::ceil(widthMillimetres * 10.0 - 1e-6) / 10.0);
+        const double nudge = stepMillimetres / (1000.0 * metersPerUnit);
         if (!std::isfinite(nudge) || nudge <= 0.0
             || nudge > limits::kMaximumModelCoordinateMagnitude) { return; }
         const gp_Vec aDisplacement(nudge, 0.0, 0.0);
@@ -2110,6 +2114,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         
         CORE3D_DUPLICATE_STEP(50);
 		std::vector<DuplicatePendingResult> duplicates;
+        std::vector<TCollection_ExtendedString> reservedCopyNames;
         core3d::retained_edge_treatment::ReplayBudget treatmentBudget;
 		try {
 			for (const DuplicateSource& source : sources) {
@@ -2220,6 +2225,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 duplicate.expectedReferenceAxis = source.referenceAxis;
                 duplicate.originalProfile = source.savedProfile;
                 duplicate.originalName = source.name;
+                if (source.name.namePresent) {
+                    duplicate.copyName = myDoc->NextFreeCopyName(source.name.name, reservedCopyNames);
+                    reservedCopyNames.push_back(duplicate.copyName);
+                }
                 duplicate.originalOwnerShape = source.ownerShape;
                 duplicate.originalProfileCurrent = source.profileCurrent;
                 duplicate.originalSweepLoft = source.sweepLoft;
@@ -2570,10 +2579,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     retainRetryableOrUnknown(); return;
                 }
                 duplicate.sweepLoftCandidateSealed = true;
-                // Preserve authored names and their absence on each independent
-                // part. Closed-commit recovery compares this exact source state.
+                // A named part's copy takes the next free number ("Sight" ->
+                // "Sight 2", Round 10 F11); an unnamed part's copy stays unnamed.
+                // Closed-commit recovery compares this exact staged name.
                 if (duplicate.originalName.namePresent) {
-                    TDataStd_Name::Set(label, duplicate.originalName.name);
+                    TDataStd_Name::Set(label, duplicate.copyName);
                 } else {
                     label.ForgetAttribute(TDataStd_Name::GetID());
                 }
