@@ -8,6 +8,11 @@
 #include "Core3DView.hpp"
 #include <Aspect_DisplayConnection.hxx>
 #include <GP_Quaternion.hxx>
+#include <Bnd_Box.hxx>
+#include <Graphic3d_CView.hxx>
+#include <Standard_Failure.hxx>
+#include <algorithm>
+#include <cmath>
 
 Core3DView::Core3DView(const Handle(V3d_Viewer)& theViewer, const V3d_TypeOfView theType)
 : V3d_View(theViewer, theType) {
@@ -43,6 +48,57 @@ void Core3DView::InvalidateAndRequestFrame() const
     }
 }
 
+#if DEBUG
+static bool gDebugLegacyNearPlane = false;
+void Core3DView::debugSetLegacyNearPlane(bool legacy) { gDebugLegacyNearPlane = legacy; }
+#endif
+
+// Round 10 (founder items a and d; R10P-S7): OCCT's auto depth fit also measures the floor grid,
+// which reaches behind the eye, so in perspective it clamps the near plane to about far / 10^4
+// (0.07 mm with far 610 mm). Depth resolution then falls to roughly distance^2 / (near * 2^24):
+// ~0.06 mm at 25 cm, so a part whose face lies a few hundredths of a millimetre in front of
+// another (a fin on a body, the top of a grip under the body) loses whole triangles to the face
+// behind it and their meeting line turns saw-toothed. For each drawn frame the near plane is lifted
+// to half the distance of the nearest corner of the finite model's bounding box (the grid is an
+// infinite structure and is left out), never nearer than OCCT's own value and never past the far
+// plane, nor past half the camera's focus distance. When the eye is inside or beside that box
+// (nearest corner not in front), OCCT's near stays.
+// Only the drawing uses the lifted value: OCCT's own range is put back after the frame, so taps,
+// picks and every other reader of the camera see exactly what they saw before.
+bool Core3DView::FitDepthRangeForFrame(Standard_Real& theOcctNear, Standard_Real& theOcctFar) const
+{
+    const Handle(Graphic3d_Camera)& aCamera = Camera();
+    if (aCamera.IsNull() || View().IsNull()) return false;
+    ZFitAll(AutoZFitScaleFactor());
+    theOcctNear = aCamera->ZNear();
+    theOcctFar = aCamera->ZFar();
+#if DEBUG
+    if (gDebugLegacyNearPlane) return true;
+#endif
+    if (aCamera->IsOrthographic() || !(theOcctNear > 0.0) || !(theOcctFar > theOcctNear)) return true;
+    const Bnd_Box aModel = View()->MinMaxValues(Standard_False);
+    if (aModel.IsVoid() || aModel.IsWhole() || aModel.IsOpen()) return true;
+    Standard_Real aBox[6];
+    aModel.Get(aBox[0], aBox[1], aBox[2], aBox[3], aBox[4], aBox[5]);
+    const gp_XYZ& aScale = aCamera->AxialScale();
+    const gp_XYZ anEye = aCamera->Eye().XYZ();
+    const gp_XYZ aForward = aCamera->Direction().XYZ();
+    Standard_Real aNearest = RealLast();
+    for (int aCorner = 0; aCorner < 8; ++aCorner) {
+        const gp_XYZ aPoint(aBox[(aCorner & 1) ? 3 : 0] * aScale.X(),
+                            aBox[(aCorner & 2) ? 4 : 1] * aScale.Y(),
+                            aBox[(aCorner & 4) ? 5 : 2] * aScale.Z());
+        aNearest = std::min(aNearest, (aPoint - anEye).Dot(aForward));
+    }
+    if (!(aNearest > 0.0) || !std::isfinite(aNearest)) return true;
+    // Also stay in front of the camera's focus, where OCCT draws the corner axes.
+    const Standard_Real aLifted = std::min(0.5 * aNearest, 0.5 * aCamera->Distance());
+    if (aLifted > theOcctNear && aLifted < 0.5 * theOcctFar) {
+        aCamera->SetZRange(aLifted, theOcctFar);
+    }
+    return true;
+}
+
 void Core3DView::RenderFrame() const
 {
     struct RenderingGuard {
@@ -52,6 +108,34 @@ void Core3DView::RenderFrame() const
         }
         ~RenderingGuard() { flag = Standard_False; }
     } aGuard(myIsRenderingFrame);
+    Standard_Real anOcctNear = 0.0, anOcctFar = 0.0;
+    bool aFitted = false;
+    if (AutoZFitMode()) {
+        try {
+            aFitted = FitDepthRangeForFrame(anOcctNear, anOcctFar);
+        } catch (const Standard_Failure&) {
+            aFitted = false;
+        }
+    }
+    if (!aFitted) {
+        V3d_View::Redraw();
+        return;
+    }
+    // This frame's depth range is already fitted: OCCT's AutoZFit inside Redraw would undo the lift.
+    Core3DView* aSelf = const_cast<Core3DView*>(this);
+    const Standard_Real aScale = AutoZFitScaleFactor();
+    struct AutoZFitRestore {
+        Core3DView* view; Standard_Real scale; Standard_Real zNear; Standard_Real zFar;
+        ~AutoZFitRestore() {
+            view->SetAutoZFitMode(Standard_True, scale);
+            const Handle(Graphic3d_Camera)& aCamera = view->Camera();
+            if (!aCamera.IsNull() && zNear > 0.0 && zFar > zNear
+                && (aCamera->ZNear() != zNear || aCamera->ZFar() != zFar)) {
+                aCamera->SetZRange(zNear, zFar);
+            }
+        }
+    } aRestore{aSelf, aScale, anOcctNear, anOcctFar};
+    aSelf->SetAutoZFitMode(Standard_False, aScale);
     V3d_View::Redraw();
 }
 
