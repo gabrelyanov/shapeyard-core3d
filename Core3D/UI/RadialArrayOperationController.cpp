@@ -1773,7 +1773,7 @@ RadialArrayOperationController::inspectPendingResults() noexcept
                 || aProfile.IsCurrent(aDocument, aResult.label) != _source->profileCurrent
                 || !_document->CaptureObjectNameStateForLabel(aResult.label, aName)
                 || aName.namePresent != _source->profileOwner.namePresent
-                || (aName.namePresent && !aName.name.IsEqual(_source->profileOwner.name))
+                || (aName.namePresent && !aName.name.IsEqual(aResult.expectedName))
                 || aResult.expectedShape.IsNull()
                 || !aStored.IsEqual(aResult.expectedShape)
                 || aResult.entityIdentifier.empty()
@@ -2600,7 +2600,9 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                 return retainRetryableOrUnknown();
             }
             if (_source->profileOwner.namePresent) {
-                TDataStd_Name::Set(aLabel, _source->profileOwner.name);
+                // Every copy takes the next free number, as Duplicate does.
+                aPending.expectedName = _document->NextFreeCopyName(_source->profileOwner.name, {});
+                TDataStd_Name::Set(aLabel, aPending.expectedName);
             } else {
                 aLabel.ForgetAttribute(TDataStd_Name::GetID());
             }
