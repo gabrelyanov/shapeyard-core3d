@@ -15017,6 +15017,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return [GLController debugDisplayedShapePresentationStates];
 }
 
++ (void)debugSetSelectedOutlineKeyedOnProjectionCounter:(BOOL)legacy {
+#ifdef DEBUG
+    [GLViewController debugSetSelectedOutlineKeyedOnProjectionCounter:legacy];
+#else
+    (void)legacy;
+#endif
+}
+
 + (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy {
 #ifdef DEBUG
     [GLViewController debugSetLegacyBoundaryDepthStep:legacy];
@@ -15025,8 +15033,33 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 #endif
 }
 
++ (void)debugSetLegacyNearPlane:(BOOL)legacy {
+#if DEBUG
+    Core3DView::debugSetLegacyNearPlane(legacy);
+#else
+    (void)legacy;
+#endif
+}
+
++ (void)debugSetNearPlaneIgnoresFloor:(BOOL)legacy {
+#if DEBUG
+    Core3DView::debugSetNearPlaneIgnoresFloor(legacy);
+#else
+    (void)legacy;
+#endif
+}
+
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {
     return [GLController debugViewportRGBA];
+}
+
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugDrawViewportFrames:(NSInteger)count {
+#if DEBUG
+    return [GLController debugDrawFrames:count];
+#else
+    (void)count;
+    return nil;
+#endif
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics {
@@ -15158,6 +15191,47 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return moved;
 }
 
+- (BOOL)debugTurnCameraDegrees:(double)degrees {
+    if (!NSThread.isMainThread || !GLController.viewer || !std::isfinite(degrees)
+        || std::abs(degrees) > 90) return NO;
+    const auto view = GLController.viewer->ActiveView();
+    GLView *renderView = [GLController.view isKindOfClass:GLView.class] ? (GLView *)GLController.view : nil;
+    if (view.IsNull() || !renderView) return NO;
+    __block BOOL turned = NO;
+    [renderView performWithRenderingContext:^{
+        try {
+            const Handle(Graphic3d_Camera)& camera = view->Camera();
+            gp_Trsf turn;
+            turn.SetRotation(gp_Ax1(camera->Center(), camera->OrthogonalizedUp()), degrees * M_PI / 180.0);
+            camera->Transform(turn);
+            view->ZFitAll(); view->Redraw(); turned = YES;
+        } catch (...) {}
+    }];
+    return turned;
+}
+
+// The ray the selector really used for the last pick (its near and far
+// picked points): the tap's pixel goes through OCCT's own pixel convention,
+// which can lie a pixel away from the projected world point. Reported as
+// pickNearX/Y/Z; ConvertWithProj's origin as projX/Y/Z. Falls back to
+// ConvertWithProj when the selector has no ray.
+static void DebugPickRay(const Handle(V3d_View)& view, const Handle(AIS_InteractiveContext)& context,
+                         int px, int py, NSMutableDictionary *answer,
+                         double& ox, double& oy, double& oz, double& dx, double& dy, double& dz)
+{
+    view->ConvertWithProj(px,py,ox,oy,oz,dx,dy,dz);
+    answer[@"projX"]=@(ox); answer[@"projY"]=@(oy); answer[@"projZ"]=@(oz);
+    const auto selector = context->MainSelector();
+    if (selector.IsNull()) return;
+    const auto& volume = selector->GetManager();
+    const gp_Pnt near = volume.GetNearPickedPnt(), far = volume.GetFarPickedPnt();
+    if (!(near.Distance(far) > Precision::Confusion())) return;
+    const gp_Dir direction(gp_Vec(near, far));
+    ox = near.X(); oy = near.Y(); oz = near.Z();
+    dx = direction.X(); dy = direction.Y(); dz = direction.Z();
+    answer[@"pickNearX"]=@(ox); answer[@"pickNearY"]=@(oy); answer[@"pickNearZ"]=@(oz);
+}
+
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z {
     return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:NO];
 }
@@ -15233,14 +15307,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
                     // small diagnostic fixtures. It cannot change detection.
                     if (faces.Extent()<=128) {
                         double ox,oy,oz,dx,dy,dz;
-                        view->ConvertWithProj(px,py,ox,oy,oz,dx,dy,dz);
+                        DebugPickRay(view, context, px, py, answer, ox,oy,oz,dx,dy,dz);
                         // Intersect in the stored shape's frame: TopoDS::Moved
                         // rejects authored scale, while an inverse ray preserves
                         // face identity without modifying/copying the geometry.
                         const gp_Trsf inverse = shape->Transformation().Inverted();
                         IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
                         ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
-                                           gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e6);
+                                           gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e7);
                         if (ray.IsDone()) {
                             double closest=1e6; int face=-1;
                             for (int i=1;i<=ray.NbPnt();++i) {
@@ -15258,6 +15332,63 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     }];
     if (!current) answer[@"error"]=@"No rendering context";
     [GLController refreshSelectionState];
+    return answer;
+}
+
+- (NSDictionary<NSString *, id> *)debugDetectAtWorldPointX:(double)x y:(double)y z:(double)z {
+    if (!NSThread.isMainThread || !GLController.viewer
+        || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return @{@"error":@"Invalid pick"};
+    const auto viewer = GLController.viewer;
+    const auto context = viewer->AisContext(); const auto view = viewer->ActiveView();
+    GLView *renderView = [GLController.view isKindOfClass:GLView.class] ? (GLView *)GLController.view : nil;
+    if (context.IsNull() || view.IsNull() || !renderView) return @{@"error":@"No viewport"};
+    __block NSMutableDictionary *answer = [NSMutableDictionary dictionary];
+    const BOOL current = [renderView performWithRenderingContext:^{
+        try {
+            int width=0,height=0; view->Window()->Size(width,height);
+            const gp_Pnt projected = view->Camera()->Project(gp_Pnt(x,y,z));
+            const int px = (int)lround((projected.X()+1)*0.5*width);
+            const int py = (int)lround((1-projected.Y())*0.5*height);
+            answer[@"x"]=@(px); answer[@"y"]=@(py);
+            answer[@"width"]=@(width); answer[@"height"]=@(height);
+            answer[@"continuousX"]=@((projected.X()+1)*0.5*width);
+            if (px<0 || py<0 || px>=width || py>=height) {
+                answer[@"error"]=@"Projected point outside viewport"; return;
+            }
+            // Core3DViewer::hitTest: Core3DContext::MoveTo, as the Shell tap.
+            answer[@"hit"]=@(viewer->hitTest(px,py));
+            answer[@"hasDetected"]=@(context->HasDetected());
+            if (!context->HasDetected()) return;
+            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->DetectedOwner());
+            const auto shape = Handle(AIS_Shape)::DownCast(context->DetectedInteractive());
+            if (owner.IsNull() || !owner->HasShape() || shape.IsNull()) return;
+            const auto document = viewer->getDocument();
+            if (!document.IsNull()) {
+                const TDF_Label label = document->ShapeLabel(shape);
+                if (!label.IsNull())
+                    answer[@"entity"]=[NSString stringWithUTF8String:document->EntityIdentifierForLabel(label).c_str()] ?: @"";
+            }
+            TopTools_IndexedMapOfShape faces; TopExp::MapShapes(shape->Shape(),TopAbs_FACE,faces);
+            answer[@"detectedFace"]=@(faces.FindIndex(owner->Shape())-1);
+            if (faces.Extent()>128) return;
+            double ox,oy,oz,dx,dy,dz;
+            DebugPickRay(view, context, px, py, answer, ox,oy,oz,dx,dy,dz);
+            const gp_Trsf inverse = shape->Transformation().Inverted();
+            IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
+            ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
+                               gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e7);
+            if (ray.IsDone()) {
+                double closest=1e6; int face=-1;
+                for (int i=1;i<=ray.NbPnt();++i) {
+                    if (ray.WParameter(i)>=0 && ray.WParameter(i)<closest) {
+                        closest=ray.WParameter(i); face=faces.FindIndex(ray.Face(i))-1;
+                    }
+                }
+                answer[@"rayFace"]=@(face);
+            }
+        } catch (...) { answer[@"error"]=@"Native pick exception"; }
+    }];
+    if (!current) answer[@"error"]=@"No rendering context";
     return answer;
 }
 
