@@ -116,14 +116,59 @@ int InspectorAnalyticPrimitiveKind(const TopoDS_Shape& shape) {
     return kind != 0 && BRepCheck_Analyzer(shape, Standard_True).IsValid() ? kind : 0;
 }
 
+// DIM-FLOOR (CTO 23 Nov 09:06, rule A of O/DIMENSIONS-GROW-RULE-PROPOSAL.md): which end of
+// the part's own box a typed Dimensions size keeps in place. -1 = the middle (as before);
+// 0 = the low end, 1 = the high end of the own axis. Only a part that STANDS ON THE FLOOR
+// keeps its floor: the typed own axis points straight up or down in the world (any turn
+// round the vertical, quarter turns otherwise) and the part's lowest point is at Z 0
+// within 0.01 mm. Then the end that rests on the floor stays and the part grows up from it.
+// A part off the floor, or at a slant, keeps its middle as before.
+int DimensionAnchorEnd(const gp_Trsf& theWorld, const std::array<double, 6>& theOwnBox,
+                       int theAxis, double theMetersPerUnit) noexcept
+{
+    try {
+        if (theAxis < 0 || theAxis > 2) return -1;
+        const gp_Mat aTurn = theWorld.HVectorialPart();
+        constexpr double kSquare = 1.0e-9;
+        int aVertical = -1;
+        for (int j = 0; j < 3; ++j) {
+            const double aUp = aTurn.Value(3, j + 1);
+            if (!std::isfinite(aUp)) return -1;
+            if (std::abs(std::abs(aUp) - 1.0) <= kSquare) aVertical = j;
+            else if (std::abs(aUp) > kSquare) return -1; // at a slant: nothing stands
+        }
+        if (aVertical != theAxis) return -1; // a sideways size never moves the floor
+        const double aUp = aTurn.Value(3, theAxis + 1) * theWorld.ScaleFactor();
+        const int anEnd = aUp > 0.0 ? 0 : 1;
+        const double aLowest = theWorld.TranslationPart().Z()
+            + aUp * theOwnBox[static_cast<std::size_t>(theAxis + 3 * anEnd)];
+        const double aTolerance = (std::isfinite(theMetersPerUnit) && theMetersPerUnit > 0.0)
+            ? 1.0e-5 / theMetersPerUnit : 0.01;
+        return std::isfinite(aLowest) && std::abs(aLowest) <= aTolerance ? anEnd : -1;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// The own-axis coordinate that stays put when a size is typed (see DimensionAnchorEnd).
+double DimensionFixedPoint(const std::array<double, 6>& theOwnBox, int theAxis, int theEnd) noexcept
+{
+    const auto i = static_cast<std::size_t>(theAxis);
+    return theEnd == 0 ? theOwnBox[i] : theEnd == 1 ? theOwnBox[i + 3]
+        : theOwnBox[i] * 0.5 + theOwnBox[i + 3] * 0.5;
+}
+
 TopoDS_Shape ResizeInspectorPrimitive(int kind, const std::array<double, 6>& bounds,
-                                      int axis, double target) {
+                                      int axis, double target, int anchorEnd = -1) {
     std::array<double, 3> size, center;
     for (int i = 0; i < 3; ++i) {
         size[i] = bounds[i + 3] - bounds[i];
         center[i] = bounds[i] * 0.5 + bounds[i + 3] * 0.5;
     }
     size[axis] = target;
+    // DIM-FLOOR: a part standing on the floor grows up from the end that rests on it.
+    if (anchorEnd == 0) center[axis] = bounds[axis] + target * 0.5;
+    else if (anchorEnd == 1) center[axis] = bounds[axis + 3] - target * 0.5;
     if (kind == 1) {
         return BRepPrimAPI_MakeBox(gp_Pnt(center[0] - size[0] * 0.5,
             center[1] - size[1] * 0.5, center[2] - size[2] * 0.5), size[0], size[1], size[2]).Shape();
@@ -2572,6 +2617,7 @@ TransformInspectorMeasurementController::commitPosition(
     std::optional<gp_GTrsf> dimensionTransform;
     TransformInspectorVector3 measuredDimensions;
     std::array<double, 6> dimensionBounds{};
+    int dimensionAnchorEnd = -1;
     if (theRequest.kind == TransformInspectorEditKind::Dimension) {
         // Use the private shape/document cache, never caller-supplied extents.
         // Validate correctable numeric errors before consuming the edit lease.
@@ -2599,10 +2645,16 @@ TransformInspectorMeasurementController::commitPosition(
         }
         const double target = theRequest.value / scale;
         const double ratio = target / extents[anAxis];
-        const double center = bounds.bounds[anAxis] * 0.5 + bounds.bounds[anAxis + 3] * 0.5;
+        // DIM-FLOOR: the point that stays put, the middle unless the part stands on the floor.
+        dimensionAnchorEnd = DimensionAnchorEnd(captured.persistedTransform.transform,
+            bounds.bounds, static_cast<int>(anAxis), captured.metersPerUnit);
+        const double fixedPoint = DimensionFixedPoint(bounds.bounds, static_cast<int>(anAxis),
+            dimensionAnchorEnd);
+        const double center = fixedPoint
+            + ratio * (bounds.bounds[anAxis] * 0.5 + bounds.bounds[anAxis + 3] * 0.5 - fixedPoint);
         if (!std::isfinite(target) || target <= Precision::Confusion()
             || !std::isfinite(ratio) || ratio <= 0.0
-            || !std::isfinite(center)
+            || !std::isfinite(center) || !std::isfinite(fixedPoint)
             || std::abs(center - target * 0.5) > limits::kMaximumModelCoordinateMagnitude
             || std::abs(center + target * 0.5) > limits::kMaximumModelCoordinateMagnitude) {
             anOutcome.result = TransformInspectorPositionCommitResult::InvalidValue;
@@ -2610,7 +2662,7 @@ TransformInspectorMeasurementController::commitPosition(
         }
         // Reject ill-conditioned center/ratio combinations before they can
         // cancel large products into an inaccurately sized small result.
-        const double offsetMagnitude = std::abs(center * (1.0 - ratio));
+        const double offsetMagnitude = std::abs(fixedPoint * (1.0 - ratio));
         const double operandMagnitude = std::abs(ratio) * std::max(
             std::abs(bounds.bounds[anAxis]), std::abs(bounds.bounds[anAxis + 3]));
         const double roundingBound = 16 * std::numeric_limits<double>::epsilon()
@@ -2624,7 +2676,7 @@ TransformInspectorMeasurementController::commitPosition(
             gp_Mat matrix(1,0,0, 0,1,0, 0,0,1);
             matrix.SetValue(static_cast<int>(anAxis) + 1, static_cast<int>(anAxis) + 1, ratio);
             gp_XYZ offset(0, 0, 0);
-            offset.SetCoord(static_cast<int>(anAxis) + 1, center * (1.0 - ratio));
+            offset.SetCoord(static_cast<int>(anAxis) + 1, fixedPoint * (1.0 - ratio));
             dimensionTransform.emplace(matrix, offset);
         } catch (...) {
             anOutcome.result = TransformInspectorPositionCommitResult::InvalidValue;
@@ -2884,7 +2936,7 @@ TransformInspectorMeasurementController::commitPosition(
                 dimensionBounds = exactBaseline.inspectorPrimitive.bounds;
             if (kind != 0) {
                 candidateShape = ResizeInspectorPrimitive(kind, dimensionBounds, int(anAxis),
-                    theRequest.value / std::abs(aCurrentTransform.uniformScale));
+                    theRequest.value / std::abs(aCurrentTransform.uniformScale), dimensionAnchorEnd);
                 if (kind == 2) {
                     double x = dimensionBounds[3] - dimensionBounds[0];
                     double y = dimensionBounds[4] - dimensionBounds[1];
@@ -2979,8 +3031,11 @@ TransformInspectorMeasurementController::commitPosition(
         if (sizes && dimensionTransform) change.faceColourMap = *dimensionTransform;
         change.inspectorPrimitiveKind = inspectorPrimitiveKind;
         if (inspectorPrimitiveKind != 0) {
-            const double center = (dimensionBounds[anAxis] + dimensionBounds[anAxis + 3]) * 0.5;
             const double half = theRequest.value / std::abs(aCurrentTransform.uniformScale) * 0.5;
+            // DIM-FLOOR: the end resting on the floor stays, as in ResizeInspectorPrimitive.
+            const double center = dimensionAnchorEnd == 0 ? dimensionBounds[anAxis] + half
+                : dimensionAnchorEnd == 1 ? dimensionBounds[anAxis + 3] - half
+                : (dimensionBounds[anAxis] + dimensionBounds[anAxis + 3]) * 0.5;
             dimensionBounds[anAxis] = center - half;
             dimensionBounds[anAxis + 3] = center + half;
             change.inspectorPrimitiveBounds = dimensionBounds;
