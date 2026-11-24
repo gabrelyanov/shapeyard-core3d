@@ -3191,6 +3191,10 @@ BevelApplyResult BevelOperationController::apply() noexcept
         return BevelApplyResult::NoChange;
     }
 
+    // Faces with their own look: the preview was drawn in the part's one look, so the
+    // part is drawn again from the document after Apply (round 10 R10-F1: a joined
+    // orange + grey part showed all one colour after Bevel although both were kept).
+    bool carriedFaceLooks = false;
     myCanApply = Standard_False;
     myState = BevelPreviewState::Committing;
     notifyPreviewStateChanged();
@@ -3259,6 +3263,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
                     &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex])
                     &&myDoc->CarryFaceColours(source.label,myPreviewResults[anIndex]->Shape(),
                         faceLabels,colouredFaces);
+                if(staged&&!colouredFaces.empty()) carriedFaceLooks=true;
             }
             if (!staged) {
                 // Discharge this command's companion only after verified
@@ -3393,7 +3398,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
     // release controller ownership without removing them.
     clearState();
     notifyPreviewStateChanged();
-    return needsRedraw
+    return needsRedraw || carriedFaceLooks
         ? BevelApplyResult::AppliedNeedsDocumentRedraw
         : BevelApplyResult::Applied;
 }
