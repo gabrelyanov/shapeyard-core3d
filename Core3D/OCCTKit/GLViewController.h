@@ -312,6 +312,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA;
+//! Round 10 (R10P-S11): YES draws committed boundaries built from now on with the old fixed
+//! depth step instead of the perspective pull toward the eye. Picture checks only.
++ (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy;
 - (NSDictionary<NSString *, NSNumber *> *)
     debugFramebufferStatistics;
 - (NSDictionary<NSString *, NSNumber *> *)debugHistoryDrawingCosts;
