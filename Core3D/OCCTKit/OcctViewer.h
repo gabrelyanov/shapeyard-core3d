@@ -125,6 +125,8 @@ public:
     
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);
 #ifdef DEBUG
+    // The last SelectBehind walk, one entry per hit it looked at (checks only).
+    static std::string& DebugLastBehindWalk() { static std::string walk; return walk; }
     const auto& DebugNativeFrameFailure() const { return myDebugNativeFrameFailure; }
     std::uint64_t DebugNativeFrameFailures() const { return myDebugNativeFrameFailures; }
     std::uint64_t DebugNativeFrameSuccesses() const { return myDebugNativeFrameSuccesses; }
