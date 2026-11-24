@@ -7226,11 +7226,20 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				== AIS_SOD_Nothing) {
 				return Standard_False;
 			}
-			myContext->InitDetected();
-			for (; myContext->MoreDetected(); myContext->NextDetected()) {
+			// The detected owner first: Core3DContext::MoveTo may have passed a
+			// face seen edge-on (or a hidden trimmed cylinder wall) on to the
+			// face the ray really meets; then the rest in OCCT's order.
+			std::vector<Handle(SelectMgr_EntityOwner)> aCandidates{
+				myContext->DetectedOwner()};
+			for (myContext->InitDetected(); myContext->MoreDetected();
+				 myContext->NextDetected()) {
+				if (myContext->DetectedCurrentOwner() != aCandidates.front()) {
+					aCandidates.push_back(myContext->DetectedCurrentOwner());
+				}
+			}
+			for (const Handle(SelectMgr_EntityOwner)& aCandidate : aCandidates) {
 				const Handle(StdSelect_BRepOwner) anOwner =
-					Handle(StdSelect_BRepOwner)::DownCast(
-						myContext->DetectedCurrentOwner());
+					Handle(StdSelect_BRepOwner)::DownCast(aCandidate);
 				if (anOwner.IsNull() || !anOwner->HasShape()
 					|| anOwner->Shape().ShapeType() != TopAbs_FACE) {
 					continue;
@@ -8224,6 +8233,16 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		const auto anOffsetRange = mirrorPlaneOffsetRange();
 		aState.customPlaneMinimumOffset = anOffsetRange.first;
 		aState.customPlaneMaximumOffset = anOffsetRange.second;
+		if (_customMirrorPlane.has_value()) {
+			const gp_Pnt& anOrigin = _customMirrorPlane->worldOrigin;
+			const gp_Dir& aNormal = _customMirrorPlane->worldNormal;
+			aState.customPlaneOrigin[0] = anOrigin.X();
+			aState.customPlaneOrigin[1] = anOrigin.Y();
+			aState.customPlaneOrigin[2] = anOrigin.Z();
+			aState.customPlaneNormal[0] = aNormal.X();
+			aState.customPlaneNormal[1] = aNormal.Y();
+			aState.customPlaneNormal[2] = aNormal.Z();
+		}
 		try {
 			const Handle(TDocStd_Document) aDocument = myDoc.IsNull()
 				? Handle(TDocStd_Document)()

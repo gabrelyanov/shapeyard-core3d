@@ -2670,12 +2670,20 @@ __attribute__((objc_subclassing_restricted))
 - (NSString *)debugLastFacePBRRefusal;
 - (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
+//! Fable review 20, check j: the same tap through the Move arrows' "select
+//! behind" walk, as when a tap began on the selected part's arrows.
+- (NSDictionary<NSString *, id> *)debugTapBehindMoveArrowsAtWorldPointX:(double)x y:(double)y z:(double)z
+    NS_SWIFT_NAME(debugTapBehindMoveArrowsAtWorldPoint(x:y:z:));
 //! Detection only, at UIKit's rounded projected pixel: the viewer's own hit
 //! test (the MoveTo the Shell and Cut/Join/Overlap taps read), nothing selected.
 //! Answers the detected part ("entity"), its face index and the face the exact
 //! ray meets first on that part ("rayFace").
 - (NSDictionary<NSString *, id> *)debugDetectAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugDetectAtWorldPoint(x:y:z:));
+//! Fable review 17, finding 4 (DEBUG): milliseconds the edge-on rule's exact
+//! ray takes on one part of about faceCount faces; -1 when it could not run.
++ (double)debugEdgeOnRayMillisecondsWithFaceCount:(NSInteger)faceCount
+    NS_SWIFT_NAME(debugEdgeOnRayMilliseconds(faceCount:));
 //! Replay a reported camera eye without changing its direction or any model/selection state.
 - (BOOL)debugMoveCameraEyeX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugMoveCameraEye(x:y:z:));

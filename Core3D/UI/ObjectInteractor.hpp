@@ -96,6 +96,9 @@ namespace core3d {
 		Standard_Real customPlaneOffset = 0.0;
 		Standard_Real customPlaneMinimumOffset = 0.0;
 		Standard_Real customPlaneMaximumOffset = 0.0;
+		// The picked plane in world space (0 when there is none).
+		Standard_Real customPlaneOrigin[3] = {0.0, 0.0, 0.0};
+		Standard_Real customPlaneNormal[3] = {0.0, 0.0, 0.0};
     };
 #endif
 

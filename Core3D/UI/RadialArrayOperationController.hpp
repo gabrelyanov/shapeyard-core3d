@@ -229,6 +229,17 @@ private:
         OcctReferenceAxis expectedAxis;
     };
 
+    //! Where the circle turns while the tool is open (DESIGN-SYSTEM rule 8,
+    //! queue row 4). It lives only in the open operation: the preview follows
+    //! it, Cancel drops it, and Apply writes it to the source in the same owned
+    //! command as the copies, so one Undo restores both.
+    struct StagedReference {
+        OcctReferenceAxisReadState state =
+            OcctReferenceAxisReadState::Invalid;
+        OcctReferenceAxis axis;
+        gp_Ax1 worldAxis;
+    };
+
     enum class DocumentState : std::uint8_t {
         None = 0,
         AllCommitted,
@@ -262,6 +273,7 @@ private:
     Standard_Boolean rebuildPreview() noexcept;
     Standard_Boolean clearPreviewObjects() noexcept;
     Standard_Boolean refreshSourceAfterReferenceEdit() noexcept;
+    const gp_Ax1& activeWorldAxis() const noexcept;
     Standard_Boolean axisAdmitsCurrentPreview(
         const gp_Ax1& worldAxis) const noexcept;
 
@@ -290,6 +302,7 @@ private:
     std::vector<Handle(AIS_Shape)> _previewObjects;
     std::vector<PendingResult> _pendingResults;
     std::optional<PendingReferenceEdit> _pendingReferenceEdit;
+    std::optional<StagedReference> _stagedReference;
     Standard_Integer _count = kDefaultCount;
     Standard_Integer _maximumAdmittedCount = kMaximumCount;
     Standard_Real _sweepDegrees = kDefaultSweepDegrees;
