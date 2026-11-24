@@ -79,10 +79,12 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
 #include <XCAFPrs.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <XCAFPrs_IndexedDataMapOfShapeStyle.hxx>
 #include <NCollection_DataMap.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <XSControl_WorkSession.hxx>
 
@@ -381,6 +383,13 @@ public:
         myPartNames[entry.ToCString()] = name;
     }
 
+    //! Round 10 R10P-S9: materials BridgeMetalPresetMaterials made for metal
+    //! presets. Their Kd stays the sRGB colour OCCT wrote for the preset
+    //! before, in every convention but Linear; they only gain Pm and Pr.
+    void MarkPresetMaterials(const std::vector<TDF_Label>& labels) {
+        myPresetMaterials = labels;
+    }
+
     Standard_Integer ExpectedTextureCount() const {
         return myCreatesMaterialFile ? myTextures.Extent() : 0;
     }
@@ -519,7 +528,11 @@ protected:
                 : (!material.IsNull() ? material->BaseColor().GetRGB()
                                      : XCAFDoc_VisMaterialCommon().DiffuseColor);
             double r = color.Red(), g = color.Green(), b = color.Blue();
-            if (myConvention == Core3DOBJColorConventionEncoded) {
+            const bool presetMetal = hasPBR && std::any_of(
+                myPresetMaterials.begin(), myPresetMaterials.end(),
+                [&material](const TDF_Label& label) { return material->Label().IsEqual(label); });
+            if (myConvention == Core3DOBJColorConventionEncoded
+                || (presetMetal && myConvention == Core3DOBJColorConventionCurrent)) {
                 color.Values(r, g, b, Quantity_TOC_sRGB);
             }
             const PBRScalars values{r, g, b,
@@ -605,6 +618,7 @@ private:
     }
 
     Core3DOBJColorConvention myConvention;
+    std::vector<TDF_Label> myPresetMaterials;
     std::shared_ptr<NativeExportState> myState;
     std::filesystem::path myPositionsPath;
     std::ofstream myPositions;
@@ -2083,6 +2097,82 @@ bool BridgeLegacySurfaceColors(
     return bridgedColor;
 }
 
+//! Round 10 R10P-S9: a metal preset from the Material tab (Chrome, Steel,
+//! Gold ...) lives in the part's label as an OCCT material number that the
+//! OBJ writer never reads, so OBJ wrote the blaster's Chrome barrel as a plain
+//! grey "mat_1". In this private export copy only, give such a part the metal
+//! the drawn scene shows (OcctSceneSnapshotBuilder ApplyPreset: the preset's
+//! PBR colour, metallic and roughness), named after the preset, so the writer
+//! emits "newmtl Chrome" with Pm and Pr. A colour picked over the preset stays
+//! the face colour (BridgeLegacySurfaceColors), as on screen. Parts with an
+//! authored PBR colour, plain parts and non-metal presets are not touched, so
+//! their bytes stay as before.
+std::vector<TDF_Label> BridgeMetalPresetMaterials(
+    const Handle(OcctDocument)& document,
+    const Handle(TDocStd_Document)& ocafDocument,
+    const TDF_LabelSequence& rootLabels) {
+    std::vector<TDF_Label> made;
+    const Handle(XCAFDoc_VisMaterialTool) materialTool =
+        XCAFDoc_DocumentTool::VisMaterialTool(ocafDocument->Main());
+    if (materialTool.IsNull()) {
+        return made;
+    }
+    // One material per preset and picked colour: the colour a user picks over
+    // a preset is the part's colour on screen (ApplyPreset, then the colour),
+    // and a VisMaterial hides the surface colour from the writer.
+    std::map<std::pair<int, int>, TDF_Label> presetMaterials;
+    std::map<int, int> presetUses;
+    for (Standard_Integer index = 1;
+         index <= rootLabels.Length();
+         ++index) {
+        const TDF_Label& label = rootLabels.Value(index);
+        XCAFDoc_VisMaterialPBR localPBR;
+        Graphic3d_NameOfMaterial preset = Graphic3d_NameOfMaterial_DEFAULT;
+        if (document->TryPBRMaterialForLabel(label, localPBR)
+            || !document->TryMaterialNameForLabel(label, preset)
+            || preset < Graphic3d_NameOfMaterial_Brass
+            || preset > Graphic3d_NameOfMaterial_Transparent) {
+            continue;
+        }
+        const Graphic3d_MaterialAspect aspect(preset);
+        const Graphic3d_PBRMaterial& pbr = aspect.PBRMaterial();
+        if (!aspect.MaterialType(Graphic3d_MATERIAL_PHYSIC)
+            || !(pbr.Metallic() > 0.5f)) {
+            continue;
+        }
+        Quantity_NameOfColor picked = Quantity_NOC_GRAY80;
+        const bool hasPicked = document->TryColorNameForLabel(label, picked)
+            && picked >= Quantity_NOC_BLACK && picked <= Quantity_NOC_WHITE;
+        TDF_Label& materialLabel = presetMaterials[{
+            static_cast<int>(preset), hasPicked ? static_cast<int>(picked) : -1}];
+        if (materialLabel.IsNull()) {
+            XCAFDoc_VisMaterialPBR metal;
+            metal.IsDefined = Standard_True;
+            metal.BaseColor = hasPicked
+                ? Quantity_ColorRGBA(Quantity_Color(picked), pbr.Color().Alpha())
+                : pbr.Color();
+            metal.Metallic = pbr.Metallic();
+            metal.Roughness = pbr.NormalizedRoughness();
+            metal.RefractionIndex = pbr.IOR();
+            Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+            material->SetPbrMaterial(metal);
+            // "Chrome", then "Chrome 2" ... for the same preset in another colour.
+            TCollection_AsciiString name(aspect.MaterialName());
+            const int sameName = presetUses[static_cast<int>(preset)]++;
+            if (sameName > 0) {
+                name += TCollection_AsciiString(" ") + TCollection_AsciiString(sameName + 1);
+            }
+            materialLabel = materialTool->AddMaterial(material, name);
+            if (materialLabel.IsNull()) {
+                continue;
+            }
+            made.push_back(materialLabel);
+        }
+        materialTool->SetShapeMaterial(label, materialLabel);
+    }
+    return made;
+}
+
 bool HasSTEPColorExpectation(
     const Handle(TDocStd_Document)& ocafDocument,
     const TDF_LabelSequence& rootLabels) {
@@ -2452,10 +2542,21 @@ Standard_Integer RemoveCollapsedExportTriangles(
     return removed;
 }
 
+// Round 9 R9-S17 (CTO 22 Nov 22:05, 23 Nov 00:55 A, Fine only): the whole scope
+// was meshed with one fineness taken from its overall size, so a part alone came
+// out finer than the same part inside the whole model. With an own-size floor
+// (document units, > 0) each part, a direct child of the scope, is meshed at Fine
+// by its own unplaced size, so it exports the same mesh whole or selected and
+// copies that share one shape agree; the floor keeps a tiny part from blowing up
+// the file. Without a floor (saved texture layouts) and at every other quality the
+// scope stays one piece as before.
+constexpr double kOwnSizeFloorMeters = 1.0e-5;
+
 void MeshPrivateExportSurfaces(
     const TopoDS_Shape& compound,
     const std::shared_ptr<NativeExportState>& state,
-    const Message_ProgressRange& progress) {
+    const Message_ProgressRange& progress,
+    const double ownSizeFloor = 0.0) {
     BRep_Builder builder;
     Message_ProgressScope whole(progress, "Prepare private export mesh", 4);
     Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
@@ -2464,24 +2565,22 @@ void MeshPrivateExportSurfaces(
     drawer->SetDeviationAngle(state->deviationAngle);
     drawer->SetMaximalChordialDeviation(
         state->maximalChordialDeviation);
-    const Standard_Real deflection =
+    const Standard_Real wholeDeflection =
         StdPrs_ToolTriangulatedShape::GetDeflection(
             compound,
             drawer);
-    if (!std::isfinite(deflection) || deflection <= 0.0) {
+    if (!std::isfinite(wholeDeflection) || wholeDeflection <= 0.0) {
         throw NativeExportFailure(
             Core3DNativeExportErrorMeshingFailed,
             "The mesh deflection is invalid.");
     }
 
+    const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
+
     // Only analytic faces are remeshed. Mesh-only faces carry
     // authored triangles/UVs and never enter the mesher or Clean.
     // Everything here belongs to the deserialized private document.
-    TopoDS_Compound geometricFaces;
-    builder.MakeCompound(geometricFaces);
-    TopoDS_Shape meshingShape = compound;
-    bool hasGeometricFaces = false;
-    if (state->meshQuality != Core3DExportMeshQualityViewport) {
+    if (qualityPreset) {
         Standard_Integer faceCount = 0;
         for (TopExp_Explorer faces(compound, TopAbs_FACE); faces.More(); faces.Next()) {
             ThrowIfCancelled(state);
@@ -2490,18 +2589,57 @@ void MeshPrivateExportSurfaces(
                     "Mesh quality presets support up to 4,096 faces. Use viewport quality for this model.");
             }
             const TopoDS_Face face = TopoDS::Face(faces.Current());
+            if (!BRep_Tool::Surface(face).IsNull()) { BRepTools::Clean(face); }
+        }
+    }
+    struct MeshPiece {
+        TopoDS_Shape shape;
+        Standard_Real deflection;
+    };
+    std::vector<MeshPiece> pieces;
+    const auto addPiece = [&](const TopoDS_Shape& source, const Standard_Real pieceDeflection) {
+        if (!qualityPreset) {
+            pieces.push_back({source, pieceDeflection});
+            return;
+        }
+        TopoDS_Compound geometricFaces;
+        builder.MakeCompound(geometricFaces);
+        bool hasGeometricFaces = false;
+        for (TopExp_Explorer faces(source, TopAbs_FACE); faces.More(); faces.Next()) {
+            const TopoDS_Face face = TopoDS::Face(faces.Current());
             if (!BRep_Tool::Surface(face).IsNull()) {
-                BRepTools::Clean(face);
                 builder.Add(geometricFaces, face);
                 hasGeometricFaces = true;
             }
         }
-        meshingShape = geometricFaces;
+        if (hasGeometricFaces) { pieces.push_back({geometricFaces, pieceDeflection}); }
+    };
+    const bool perPartFine = std::isfinite(ownSizeFloor) && ownSizeFloor > 0.0
+        && state->deflectionType == Aspect_TOD_RELATIVE
+        && state->meshQuality == Core3DExportMeshQualityFine
+        && compound.ShapeType() == TopAbs_COMPOUND;
+    if (perPartFine) {
+        TopTools_MapOfShape seenParts;
+        for (TopoDS_Iterator parts(compound); parts.More(); parts.Next()) {
+            ThrowIfCancelled(state);
+            const TopoDS_Shape part = parts.Value().Located(TopLoc_Location());
+            if (!seenParts.Add(part)) { continue; }
+            const Standard_Real own = StdPrs_ToolTriangulatedShape::GetDeflection(part, drawer);
+            addPiece(part, std::max<Standard_Real>(
+                std::isfinite(own) && own > 0.0 ? own : wholeDeflection, ownSizeFloor));
+        }
+    } else {
+        addPiece(compound, wholeDeflection);
     }
-    const bool needsMeshing = state->meshQuality == Core3DExportMeshQualityViewport
-        ? !BRepTools::Triangulation(compound, deflection) : hasGeometricFaces;
-    if (needsMeshing) {
-        const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
+
+    Message_ProgressScope piecesScope(whole.Next(4), "Refine export mesh",
+        std::max<Standard_Integer>(1, static_cast<Standard_Integer>(pieces.size())));
+    std::int64_t meshedNodes = 0, meshedTriangles = 0;
+    for (const MeshPiece& piece : pieces) {
+        const TopoDS_Shape& meshingShape = piece.shape;
+        const Standard_Real deflection = piece.deflection;
+        Message_ProgressRange pieceRange = piecesScope.Next();
+        if (!qualityPreset && BRepTools::Triangulation(meshingShape, deflection)) { continue; }
         // Four existing attempts stay byte-for-byte in order. STL, OBJ and glTF may
         // make a fifth, bounded original-surface parameter refinement attempt.
         const bool parametricRetry = qualityPreset
@@ -2513,7 +2651,7 @@ void MeshPrivateExportSurfaces(
         // kept mesh up to about 10 % coarser, which the check below then refuses
         // (joined mug, 18 Nov: a saved Join's drawn ring face at 0.58 vs 0.532).
         const int maximumAttempts = qualityPreset ? (parametricRetry ? 5 : 4) : 2;
-        Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
+        Message_ProgressScope meshScope(pieceRange, "Refine export mesh", maximumAttempts);
         bool validMesh = false;
         for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
             ThrowIfCancelled(state);
@@ -2546,8 +2684,16 @@ void MeshPrivateExportSurfaces(
                 if (!cleared) break;
             } else if (attempt > 0) { BRepTools::Clean(meshingShape); }
             constexpr double refinementFactors[] = {1.0, 0.25, 0.125, 0.0625, 0.0625};
-            const double target = attempt == 0 || !qualityPreset ? deflection
-                : std::max(Precision::Confusion(), deflection * refinementFactors[attempt]);
+            // R9-S17 follow-up (a) (CTO 23 Nov 18:54), Fine per part only: the
+            // first retry asks for the requested fineness again with interior
+            // control before any refinement, the deepest refinement is 4x, not
+            // 16x, and no retry goes below the 0.01 mm floor. Viewport,
+            // Standard, Coarse and saved texture layouts keep the row above.
+            constexpr double perPartFactors[] = {1.0, 1.0, 0.5, 0.25, 0.25};
+            const double factor = perPartFine ? perPartFactors[attempt] : refinementFactors[attempt];
+            double target = attempt == 0 || !qualityPreset ? deflection
+                : std::max(Precision::Confusion(), deflection * factor);
+            if (perPartFine) { target = std::max(target, std::min(deflection, ownSizeFloor)); }
             BRepMesh_IncrementalMesh mesher;
             mesher.ChangeParameters().Deflection = target;
             mesher.ChangeParameters().Angle = state->deviationAngle;
@@ -2571,7 +2717,7 @@ void MeshPrivateExportSurfaces(
             }
             ThrowIfCancelled(state);
             if (qualityPreset) {
-                std::int64_t nodes = 0, triangles = 0;
+                std::int64_t nodes = meshedNodes, triangles = meshedTriangles;
                 for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
                     ThrowIfCancelled(state);
                     TopLoc_Location location;
@@ -2616,9 +2762,12 @@ void MeshPrivateExportSurfaces(
 #else
             (void)removedCollapsed;
 #endif
+            for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                TopLoc_Location location;
+                const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+                if (!mesh.IsNull()) { meshedNodes += mesh->NbNodes(); meshedTriangles += mesh->NbTriangles(); }
+            }
         }
-    } else {
-        whole.Next(4).Close();
     }
     // Desk lamp E-MID (17 Nov): at Viewport quality the private document keeps
     // the display mesh, which carries the same collapsed fillet-corner
@@ -2743,7 +2892,8 @@ NativeExportResult RunNativeExport(
                         state->selectedObjectsOnly,
                         [&](const TopoDS_Shape& shape) {
                             MeshPrivateExportSurfaces(
-                                shape, state, whole.Next(4));
+                                shape, state, whole.Next(4),
+                                kOwnSizeFloorMeters / state->sourceScene->metersPerUnit);
                         }, [&] {
                             return state->cancelled.load(
                                 std::memory_order_acquire);
@@ -2963,7 +3113,13 @@ NativeExportResult RunNativeExport(
                 builder.Add(compound, shape);
             }
 
-            MeshPrivateExportSurfaces(compound, state, whole.Next(4));
+            Standard_Real floorMetersPerUnit = 0.001;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(ocafDocument, floorMetersPerUnit)
+                || !std::isfinite(floorMetersPerUnit) || floorMetersPerUnit <= 0.0) {
+                floorMetersPerUnit = 0.001;
+            }
+            MeshPrivateExportSurfaces(compound, state, whole.Next(4),
+                kOwnSizeFloorMeters / floorMetersPerUnit);
 
             if (state->exportType == ExportTypeStl) {
                 Standard_Real metersPerUnit = 0.001;
@@ -3038,6 +3194,8 @@ NativeExportResult RunNativeExport(
                 // publishes the staged directory only after bundle validation.
                 TColStd_IndexedDataMapOfStringString fileInfo;
                 fileInfo.Add("Author", "Shapeyard 3D");
+                const std::vector<TDF_Label> presetMaterials =
+                    BridgeMetalPresetMaterials(document, ocafDocument, rootLabels);
                 const bool bridgedLegacySurfaceColor =
                     BridgeLegacySurfaceColors(
                     document,
@@ -3045,6 +3203,7 @@ NativeExportResult RunNativeExport(
                     rootLabels,
                     "The OBJ color table is unavailable.");
                 ValidatedOBJWriter writer(state);
+                writer.MarkPresetMaterials(presetMaterials);
                 if (!state->partNames.empty()) {
                     for (TDF_LabelSequence::Iterator root(rootLabels); root.More(); root.Next()) {
                         const auto named = state->partNames.find(
