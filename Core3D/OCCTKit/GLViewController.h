@@ -315,6 +315,12 @@ NS_ASSUME_NONNULL_BEGIN
 //! Round 10 (R10P-S11): YES draws committed boundaries built from now on with the old fixed
 //! depth step instead of the perspective pull toward the eye. Picture checks only.
 + (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy;
+//! Fable review 22 P1, checks only: YES keys the selected outline's cache on the camera's
+//! ProjectionState() counter again (before the repair); NO (default) on the projection's values.
++ (void)debugSetSelectedOutlineKeyedOnProjectionCounter:(BOOL)legacy;
+//! CTO 24 Nov 06:48, checks only: draw `count` frames back to back (each finished by a one-pixel
+//! readback); answers frames, wallSeconds, renderSeconds and outlineRebuilds (selected outline).
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugDrawFrames:(NSInteger)count;
 - (NSDictionary<NSString *, NSNumber *> *)
     debugFramebufferStatistics;
 - (NSDictionary<NSString *, NSNumber *> *)debugHistoryDrawingCosts;
