@@ -15053,6 +15053,15 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return [GLController debugViewportRGBA];
 }
 
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugDrawViewportFrames:(NSInteger)count {
+#if DEBUG
+    return [GLController debugDrawFrames:count];
+#else
+    (void)count;
+    return nil;
+#endif
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics {
     return [GLController debugFramebufferStatistics];
 }
