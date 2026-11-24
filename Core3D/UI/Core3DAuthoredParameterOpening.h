@@ -498,6 +498,8 @@ __attribute__((objc_subclassing_restricted))
     operation:(Core3DPartBooleanOperation)operation
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(applyBakedBoolean(target:tool:operation:refusal:));
+//! How many parts one Cut, Join or Overlap takes in all (one engine constant).
++ (NSInteger)maximumBooleanParts NS_SWIFT_NAME(maximumBooleanParts());
 //! Several parts in ONE Undo step (App Store Subtract and Union): Subtract takes every
 //! part in `tools` (the cutters) out of every part in `targets`; Union fuses every
 //! tool into the one target. The tools are used up. `refusal` gets the code.

@@ -3075,6 +3075,7 @@ bool ValidateAttachmentRigDocument(
 #include "TextReliefNativeOwner.hxx"
 #include "TextReliefBuild.hxx"
 #include <BRepCheck_Analyzer.hxx>
+#include "BooleanPartLimit.hxx"
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
 #include <BRepGProp.hxx>
@@ -13199,7 +13200,7 @@ bool BakedBooleanShapeOfManyCopies(const TopoDS_Shape& targetStored, const gp_Tr
         OCC_CATCH_SIGNALS
         result.Nullify();
         if (removedShare) *removedShare = 1.0;
-        if (toolsStored.empty() || toolsStored.size() > 32
+        if (toolsStored.empty() || toolsStored.size() > core3d::kMaximumBooleanParts
             || (operation == 2 && toolsStored.size() != 1)) return false;
         // Work on copies: the stored parts (and a Join record that Undo brings
         // back) must stay byte-identical; building can touch tolerances.
@@ -13785,19 +13786,24 @@ bool JoinInputCarriesPicture(const Handle(TDocStd_Document)& document, const TDF
     } catch (...) { return true; }
 }
 
-bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& result,
-    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks, TopoDS_Shape& tidied) noexcept {
-    tidied.Nullify();
+} // namespace
+
+// The edges of `shape` that lie between two faces of different looks (colour, material): the lines a
+// user sees on a part. `looks` are painted faces as CaptureFaceColours gives them; every other face has
+// the part's own look. Pictures on faces are not looks here (see JoinInputCarriesPicture). Used by the
+// Join tidy (never merges across them) and by Hole size (keeps them; push-pull, Fable review 18 finding 1).
+// False when the borders could not be found (then `borders` is empty and must not be read as "none").
+bool LookBorderEdges(const OcctDocument& document, const TopoDS_Shape& shape,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
+    std::vector<TopoDS_Edge>& borders) noexcept {
+    borders.clear();
     try {
         OCC_CATCH_SIGNALS
-        if (result.IsNull()) return false;
-#if DEBUG
-        if (std::getenv("SHAPEYARD_JOIN_TIDY_OFF")) return false;
-#endif
+        if (shape.IsNull()) return false;
         // Each face's look: an index into the distinct looks, -1 for the part's own look.
         std::vector<XCAFDoc_VisMaterialPBR> distinct;
         TopTools_DataMapOfShapeInteger lookOfFace;
-        for (const auto& [face, material] : document.MatchFaceLooks(result, looks, Standard_False)) {
+        for (const auto& [face, material] : document.MatchFaceLooks(shape, looks, Standard_False)) {
             int index = -1;
             for (std::size_t i = 0; i < distinct.size(); ++i)
                 if (distinct[i].IsEqual(material)) { index = int(i); break; }
@@ -13808,17 +13814,51 @@ bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& resu
             return lookOfFace.IsBound(face) ? lookOfFace.Find(face) : -1;
         };
         TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
-        TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
-        TopTools_MapOfShape seams;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
         for (int i = 1; i <= facesOfEdge.Extent(); ++i) {
             const TopTools_ListOfShape& faces = facesOfEdge.FindFromIndex(i);
             int first = -2;
             for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
                 const int look = lookOf(it.Value());
                 if (first == -2) first = look;
-                else if (look != first) { seams.Add(facesOfEdge.FindKey(i)); break; }
+                else if (look != first) { borders.push_back(TopoDS::Edge(facesOfEdge.FindKey(i))); break; }
             }
         }
+        return true;
+    } catch (...) { borders.clear(); return false; }
+}
+
+// The look borders of a stored part, in the part's own frame (the label's shape). For push-pull's
+// Hole size: together with their Split-line mark, these are the user's lines a resize must keep.
+// False when they could not be found: a caller that keeps lines must then refuse, not keep none.
+bool LookBorderEdgesOfPart(const OcctDocument& document, const TDF_Label& part,
+    std::vector<TopoDS_Edge>& borders) noexcept {
+    borders.clear();
+    try {
+        if (part.IsNull()) return false;
+        std::vector<TDF_Label> unusedLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> looks;
+        if (!document.CaptureFaceColours(part, 1.0, unusedLabels, looks)) return false;
+        return LookBorderEdges(document, XCAFDoc_ShapeTool::GetShape(part), looks, borders);
+    } catch (...) { borders.clear(); return false; }
+}
+
+namespace {
+bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& result,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks, TopoDS_Shape& tidied) noexcept {
+    tidied.Nullify();
+    try {
+        OCC_CATCH_SIGNALS
+        if (result.IsNull()) return false;
+#if DEBUG
+        if (std::getenv("SHAPEYARD_JOIN_TIDY_OFF")) return false;
+#endif
+        // Fable review 22 (CTO 09:49): if the borders cannot be found, no tidy (before, a failure
+        // abandoned the tidy; an empty list must never mean "merge everything").
+        std::vector<TopoDS_Edge> borders;
+        if (!LookBorderEdges(document, result, looks, borders)) return false;
+        TopTools_MapOfShape seams;
+        for (const TopoDS_Edge& edge : borders) seams.Add(edge);
         ShapeUpgrade_UnifySameDomain unify(result, Standard_True, Standard_True, Standard_False);
         unify.AllowInternalEdges(Standard_False);
         if (!seams.IsEmpty()) unify.KeepShapes(seams);
@@ -13858,9 +13898,9 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
     refusal = "unsupported-source";
     try {
         // One Cut / Join takes at most 32 parts in all; say so in its own word (CTO 23 Nov 03:55).
-        if (targets.size() + tools.size() > 32) { refusal = "too-many-parts"; return Standard_False; }
+        if (targets.size() + tools.size() > core3d::kMaximumBooleanParts) { refusal = "too-many-parts"; return Standard_False; }
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-            || targets.empty() || tools.empty() || targets.size() + tools.size() > 32
+            || targets.empty() || tools.empty() || targets.size() + tools.size() > core3d::kMaximumBooleanParts
             || operation < 0 || operation > 2
             || (operation != 1 && targets.size() != 1)) return Standard_False;
         // Every part once: no part is both kept and used up, none twice.
