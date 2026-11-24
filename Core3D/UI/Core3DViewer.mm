@@ -10035,6 +10035,27 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
         }
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
+        // Round 10 R10P-S5: the Case is built from its corner, so a typed Width or Depth kept the corner and
+        // the part slid (Depth 34 -> 30 moved the middle 2 mm). Keep the middle on those two; Height keeps
+        // the bottom as before. A bevelled Case (paired treatment) keeps today's placement.
+        if (!original.edgeTreatment) {
+            const auto& was = original.parameters.definition.dimensions;
+            const auto& now = parameters.definition.dimensions;
+            const double halfWidth = (was.width - now.width) / 2, halfDepth = (was.depth - now.depth) / 2;
+            const int plane = parameters.definition.plane;
+            gp_Vec shift = plane == 0 ? gp_Vec(halfWidth, halfDepth, 0)
+                : plane == 1 ? gp_Vec(halfWidth, 0, halfDepth) : gp_Vec(0, halfWidth, halfDepth);
+            if (parameters.definition.constructionFrame) {
+                gp_Trsf frame;
+                if (!parameters.definition.constructionFrame->Transform(frame)) return {};
+                shift.Transform(frame);
+            }
+            if (!std::isfinite(shift.X()) || !std::isfinite(shift.Y()) || !std::isfinite(shift.Z())) return {};
+            if (shift.Magnitude() > 0) {
+                gp_Trsf move; move.SetTranslation(shift);
+                record.requested.transform = record.previous.transform.Multiplied(move);
+            }
+        }
         record.requested.operation = OrdinaryTransformOperation::EnclosureRebuild;
         record.requested.enclosureRebuild = parameters;
         work->rebuildAuthority.emplace();

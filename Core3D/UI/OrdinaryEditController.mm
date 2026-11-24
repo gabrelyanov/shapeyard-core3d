@@ -232,6 +232,17 @@ bool MatricesEqual(const gp_Trsf& a, const gp_Trsf& b) {
     }
     return true;
 }
+// R10P-S5: a Case rebuild may move the part (to keep its middle), never turn or scale it.
+bool MatricesEqualExceptTranslation(const gp_Trsf& a, const gp_Trsf& b) {
+    for (int row = 1; row <= 3; ++row) {
+        if (!std::isfinite(b.Value(row, 4))) { return false; }
+        for (int column = 1; column <= 3; ++column) {
+            if (!std::isfinite(a.Value(row, column))
+                || a.Value(row, column) != b.Value(row, column)) { return false; }
+        }
+    }
+    return true;
+}
 // Admission accounts only for bounded floating-point arithmetic in composing
 // a rotation with a persisted transform. Candidate sealing/readback below
 // still compares exact persisted values, never this tolerance.
@@ -973,7 +984,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 std::vector<double> values;
                 if (changes.size() != 1 || representation != OcctGeometryRepresentation::BRep
                     || !record.previous.enclosure.IsCurrent(document,request.label)
-                    || !MatricesEqual(record.previous.transform,request.transform)
+                    || !MatricesEqualExceptTranslation(record.previous.transform,request.transform)
                     || request.rotationAroundPivot || !geometryChanges
                     || !enclosure::HasOnlyMetadataSubshapes(document,request.label)
                     || !enclosure::Encode(*request.enclosureRebuild,values)
