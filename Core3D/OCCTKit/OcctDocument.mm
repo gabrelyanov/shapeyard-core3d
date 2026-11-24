@@ -13792,12 +13792,14 @@ bool JoinInputCarriesPicture(const Handle(TDocStd_Document)& document, const TDF
 // user sees on a part. `looks` are painted faces as CaptureFaceColours gives them; every other face has
 // the part's own look. Pictures on faces are not looks here (see JoinInputCarriesPicture). Used by the
 // Join tidy (never merges across them) and by Hole size (keeps them; push-pull, Fable review 18 finding 1).
-std::vector<TopoDS_Edge> LookBorderEdges(const OcctDocument& document, const TopoDS_Shape& shape,
-    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) noexcept {
-    std::vector<TopoDS_Edge> borders;
+// False when the borders could not be found (then `borders` is empty and must not be read as "none").
+bool LookBorderEdges(const OcctDocument& document, const TopoDS_Shape& shape,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
+    std::vector<TopoDS_Edge>& borders) noexcept {
+    borders.clear();
     try {
         OCC_CATCH_SIGNALS
-        if (shape.IsNull()) return borders;
+        if (shape.IsNull()) return false;
         // Each face's look: an index into the distinct looks, -1 for the part's own look.
         std::vector<XCAFDoc_VisMaterialPBR> distinct;
         TopTools_DataMapOfShapeInteger lookOfFace;
@@ -13822,20 +13824,23 @@ std::vector<TopoDS_Edge> LookBorderEdges(const OcctDocument& document, const Top
                 else if (look != first) { borders.push_back(TopoDS::Edge(facesOfEdge.FindKey(i))); break; }
             }
         }
-    } catch (...) { borders.clear(); }
-    return borders;
+        return true;
+    } catch (...) { borders.clear(); return false; }
 }
 
 // The look borders of a stored part, in the part's own frame (the label's shape). For push-pull's
 // Hole size: together with their Split-line mark, these are the user's lines a resize must keep.
-std::vector<TopoDS_Edge> LookBorderEdgesOfPart(const OcctDocument& document, const TDF_Label& part) noexcept {
+// False when they could not be found: a caller that keeps lines must then refuse, not keep none.
+bool LookBorderEdgesOfPart(const OcctDocument& document, const TDF_Label& part,
+    std::vector<TopoDS_Edge>& borders) noexcept {
+    borders.clear();
     try {
-        if (part.IsNull()) return {};
+        if (part.IsNull()) return false;
         std::vector<TDF_Label> unusedLabels;
         std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> looks;
-        if (!document.CaptureFaceColours(part, 1.0, unusedLabels, looks)) return {};
-        return LookBorderEdges(document, XCAFDoc_ShapeTool::GetShape(part), looks);
-    } catch (...) { return {}; }
+        if (!document.CaptureFaceColours(part, 1.0, unusedLabels, looks)) return false;
+        return LookBorderEdges(document, XCAFDoc_ShapeTool::GetShape(part), looks, borders);
+    } catch (...) { borders.clear(); return false; }
 }
 
 namespace {
@@ -13848,8 +13853,12 @@ bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& resu
 #if DEBUG
         if (std::getenv("SHAPEYARD_JOIN_TIDY_OFF")) return false;
 #endif
+        // Fable review 22 (CTO 09:49): if the borders cannot be found, no tidy (before, a failure
+        // abandoned the tidy; an empty list must never mean "merge everything").
+        std::vector<TopoDS_Edge> borders;
+        if (!LookBorderEdges(document, result, looks, borders)) return false;
         TopTools_MapOfShape seams;
-        for (const TopoDS_Edge& edge : LookBorderEdges(document, result, looks)) seams.Add(edge);
+        for (const TopoDS_Edge& edge : borders) seams.Add(edge);
         ShapeUpgrade_UnifySameDomain unify(result, Standard_True, Standard_True, Standard_False);
         unify.AllowInternalEdges(Standard_False);
         if (!seams.IsEmpty()) unify.KeepShapes(seams);

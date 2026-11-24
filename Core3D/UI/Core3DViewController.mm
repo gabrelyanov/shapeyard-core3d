@@ -907,7 +907,8 @@ void Core3DAddDebugOrphanVisualMaterial(
 - (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value;
 @end
 // OcctDocument.mm: the edges between two faces of different looks on a stored part.
-std::vector<TopoDS_Edge> LookBorderEdgesOfPart(const OcctDocument& document, const TDF_Label& part) noexcept;
+bool LookBorderEdgesOfPart(const OcctDocument& document, const TDF_Label& part,
+    std::vector<TopoDS_Edge>& borders) noexcept;
 
 @implementation Core3DGeometrySnapFeedback
 - (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value {
@@ -23728,7 +23729,9 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
         const auto document=GLController.viewer->getDocument();
         TDF_Label label;
         if(document.IsNull()||!core3d::placement::Find(document,entity.UTF8String,label))return -1;
-        return static_cast<NSInteger>(LookBorderEdgesOfPart(*document,label).size());
+        std::vector<TopoDS_Edge> borders;
+        if(!LookBorderEdgesOfPart(*document,label,borders))return -1;
+        return static_cast<NSInteger>(borders.size());
     } catch (...) { return -1; }
 #else
     (void)entity; return -1;
