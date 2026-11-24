@@ -57,7 +57,6 @@
 #include <TColStd_ListIteratorOfListOfInteger.hxx>
 #include <TColStd_ListOfInteger.hxx>
 #include <TopExp.hxx>
-#include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #ifdef DEBUG
@@ -164,9 +163,9 @@ void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
     structure.Nullify();
 }
 
-// Coplanar native edges and the picked-face outline stay visible by a small depth
-// lead: in perspective a pull toward the eye of a thousandth of the line's distance
-// (independent of the fitted near plane), in orthographic one ES2 16-bit depth step.
+// Coplanar native edges stay visible by a small depth lead: in perspective a
+// pull toward the eye of a thousandth of the line's distance (independent of
+// the fitted near plane), in orthographic one ES2 16-bit depth step.
 // This only resolves coincident lines: normal scene depth testing stays on,
 // widths/model coordinates stay unchanged, and occColor supplies each style.
 #if DEBUG
@@ -199,7 +198,7 @@ Handle(Graphic3d_ShaderProgram) NativeBoundaryLineShader(bool screenContour = fa
 #else
     constexpr bool legacyStep = false;
 #endif
-    program->SetId(screenContour ? "shapeyard-native-contour-depth-v3"
+    program->SetId(screenContour ? "shapeyard-native-contour-depth-v2"
         : (legacyStep ? "shapeyard-native-boundary-depth-v3" : "shapeyard-native-boundary-depth-v4"));
     program->SetHeader("#version 100");
     program->SetDefaultSampler(Standard_False);
@@ -210,18 +209,11 @@ varying vec3 syBoundaryWorld;
 void main() {
     vec4 world = occModelWorldMatrix * occVertex;
     syBoundaryWorld = world.xyz / world.w;
-    vec4 view = occWorldViewMatrix * world;
-    bool perspective = occProjectionMatrix[3][3] == 0.0;
-    // Perspective: the same pull as the committed lines below, a thousandth of the distance toward
-    // the eye. The fixed step was about 5 mm at a lesson cup's distance, so the outline of a picked
-    // wall's far side showed through the near wall as light streaks (the 3 mm cup wall).
-    if (perspective) view.xyz *= (1.0 - 1.0e-3);
-    gl_Position = occProjectionMatrix * view;
+    gl_Position = occProjectionMatrix * occWorldViewMatrix * world;
     // Offsets are normalized screen displacements, not material UVs. Expand
     // with the final draw matrix; AutoZFit can update depth after preparation.
     gl_Position.xy += occTexCoord.xy * gl_Position.w;
-    // Orthographic depth is linear: one 16-bit step stays small there.
-    if (!perspective && gl_Position.z >= -gl_Position.w)
+    if (gl_Position.z >= -gl_Position.w)
         gl_Position.z = max(-gl_Position.w, gl_Position.z - gl_Position.w * (2.0 / 65535.0));
 }
 )GLSL" : legacyStep ? R"GLSL(
@@ -272,37 +264,6 @@ void main() {
 }
 )GLSL"));
     return program;
-}
-
-// A part made of solids only, each with closed shells, whose triangles face outwards.
-// An inside-out or open import is not one, and keeps the wash on both sides.
-bool NativeIsClosedOutwardPart(const TopoDS_Shape& part)
-{
-    if (part.IsNull()) return false;
-    bool hasSolid = false;
-    for (TopExp_Explorer loose(part,TopAbs_FACE,TopAbs_SHELL); loose.More(); loose.Next()) return false;
-    for (TopExp_Explorer loose(part,TopAbs_SHELL,TopAbs_SOLID); loose.More(); loose.Next()) return false;
-    for (TopExp_Explorer solid(part,TopAbs_SOLID); solid.More(); solid.Next()) {
-        hasSolid = true;
-        for (TopExp_Explorer shell(solid.Current(),TopAbs_SHELL); shell.More(); shell.Next())
-            if (!BRep_Tool::IsClosed(shell.Current())) return false;
-        double volume = 0;
-        for (TopExp_Explorer face(solid.Current(),TopAbs_FACE); face.More(); face.Next()) {
-            TopLoc_Location location;
-            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(face.Current()),location);
-            if (mesh.IsNull()) return false;
-            const gp_Trsf placement = location.Transformation();
-            const bool turned = (face.Current().Orientation() == TopAbs_REVERSED) != placement.IsNegative();
-            for (int index=1; index<=mesh->NbTriangles(); ++index) {
-                int a,b,c; mesh->Triangle(index).Get(a,b,c);
-                if (turned) std::swap(b,c);
-                volume += mesh->Node(a).Transformed(placement).XYZ().Dot(
-                    mesh->Node(b).Transformed(placement).XYZ().Crossed(mesh->Node(c).Transformed(placement).XYZ()));
-            }
-        }
-        if (!(volume > 0)) return false;
-    }
-    return hasSolid;
 }
 
 // Optional selection geometry, built only from an already-published mesh.
@@ -1551,7 +1512,6 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     BOOL _selectedSurfaceAppearanceDirty;
     BOOL _debugForceSelectionOutlineFallback;
     BOOL _selectedSurfaceWasFace;
-    BOOL _selectedWashPartsClosed;
     Handle(Graphic3d_Structure) _selectedFaceWash;
     std::vector<TopoDS_Shape> _selectedWashFaces;
     std::vector<NativeContourGeometry> _selectedContourGeometry;
@@ -2274,9 +2234,6 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     if (_debugForceSelectionOutlineFallback) { fallback(); return; }
 #endif
     std::vector<TopoDS_Shape> faces;
-    // Each picked part once (Fable review 16): faces picked alternately on two parts no longer re-walk a part per face.
-    TopTools_IndexedMapOfShape faceParts;
-    bool facePartUnknown = false;
     const auto document = _viewer->getDocument();
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         if (document.IsNull() || faces.size() >= 50'000) {
@@ -2292,9 +2249,6 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
         }
         if (shape.IsNull() || (faceMode && shape.ShapeType() != TopAbs_FACE)) { fallback(); return; }
         faces.push_back(shape);
-        const auto part = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
-        if (faceMode && !part.IsNull()) faceParts.Add(part->Shape());
-        else if (faceMode && part.IsNull()) facePartUnknown = true;
     }
     if (faces.empty()) { [self clearSelectedFaceWash]; _selectedContourGeometry.clear(); return; }
     const auto camera = _viewer->ActiveView()->Camera();
@@ -2341,15 +2295,6 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     std::vector<NativeContourVertex> contourTriangles;
     if (!sameGeometry) _selectedContourGeometry.clear();
     std::size_t contourVertexBudget=0, contourIndexBudget=0;
-    // The back of a face of a closed opaque part is never in view, so its wash must not be
-    // drawn. Pulled forward as it is, the far side of a cup's outer wall showed through the
-    // inner wall in streaks. The wash of an open or see-through part stays on both sides.
-    if (faceMode && !sameGeometry) {
-        _selectedWashPartsClosed = !facePartUnknown && faceParts.Extent() > 0;
-        for (int index = 1; _selectedWashPartsClosed && index <= faceParts.Extent(); ++index)
-            _selectedWashPartsClosed = NativeIsClosedOutwardPart(faceParts.FindKey(index));
-    }
-    bool cullsWash = _selectedWashPartsClosed;
     for (const auto& item : scene->instances) {
         const auto selection = selected.find(item.entityIdentifier);
         if (selection == selected.end() || !item.visible) continue;
@@ -2362,14 +2307,6 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
         }
         for (const auto face : selection->second.faces) {
             if (!visibleFaces.count(face)) { fallback(); return; }
-        }
-        // Every drawn face of the part, not only the picked ones (Fable review 16): a hidden or see-through face
-        // elsewhere on the part lets its inside, and so the back of the picked face, come into view.
-        for (std::size_t index = 0; index < mesh.primitives.size(); ++index) {
-            if (!item.primitiveBindings[index].visible) { cullsWash = false; continue; }
-            const auto material = item.primitiveBindings[index].materialIndex;
-            if (material >= scene->materials.size()
-                || scene->materials[material].alphaMode != core3d::scene::AlphaMode::Opaque) cullsWash = false;
         }
         const auto& m = item.worldFromObject.values;
         const auto world = [&](float x, float y, float z) {
@@ -2477,9 +2414,6 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
             aspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
             aspect->SetAlphaMode(Graphic3d_AlphaMode_Blend);
             aspect->SetPolygonOffsets(Aspect_POM_Fill,-1,-1);
-            // Auto would not cull: this aspect is translucent.
-            aspect->SetFaceCulling(cullsWash ? Graphic3d_TypeOfBackfacingModel_BackCulled
-                                             : Graphic3d_TypeOfBackfacingModel_DoubleSided);
             std::size_t vertices = 0, indices = 0;
             for (const auto& shape : faces) {
                 TopLoc_Location location;
@@ -2498,8 +2432,7 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
                 }
                 for (int index=1; index<=triangulation->NbTriangles(); ++index) {
                     int a,b,c; triangulation->Triangle(index).Get(a,b,c);
-                    // A mirrored placement turns the winding round, as StdPrs_ShadedShape does.
-                    if ((shape.Orientation() == TopAbs_REVERSED) != location.Transformation().IsNegative()) std::swap(b,c);
+                    if (shape.Orientation() == TopAbs_REVERSED) std::swap(b,c);
                     triangles->AddEdges(a,b,c);
                 }
                 const auto group = wash->NewGroup();
