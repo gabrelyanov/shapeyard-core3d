@@ -24,6 +24,14 @@ public:
     Standard_EXPORT void RedrawImmediate() const Standard_OVERRIDE;
     Standard_EXPORT void RenderFrame() const;
 
+#if DEBUG
+    //! Round 10 (founder a, d), picture checks only: YES draws with OCCT's own fitted near plane
+    //! (before the repair), NO (default) with the near plane lifted toward the model.
+    Standard_EXPORT static void debugSetLegacyNearPlane(bool legacy);
+    //! Fable review 22 P2, checks only: YES lifts the near plane from the model alone (before the repair).
+    Standard_EXPORT static void debugSetNearPlaneIgnoresFloor(bool ignore);
+#endif
+
     Standard_EXPORT void StartRotation(const Standard_Integer X,
                                        const Standard_Integer Y,
                                        const Standard_Real zRotationThreshold);
@@ -48,6 +56,8 @@ private:
     bool myLessonLightingEnabled = false;
     bool myHasUsedLessonLighting = false;
     void InvalidateAndRequestFrame() const;
+    //! Fits the depth range for one drawn frame; returns OCCT's own near/far to restore afterwards.
+    bool FitDepthRangeForFrame(Standard_Real& theOcctNear, Standard_Real& theOcctFar) const;
 
     Graphic3d_Vec2 myPointStart;
     Standard_Boolean myZRotation = false;
