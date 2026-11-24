@@ -15020,6 +15020,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return [GLController debugDisplayedShapePresentationStates];
 }
 
++ (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy {
+#ifdef DEBUG
+    [GLViewController debugSetLegacyBoundaryDepthStep:legacy];
+#else
+    (void)legacy;
+#endif
+}
+
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {
     return [GLController debugViewportRGBA];
 }

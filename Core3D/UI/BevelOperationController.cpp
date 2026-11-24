@@ -8,6 +8,7 @@
 #include "../OCCTKit/FilletFailureClassifier.hxx"
 #include "PlaneFrameSettle.hpp"
 
+#include <AIS_ColoredShape.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -1280,6 +1281,39 @@ BevelFailureKind ClassifyFailedPlainChamfer(
         theMaximumSolids, nullptr);
 }
 
+// R9-S18: the preview of a part with colours on single faces shows them, as a Join's preview does
+// (a plain presentation draws the whole part in one colour). Any other part keeps its plain preview.
+Handle(AIS_Shape) BevelPreviewPresentation(
+    const Handle(OcctDocument)& theDocument,
+    const TDF_Label& theLabel,
+    const gp_Trsf& theTransform,
+    const TopoDS_Shape& theResult,
+    const Standard_Boolean theHasFaceLooks)
+{
+    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> aMatched;
+    if (theHasFaceLooks) {
+        std::vector<TDF_Label> anUnused;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> aLooks;
+        if (theDocument->CaptureFaceColours(theLabel, 1.0, anUnused, aLooks)) {
+            aMatched = theDocument->MatchFaceLooks(theResult, aLooks);
+        }
+    }
+    if (aMatched.empty()) {
+        Handle(AIS_Shape) aPlain = new AIS_Shape(theResult);
+        aPlain->SetLocalTransformation(theTransform);
+        theDocument->LoadObjectMeterial(theLabel, aPlain);
+        return aPlain;
+    }
+    Handle(AIS_ColoredShape) aColoured = new AIS_ColoredShape(theResult);
+    aColoured->SetLocalTransformation(theTransform);
+    theDocument->LoadObjectMeterial(theLabel, aColoured);
+    // The stored faces are those of the part before the Bevel: only the result's own faces are coloured.
+    aColoured->ClearCustomAspects();
+    for (const auto& [aFace, aMaterial] : aMatched) {
+        aColoured->SetCustomColor(aFace, aMaterial.BaseColor.GetRGB());
+    }
+    return aColoured;
+}
 } // namespace
 
 Standard_Boolean IsBevelEdgeEligible(
@@ -2749,13 +2783,10 @@ Standard_Boolean BevelOperationController::installPreview(
             if (theResults[anIndex].IsNull()) {
                 return Standard_False;
             }
-            Handle(AIS_Shape) aPresentation =
-                new AIS_Shape(theResults[anIndex]);
-            aPresentation->SetLocalTransformation(
-                mySources[anIndex].transform);
-            myDoc->LoadObjectMeterial(
-                mySources[anIndex].label,
-                aPresentation);
+            Handle(AIS_Shape) aPresentation = BevelPreviewPresentation(
+                myDoc, mySources[anIndex].label,
+                mySources[anIndex].transform, theResults[anIndex],
+                mySources[anIndex].hasFaceLooks);
             aPresentations.push_back(std::move(aPresentation));
         }
         if (!myPreviewResults.empty()
@@ -3114,13 +3145,11 @@ BevelApplyResult BevelOperationController::apply() noexcept
 				if (!aNeedsCanonicalReplacement[anIndex]) {
 					continue;
 				}
-				Handle(AIS_Shape) aPresentation =
-					new AIS_Shape(aCanonicalCandidates[anIndex]);
-				aPresentation->SetLocalTransformation(
-					mySources[anIndex].transform);
-				myDoc->LoadObjectMeterial(
-					mySources[anIndex].label,
-					aPresentation);
+				Handle(AIS_Shape) aPresentation = BevelPreviewPresentation(
+					myDoc, mySources[anIndex].label,
+					mySources[anIndex].transform,
+					aCanonicalCandidates[anIndex],
+					mySources[anIndex].hasFaceLooks);
 				aCanonicalPresentations[anIndex] =
 					std::move(aPresentation);
 			}
@@ -3362,7 +3391,10 @@ BevelApplyResult BevelOperationController::apply() noexcept
         return BevelApplyResult::NoChange;
     }
 
-    bool needsRedraw = false;
+    // R9-S18 (push-pull): colours on single faces are drawn from the stored result (the whole look of
+    // each face, as after a reopen), so the part is redrawn as Shell and Hole do.
+    bool needsRedraw = std::any_of(mySources.begin(), mySources.end(),
+        [](const Source& aSource) { return aSource.hasFaceLooks; });
     {
         // The committed shapes are stored now: redrawing them must leave the bytes as committed.
         // The marks are put back when this scope closes, BEFORE anyone is told of the change

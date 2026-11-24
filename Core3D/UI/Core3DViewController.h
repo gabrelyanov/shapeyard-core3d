@@ -2630,6 +2630,9 @@ __attribute__((objc_subclassing_restricted))
     debugDisplayedShapePresentationStates;
 //! Bounded color evidence from the current OpenGL view after an actual redraw.
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA;
+//! Round 10 (R10P-S11), picture checks only: YES draws committed boundaries built from now on
+//! with the old fixed depth step; NO (default) with the perspective pull toward the eye.
++ (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy;
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics;
 //! Read-only last native tangent-preparation failure and render counters.
 - (NSDictionary<NSString *, NSNumber *> *)debugNativeFramePreparationState;
