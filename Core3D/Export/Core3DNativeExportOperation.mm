@@ -2614,10 +2614,11 @@ void MeshPrivateExportSurfaces(
         }
         if (hasGeometricFaces) { pieces.push_back({geometricFaces, pieceDeflection}); }
     };
-    if (std::isfinite(ownSizeFloor) && ownSizeFloor > 0.0
+    const bool perPartFine = std::isfinite(ownSizeFloor) && ownSizeFloor > 0.0
         && state->deflectionType == Aspect_TOD_RELATIVE
         && state->meshQuality == Core3DExportMeshQualityFine
-        && compound.ShapeType() == TopAbs_COMPOUND) {
+        && compound.ShapeType() == TopAbs_COMPOUND;
+    if (perPartFine) {
         TopTools_MapOfShape seenParts;
         for (TopoDS_Iterator parts(compound); parts.More(); parts.Next()) {
             ThrowIfCancelled(state);
@@ -2683,8 +2684,16 @@ void MeshPrivateExportSurfaces(
                 if (!cleared) break;
             } else if (attempt > 0) { BRepTools::Clean(meshingShape); }
             constexpr double refinementFactors[] = {1.0, 0.25, 0.125, 0.0625, 0.0625};
-            const double target = attempt == 0 || !qualityPreset ? deflection
-                : std::max(Precision::Confusion(), deflection * refinementFactors[attempt]);
+            // R9-S17 follow-up (a) (CTO 23 Nov 18:54), Fine per part only: the
+            // first retry asks for the requested fineness again with interior
+            // control before any refinement, the deepest refinement is 4x, not
+            // 16x, and no retry goes below the 0.01 mm floor. Viewport,
+            // Standard, Coarse and saved texture layouts keep the row above.
+            constexpr double perPartFactors[] = {1.0, 1.0, 0.5, 0.25, 0.25};
+            const double factor = perPartFine ? perPartFactors[attempt] : refinementFactors[attempt];
+            double target = attempt == 0 || !qualityPreset ? deflection
+                : std::max(Precision::Confusion(), deflection * factor);
+            if (perPartFine) { target = std::max(target, std::min(deflection, ownSizeFloor)); }
             BRepMesh_IncrementalMesh mesher;
             mesher.ChangeParameters().Deflection = target;
             mesher.ChangeParameters().Angle = state->deviationAngle;
