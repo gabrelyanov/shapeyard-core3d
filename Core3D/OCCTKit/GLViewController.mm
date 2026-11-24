@@ -67,7 +67,6 @@
 #include <algorithm>
 #include <array>
 #include <Graphic3d_Camera.hxx>
-#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -174,8 +173,19 @@ void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
 // picture check can show the fault and the repair in one run. Read when a boundary structure is built.
 static bool gDebugLegacyBoundaryDepthStep = false;
 #endif
+#if DEBUG
 // Fable review 22 P1: set only by a DEBUG check (debugSetSelectedOutlineKeyedOnProjectionCounter).
 static bool gDebugOutlineKeyedOnProjectionCounter = false;
+#endif
+// True only in a DEBUG check that asks for the old cache key (the camera's ProjectionState() counter);
+// a Release build always keys the selected outline on the projection's values.
+static inline bool OutlineKeyedOnProjectionCounter() {
+#if DEBUG
+    return gDebugOutlineKeyedOnProjectionCounter;
+#else
+    return false;
+#endif
+}
 #if DEBUG
 // CTO 24 Nov 06:48 (hand-in proof 1): selected-outline rebuilds (scene snapshot + wash) counted for the checks.
 static NSUInteger gDebugSelectedOutlineRebuilds = 0;
@@ -2260,7 +2270,7 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
             });
     if (sameGeometry && _selectedSurfaceWidthPixels == pixels
         && _selectedContourViewState == camera->WorldViewState()
-        && (gDebugOutlineKeyedOnProjectionCounter
+        && (OutlineKeyedOnProjectionCounter()
                 ? _selectedContourProjectionState == camera->ProjectionState()
                 : _selectedContourProjectionKey == SelectedContourProjectionKey(camera))
         && CGSizeEqualToSize(_selectedContourDrawable,drawable)) {
