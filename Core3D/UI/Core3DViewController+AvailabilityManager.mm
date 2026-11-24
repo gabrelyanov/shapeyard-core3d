@@ -551,6 +551,24 @@ Core3DModelCapability DocumentExportCapabilities(
     }
 }
 
+- (BOOL)bevelAllRound {
+    if (![NSThread isMainThread] || GLController == nil) {
+        return NO;
+    }
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        const std::shared_ptr<core3d::ShapeInteractor> shapeInteractor =
+            viewer == nullptr ? nullptr : viewer->getShapeInteractor();
+        return shapeInteractor != nullptr
+            && CapabilitiesAllowGizmo(self.selectedModelCapabilities,
+                                      PrimitiveGizmoTypeChamfer)
+            && shapeInteractor->bevelSelectionAllRound();
+    } catch (...) {
+        return NO;
+    }
+}
+
 - (BOOL)singleSelectedPartIsMesh {
     // Store-build twin of what debugTopologySelectionState reports as
     // selectedCount 1, selectedKind Object, presentationRepresentation

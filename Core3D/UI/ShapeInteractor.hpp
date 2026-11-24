@@ -253,6 +253,9 @@ namespace core3d {
 			//! CTO 23 Nov 03:55 (1): the refusal above is the piece budget (the
 			//! part is too detailed), not the edge limit; its own sentence.
 			Standard_Boolean bevelSelectionTooDetailed() const noexcept;
+			//! Round 10 R10P-S1: the refusal above is that every edge of the part is
+			//! already round (no sharp edge left for a whole-part Bevel); its own sentence.
+			Standard_Boolean bevelSelectionAllRound() const noexcept;
 			Standard_Boolean canBeginRoundSelection() const noexcept;
 			Standard_Boolean beginRoundSelectionFromCurrentSelection() noexcept;
 			Standard_Boolean setRoundRadiusForSelection(Standard_Real radius) noexcept;
@@ -453,7 +456,8 @@ namespace core3d {
 			Standard_Boolean tryCaptureBevelSelection(
 				std::vector<BevelSourceSelection>& selection,
 				Standard_Boolean* overEdgeLimit = nullptr,
-				Standard_Boolean* tooDetailed = nullptr) const noexcept;
+				Standard_Boolean* tooDetailed = nullptr,
+				Standard_Boolean* allRound = nullptr) const noexcept;
 			Standard_Boolean captureRetainedBevelSource(
 				BevelSourceSelection& selection) const noexcept;
 			Standard_Boolean beginBevelSelectionFromCurrentSelection() noexcept;

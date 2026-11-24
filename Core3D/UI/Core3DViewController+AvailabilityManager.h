@@ -26,6 +26,9 @@ NS_ASSUME_NONNULL_BEGIN
 //! CTO 23 Nov 03:55: with bevelOverEdgeLimit, true when the part is past Bevel's
 //! piece budget (too detailed), not past the edge limit: its own sentence.
 - (BOOL)bevelTooDetailed NS_SWIFT_NAME(bevelTooDetailed());
+//! Round 10 R10P-S1: with bevelOverEdgeLimit, true when every edge of the part is
+//! already round (nothing sharp is left for a whole-part Bevel): its own sentence.
+- (BOOL)bevelAllRound NS_SWIFT_NAME(bevelAllRound());
 //! R10-F4 (store build, CTO 24 Nov 18:38): true when exactly one part is
 //! picked as a whole object and it is a mesh (Mesh > Create mesh copy, or an
 //! imported mesh). Not debug-only: the column keeps that part's other cells
