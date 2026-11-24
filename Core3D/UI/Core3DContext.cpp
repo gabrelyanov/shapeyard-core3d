@@ -18,6 +18,15 @@
 #include <TopExp_Explorer.hxx>
 #include <V3d_View.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Vec.hxx>
+#include <Precision.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <StdSelect_ViewerSelector3d.hxx>
+#include <BRep_Builder.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <TopoDS_Compound.hxx>
+#include <algorithm>
+#include <chrono>
 #include <vector>
 #include <cmath>
 Core3DContext::Core3DContext(const Handle(V3d_Viewer)& MainViewer)
@@ -87,7 +96,303 @@ static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
     return changed;
 }
 
+// Every pick path that reads the detected owner after its own MoveTo (a tap's
+// Select, the Cut/Join/Overlap and Shell taps' hitTest, the mirror-plane pick)
+// goes through here, so the edge-on rule is the same for all of them (Fable
+// review 17, finding 1).
 AIS_StatusOfDetection Core3DContext::MoveTo(
+    Standard_Integer x, Standard_Integer y,
+    const Handle(V3d_View)& view, Standard_Boolean redraw)
+{
+    const auto status = moveToRefiningCylinders(x, y, view, redraw);
+    passEdgeOnFaceHit(view, redraw);
+    return status;
+}
+
+namespace {
+
+// A face hit whose surface normal is at a right angle to the pick ray: the
+// face is seen exactly edge-on. Edges and points carry no normal (0 vector).
+bool IsEdgeOnFaceHit(const SelectMgr_SortCriterion& hit, const gp_Dir& ray)
+{
+    const Standard_Real length = hit.Normal.Modulus();
+    if (!(length > 0.5)) return false;
+    const Standard_Real cosine = (hit.Normal.x() * ray.X() + hit.Normal.y() * ray.Y()
+                                + hit.Normal.z() * ray.Z()) / length;
+    return std::abs(cosine) < 1.0e-4;
+}
+
+bool IsCameraFacingFaceHit(const SelectMgr_SortCriterion& hit, const gp_Dir& ray)
+{
+    return hit.Normal.Modulus() > 0.5 && !IsEdgeOnFaceHit(hit, ray)
+        && !Precision::IsInfinite(hit.Point.X()) && !Precision::IsInfinite(hit.Point.Y())
+        && !Precision::IsInfinite(hit.Point.Z());
+}
+
+Standard_Integer PickedRank(const Handle(StdSelect_ViewerSelector3d)& selector,
+                            const Handle(SelectMgr_EntityOwner)& owner)
+{
+    const Standard_Integer count = std::min<Standard_Integer>(selector->NbPicked(), 256);
+    for (Standard_Integer rank = 1; rank <= count; ++rank)
+        if (selector->Picked(rank) == owner) return rank;
+    return 0;
+}
+
+enum class RayMeets { Unknown, No, Yes };
+
+// Faces the exact ray may test on one tap, summed over every shape the rule
+// looks at (Fable review 20 finding 4: the bound was per part, up to 17 parts of
+// 4,096 faces each). Above it the rule answers Unknown and OCCT's order stays.
+constexpr Standard_Integer kEdgeOnFacesPerTap = 4096;
+thread_local Standard_Integer tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+
+// Takes `faces` from this tap's budget; false when it is spent.
+bool TakeEdgeOnFaces(Standard_Integer faces)
+{
+    if (faces > tEdgeOnFacesLeft) { tEdgeOnFacesLeft = 0; return false; }
+    tEdgeOnFacesLeft -= faces;
+    return true;
+}
+
+// Where the exact pick ray meets the owner's own shape, nearest first, as a
+// position along the ray (in the part's frame, moved back to the world). No:
+// the ray passes beside it (the part is only near the tap, seen edge-on).
+// Unknown: no shape, or too large to test on a tap; OCCT's choice then stays.
+RayMeets NearestRayHitAlongShape(const TopoDS_Shape& shape, const gp_Trsf& toWorld,
+                                 const gp_Pnt& origin, const gp_Dir& ray, Standard_Real& along)
+{
+    Standard_Integer faces = 0;
+    for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next())
+        if (++faces > kEdgeOnFacesPerTap) return RayMeets::Unknown;
+    if (faces == 0 || !TakeEdgeOnFaces(faces)) return RayMeets::Unknown;
+    const gp_Trsf toPart = toWorld.Inverted();
+    IntCurvesFace_ShapeIntersector intersector;
+    intersector.Load(shape, 1.0e-7);
+    intersector.Perform(gp_Lin(origin.Transformed(toPart), ray.Transformed(toPart)), -1.0e7, 1.0e7);
+    if (!intersector.IsDone()) return RayMeets::Unknown;
+    bool found = false;
+    for (Standard_Integer index = 1; index <= intersector.NbPnt(); ++index) {
+        const gp_Pnt world = intersector.Pnt(index).Transformed(toWorld);
+        const Standard_Real distance = gp_Vec(origin, world).Dot(gp_Vec(ray));
+        // Only what lies ahead of the pick's near point can be seen.
+        if (!std::isfinite(distance) || distance < -1.0e-3) continue;
+        if (!found || distance < along) { along = distance; found = true; }
+    }
+    return found ? RayMeets::Yes : RayMeets::No;
+}
+
+RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& entity,
+                            const gp_Pnt& origin, const gp_Dir& ray, Standard_Real& along)
+{
+    const auto owner = Handle(StdSelect_BRepOwner)::DownCast(entity);
+    if (owner.IsNull() || !owner->HasShape() || !owner->HasSelectable()) return RayMeets::Unknown;
+    return NearestRayHitAlongShape(owner->Shape(), owner->Selectable()->Transformation(), origin, ray, along);
+}
+
+// The edge-on rule's verdict on the first hit (a face seen exactly edge-on)
+// against the next face that faces the camera, nextAlong along the ray. Yes:
+// the edge-on part keeps the tap, because the exact ray meets it no farther
+// than that face (a part standing on another). No: the tap goes on to the next
+// face (a covered cutter's side, whose false depth put it first). Unknown:
+// leave OCCT's order. A ray that only passes near the edge-on part does not
+// keep it: a thin fin keeps its taps through its own top, and a wall beside a
+// tray's inner bottom must not take taps on the bottom (24 Nov: a reach test
+// here turned testTopViewFaceTapsOnAHollowTraysInnerBottomAndRimPickThoseFaces red).
+RayMeets EdgeOnPartKeepsTap(const Handle(SelectMgr_EntityOwner)& first, const gp_Pnt& origin,
+                            const gp_Dir& ray, Standard_Real nextAlong, Standard_Real nextTolerance)
+{
+    Standard_Real firstAlong = 0.0;
+    const RayMeets meets = NearestRayHitAlong(first, origin, ray, firstAlong);
+    if (meets == RayMeets::Unknown) return RayMeets::Unknown;
+    return meets == RayMeets::Yes && firstAlong <= nextAlong + std::max(nextTolerance, 1.0e-6)
+        ? RayMeets::Yes : RayMeets::No;
+}
+
+} // namespace
+
+#ifdef DEBUG
+// Fable review 17, finding 4: the cost of the exact ray on a tap, on one part of
+// about faceCount faces (a row of unit boxes, 6 faces each), the ray going down
+// through the last box. Milliseconds, slowest of three; -1 when it could not run.
+double Core3DContext::DebugEdgeOnRayMilliseconds(int faceCount) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        const int boxes = std::max(1, std::min(faceCount, 4096) / 6);
+        BRep_Builder builder;
+        TopoDS_Compound part;
+        builder.MakeCompound(part);
+        for (int index = 0; index < boxes; ++index)
+            builder.Add(part, BRepPrimAPI_MakeBox(gp_Pnt(2.0 * index, 0, 0), 1, 1, 1).Shape());
+        const gp_Pnt origin(2.0 * (boxes - 1) + 0.5, 0.5, 100);
+        double slowest = 0;
+        for (int round = 0; round < 3; ++round) {
+            tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+            Standard_Real along = 0;
+            const auto start = std::chrono::steady_clock::now();
+            const RayMeets meets = NearestRayHitAlongShape(part, gp_Trsf(), origin, gp_Dir(0, 0, -1), along);
+            const auto end = std::chrono::steady_clock::now();
+            if (meets != RayMeets::Yes || std::abs(along - 99.0) > 1.0e-6) return -1;
+            slowest = std::max(slowest, std::chrono::duration<double, std::milli>(end - start).count());
+        }
+        return slowest;
+    } catch (...) {
+        return -1;
+    }
+}
+#endif
+
+// OCCT ranks a triangle seen exactly edge-on (its plane holds the view ray) at
+// a false depth near 0, so a covered cutter's side face won a tap on the body's
+// top 12 mm above it (toy car, measure's COVERED-CUTTER-TAP-TRACE.md items 6-8).
+// When the first hit is such a face, the exact ray decides: the part keeps the
+// tap only where the ray really meets it no farther than the next face that
+// faces the camera; otherwise that next face is the detected one. Edge and
+// vertex hits, gizmo owners, other drawing layers and taps that would test over 4096 faces in all are
+// left to OCCT.
+void Core3DContext::passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boolean redraw)
+{
+    if (view.IsNull() || !HasDetected()) return;
+    tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(StdSelect_ViewerSelector3d)& selector = MainSelector();
+        if (selector.IsNull()) return;
+        const Handle(SelectMgr_EntityOwner) first = DetectedOwner();
+        const Standard_Integer firstRank = PickedRank(selector, first);
+        if (firstRank < 1 || Handle(StdSelect_BRepOwner)::DownCast(first).IsNull()) return;
+        // The selector's own near/far ray: the pixel convention of the pick.
+        const auto& volume = selector->GetManager();
+        const gp_Pnt origin = volume.GetNearPickedPnt(), far = volume.GetFarPickedPnt();
+        const Standard_Real length = origin.Distance(far);
+        if (!std::isfinite(length) || length <= Precision::Confusion()) return;
+        const gp_Dir ray(gp_Vec(origin, far));
+        if (!IsEdgeOnFaceHit(selector->PickedData(firstRank), ray)) return;
+
+        // The next detected face that faces the camera (the detected list
+        // already holds only what the filters let through). OCCT's order can
+        // put a face that only lies within the pick tolerance (a rim a pixel
+        // beside the ray) before the face the ray really meets, so among the
+        // first few facing faces in the first's layer the one the exact ray
+        // meets nearest is taken; when the ray meets none of them, or one of
+        // them is too large to test, OCCT's first facing face and its own hit
+        // point stay.
+        const Standard_Integer firstLayer = selector->PickedData(firstRank).ZLayerPosition;
+        Handle(SelectMgr_EntityOwner) next, occtNext;
+        Standard_Integer nextRank = 0, occtNextRank = 0;
+        Standard_Real nextAlong = 0.0, occtNextAlong = 0.0;
+        bool nextMet = false, passedFirst = false, unknown = false;
+        Standard_Integer looked = 0;
+        for (InitDetected(); MoreDetected() && looked < 16; NextDetected()) {
+            const Handle(SelectMgr_EntityOwner) owner = DetectedCurrentOwner();
+            if (owner == first) { passedFirst = true; continue; }
+            if (!passedFirst || Handle(StdSelect_BRepOwner)::DownCast(owner).IsNull()) continue;
+            const Standard_Integer rank = PickedRank(selector, owner);
+            if (rank < 1 || !IsCameraFacingFaceHit(selector->PickedData(rank), ray)) continue;
+            // Layers drawn on top win by OCCT's own rule, whatever the depth.
+            if (selector->PickedData(rank).ZLayerPosition != firstLayer) {
+                if (next.IsNull()) return;
+                break;
+            }
+            ++looked;
+            if (next.IsNull()) {
+                next = occtNext = owner; nextRank = occtNextRank = rank;
+                nextAlong = occtNextAlong = gp_Vec(origin, selector->PickedData(rank).Point).Dot(gp_Vec(ray));
+            }
+            Standard_Real along = 0.0;
+            const RayMeets candidate = NearestRayHitAlong(owner, origin, ray, along);
+            if (candidate == RayMeets::Unknown) { unknown = true; break; }
+            if (candidate == RayMeets::Yes && (!nextMet || along < nextAlong)) {
+                next = owner; nextRank = rank; nextAlong = along; nextMet = true;
+            }
+        }
+        if (next.IsNull()) return;
+        if (unknown) { next = occtNext; nextRank = occtNextRank; nextAlong = occtNextAlong; }
+        const SelectMgr_SortCriterion& nextHit = selector->PickedData(nextRank);
+        // The edge-on part really is in front (a part standing on another), or
+        // it cannot be told: OCCT's choice stays.
+        if (EdgeOnPartKeepsTap(first, origin, ray, nextAlong, nextHit.Tolerance) != RayMeets::No)
+            return;
+        // Public cycling keeps dynamic highlight, the detected index and XOR
+        // selection in agreement; SelectDetected then takes this owner.
+        const Standard_Integer steps = 2 * std::min<Standard_Integer>(selector->NbPicked(), 256) + 2;
+        for (Standard_Integer step = 0; step < steps && DetectedOwner() != next; ++step)
+            if (HilightNextDetected(view, Standard_False) == 0) break;
+        if (DetectedOwner() != next) {
+            // Not reachable through the detected list: leave OCCT's choice.
+            for (Standard_Integer step = 0; step < steps && DetectedOwner() != first; ++step)
+                if (HilightNextDetected(view, Standard_False) == 0) break;
+        }
+        if (redraw) view->RedrawImmediate();
+    } catch (...) {
+        // OCCT's own detection stays in charge; nothing was edited.
+    }
+}
+
+// The same edge-on rule for a walk over the selector's raw hit list, which
+// reads OCCT's order without MoveTo (the Move arrows' "select behind" tap,
+// Fable review 20 finding 2). True: the hit at rank is a face seen exactly
+// edge-on that the exact ray does not meet before
+// the next face that faces the camera (in its drawing layer), so the walk must
+// go on past it. False: the hit stands, or it cannot be told.
+bool Core3DContext::IsEdgeOnHitPassedBy(const Handle(V3d_View)& view, Standard_Integer rank)
+{
+    if (view.IsNull()) return false;
+    tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(StdSelect_ViewerSelector3d)& selector = MainSelector();
+        if (selector.IsNull()) return false;
+        const Standard_Integer count = std::min<Standard_Integer>(selector->NbPicked(), 256);
+        if (rank < 1 || rank > count) return false;
+        const Handle(SelectMgr_EntityOwner) first = selector->Picked(rank);
+        if (Handle(StdSelect_BRepOwner)::DownCast(first).IsNull()) return false;
+        const auto& volume = selector->GetManager();
+        const gp_Pnt origin = volume.GetNearPickedPnt(), far = volume.GetFarPickedPnt();
+        const Standard_Real length = origin.Distance(far);
+        if (!std::isfinite(length) || length <= Precision::Confusion()) return false;
+        const gp_Dir ray(gp_Vec(origin, far));
+        if (!IsEdgeOnFaceHit(selector->PickedData(rank), ray)) return false;
+
+        // As passEdgeOnFaceHit: among the first few facing faces after it in
+        // its layer, the one the exact ray meets nearest; OCCT's first facing
+        // face when the ray meets none, or one is too large to test. A face of
+        // a selected part counts here too: it still covers what lies behind.
+        const Standard_Integer layer = selector->PickedData(rank).ZLayerPosition;
+        bool haveNext = false, nextMet = false, unknown = false;
+        Standard_Real nextAlong = 0.0, occtNextAlong = 0.0, nextTolerance = 0.0, occtNextTolerance = 0.0;
+        Standard_Integer looked = 0;
+        for (Standard_Integer other = rank + 1; other <= count && looked < 16; ++other) {
+            const Handle(SelectMgr_EntityOwner) owner = selector->Picked(other);
+            if (owner.IsNull() || owner == first || Handle(StdSelect_BRepOwner)::DownCast(owner).IsNull()) continue;
+            const SelectMgr_SortCriterion& hit = selector->PickedData(other);
+            if (!IsCameraFacingFaceHit(hit, ray)) continue;
+            if (hit.ZLayerPosition != layer) {
+                if (!haveNext) return false;
+                break;
+            }
+            ++looked;
+            if (!haveNext) {
+                haveNext = true;
+                nextAlong = occtNextAlong = gp_Vec(origin, hit.Point).Dot(gp_Vec(ray));
+                nextTolerance = occtNextTolerance = hit.Tolerance;
+            }
+            Standard_Real along = 0.0;
+            const RayMeets candidate = NearestRayHitAlong(owner, origin, ray, along);
+            if (candidate == RayMeets::Unknown) { unknown = true; break; }
+            if (candidate == RayMeets::Yes && (!nextMet || along < nextAlong)) {
+                nextAlong = along; nextTolerance = hit.Tolerance; nextMet = true;
+            }
+        }
+        if (!haveNext) return false;
+        if (unknown) { nextAlong = occtNextAlong; nextTolerance = occtNextTolerance; }
+        return EdgeOnPartKeepsTap(first, origin, ray, nextAlong, nextTolerance) == RayMeets::No;
+    } catch (...) {
+        return false;
+    }
+}
+
+AIS_StatusOfDetection Core3DContext::moveToRefiningCylinders(
     Standard_Integer x, Standard_Integer y,
     const Handle(V3d_View)& view, Standard_Boolean redraw)
 {
