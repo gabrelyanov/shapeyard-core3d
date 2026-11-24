@@ -26,6 +26,11 @@ NS_ASSUME_NONNULL_BEGIN
 //! CTO 23 Nov 03:55: with bevelOverEdgeLimit, true when the part is past Bevel's
 //! piece budget (too detailed), not past the edge limit: its own sentence.
 - (BOOL)bevelTooDetailed NS_SWIFT_NAME(bevelTooDetailed());
+//! R10-F4 (store build, CTO 24 Nov 18:38): true when exactly one part is
+//! picked as a whole object and it is a mesh (Mesh > Create mesh copy, or an
+//! imported mesh). Not debug-only: the column keeps that part's other cells
+//! dimmed with a reason in the App Store app too.
+- (BOOL)singleSelectedPartIsMesh NS_SWIFT_NAME(singleSelectedPartIsMesh());
 //! Export support is document-wide rather than selection-based. In
 //! particular, STEP is unavailable while any TriangleMesh definition remains.
 - (BOOL)canExportType:(ExportType)exportType
