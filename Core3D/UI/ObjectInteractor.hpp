@@ -609,6 +609,9 @@ namespace core3d {
             std::optional<DuplicateGroupAuthority> groups; // owned by the first result only
             profile::Record originalProfile;
             OcctObjectNameState originalName;
+            // Round 10 F11: the copy's own name ("Sight" -> "Sight 2"), set
+            // only when the source has a name; absence stays absence.
+            TCollection_ExtendedString copyName;
             TopoDS_Shape originalOwnerShape;
             bool originalProfileCurrent = false;
             TopoDS_Shape preparedProfileBinding;
