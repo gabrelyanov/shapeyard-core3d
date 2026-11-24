@@ -4,6 +4,8 @@
 #include <gp_Pnt2d.hxx>
 #include "../OCCTKit/NativeMeshVertexMove.hxx"
 #include "../OCCTKit/CommittedFaceCheckedBits.h"
+#include "CheckedBitsGuard.hxx"
+#include "../OCCTKit/BooleanPartLimit.hxx"
 #include "../OCCTKit/NativeMeshRegionExtrude.hxx"
 //
 //  Core3DViewer.m
@@ -2462,6 +2464,8 @@ bool Core3DViewer::showBooleanPairPreview(const std::string& targetEntity,
         auto state=std::make_shared<BooleanPairPreview>();
         if(!findPresentation(targetEntity,state->target,state->targetLabel)
             ||!findPresentation(toolEntity,state->tool,state->toolLabel))return false;
+        // The parts hidden here keep their saved marks (Fable engine review 21 item 1).
+        const core3d::CheckedBitsGuard keepPartBits({state->target->Shape(),state->tool->Shape()});
         state->operation=operation;
         state->preview=new AIS_Shape(result);
         state->preview->SetLocalTransformation(state->target->LocalTransformation());
@@ -2526,9 +2530,9 @@ bool Core3DViewer::cutRemovesNothing(const std::string& targetEntity,
 bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
     const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";
-    if(targetEntities.size()+toolEntities.size()>32){refusal="too-many-parts";return false;}
+    if(targetEntities.size()+toolEntities.size()>core3d::kMaximumBooleanParts){refusal="too-many-parts";return false;}
     if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||targetEntities.empty()
-        ||toolEntities.empty()||targetEntities.size()+toolEntities.size()>32
+        ||toolEntities.empty()||targetEntities.size()+toolEntities.size()>core3d::kMaximumBooleanParts
         ||operation<0||operation>2||(operation!=1&&targetEntities.size()!=1))return false;
     try{
         OCC_CATCH_SIGNALS
@@ -2542,6 +2546,12 @@ bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& 
                 for(const auto& seen:tools)if(seen.second.IsEqual(label))return false;
                 (list==&targetEntities?targets:tools).emplace_back(presentation,label);
             }
+        // The parts hidden here keep their saved marks (Fable engine review 21 item 1: the Cut tap
+        // flow and Select-all Join preview through this route).
+        std::vector<TopoDS_Shape> hiddenShapes;
+        for(const auto* list:{&targets,&tools})
+            for(const auto& [presentation,label]:*list)hiddenShapes.push_back(presentation->Shape());
+        const core3d::CheckedBitsGuard keepPartBits(hiddenShapes);
         std::vector<std::pair<TDF_Label,gp_Trsf>> toolPlacements;
         for(const auto& [presentation,label]:tools)
             toolPlacements.emplace_back(label,presentation->LocalTransformation());
@@ -2652,7 +2662,7 @@ bool Core3DViewer::applyBakedBoolean(const std::string& targetEntity,
 bool Core3DViewer::applyBakedBooleanBatch(const std::vector<std::string>& targetEntities,
     const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";
-    if(targetEntities.size()+toolEntities.size()>32){refusal="too-many-parts";return false;}
+    if(targetEntities.size()+toolEntities.size()>core3d::kMaximumBooleanParts){refusal="too-many-parts";return false;}
     if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()
         ||targetEntities.empty()||toolEntities.empty())return false;
     try{
@@ -2928,6 +2938,12 @@ bool Core3DViewer::clearBooleanPairPreview(bool reselectTarget) noexcept {
     if(!state)return true;
     try{
         OCC_CATCH_SIGNALS
+        // The parts shown again keep their saved marks (Fable engine review 21 item 1).
+        std::vector<TopoDS_Shape> shownShapes;
+        if(!state->target.IsNull())shownShapes.push_back(state->target->Shape());
+        if(!state->tool.IsNull())shownShapes.push_back(state->tool->Shape());
+        for(const auto& part:state->moreParts)if(!part.IsNull())shownShapes.push_back(part->Shape());
+        const core3d::CheckedBitsGuard keepPartBits(shownShapes);
         if(!state->preview.IsNull())myContext->Remove(state->preview,Standard_False);
         if(!state->target.IsNull())myContext->Display(state->target,Standard_False);
         if(!state->tool.IsNull())myContext->Display(state->tool,Standard_False);

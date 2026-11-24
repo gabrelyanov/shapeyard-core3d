@@ -3165,6 +3165,8 @@ BevelApplyResult BevelOperationController::apply() noexcept
 		// Phase 3: adopt the canonical solids as this operation's preview
 		// shapes, replacing the old presentations in the context.
 		Standard_Boolean aCanonicalAdopted = Standard_True;
+		{
+		// Marks put back when this block closes, before any notice (Fable engine review 21 item 3).
 		const core3d::CheckedBitsGuard keepStoredBits(StoredShapesOf(mySources));
 		try {
 			OCC_CATCH_SIGNALS
@@ -3187,6 +3189,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			myContext->UpdateCurrentViewer();
 		} catch (...) {
 			aCanonicalAdopted = Standard_False;
+		}
 		}
 		if (!aCanonicalAdopted) {
 			// Mirror installPreview recovery: drop every preview and restore
@@ -3217,6 +3220,10 @@ BevelApplyResult BevelOperationController::apply() noexcept
         return BevelApplyResult::NoChange;
     }
 
+    // Faces with their own look: the preview was drawn in the part's one look, so the
+    // part is drawn again from the document after Apply (round 10 R10-F1: a joined
+    // orange + grey part showed all one colour after Bevel although both were kept).
+    bool carriedFaceLooks = false;
     myCanApply = Standard_False;
     myState = BevelPreviewState::Committing;
     notifyPreviewStateChanged();
@@ -3285,6 +3292,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
                     &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex])
                     &&myDoc->CarryFaceColours(source.label,myPreviewResults[anIndex]->Shape(),
                         faceLabels,colouredFaces);
+                if(staged&&!colouredFaces.empty()) carriedFaceLooks=true;
             }
             if (!staged) {
                 // Discharge this command's companion only after verified
@@ -3383,43 +3391,46 @@ BevelApplyResult BevelOperationController::apply() noexcept
         return BevelApplyResult::NoChange;
     }
 
-    // R9-S18: colours on single faces are drawn from the stored result (the whole look of
+    // R9-S18 (push-pull): colours on single faces are drawn from the stored result (the whole look of
     // each face, as after a reopen), so the part is redrawn as Shell and Hole do.
     bool needsRedraw = std::any_of(mySources.begin(), mySources.end(),
         [](const Source& aSource) { return aSource.hasFaceLooks; });
-    // The committed shapes are stored now: redrawing them must leave the bytes as committed.
-    const core3d::CheckedBitsGuard keepCommittedBits(ShapesOf(myPreviewResults));
-    try {
-        for (Standard_Size anIndex = 0;
-             anIndex < myPreviewResults.size(); ++anIndex) {
-            myContext->Display(
-                myPreviewResults[anIndex],
-                AIS_Shaded,
-                mySources[anIndex].selectionMode,
-                Standard_False);
-            myContext->Activate(
-                myPreviewResults[anIndex],
-                mySources[anIndex].selectionMode,
-                Standard_False);
-            myContext->Remove(
-                mySources[anIndex].original,
-                Standard_False);
+    {
+        // The committed shapes are stored now: redrawing them must leave the bytes as committed.
+        // The marks are put back when this scope closes, BEFORE anyone is told of the change
+        // (Fable engine review 21 item 3: a listener could read or save in between).
+        const core3d::CheckedBitsGuard keepCommittedBits(ShapesOf(myPreviewResults));
+        try {
+            for (Standard_Size anIndex = 0;
+                 anIndex < myPreviewResults.size(); ++anIndex) {
+                myContext->Display(
+                    myPreviewResults[anIndex],
+                    AIS_Shaded,
+                    mySources[anIndex].selectionMode,
+                    Standard_False);
+                myContext->Activate(
+                    myPreviewResults[anIndex],
+                    mySources[anIndex].selectionMode,
+                    Standard_False);
+                myContext->Remove(
+                    mySources[anIndex].original,
+                    Standard_False);
+            }
+            myContext->ClearSelected(Standard_False);
+            myContext->UpdateCurrentViewer();
+        } catch (...) {
+            needsRedraw = true;
         }
-        myContext->ClearSelected(Standard_False);
-        myContext->UpdateCurrentViewer();
+    }
+    try {
         myDoc->NotifyChanges();
     } catch (...) {
-        needsRedraw = true;
-        try {
-            myDoc->NotifyChanges();
-        } catch (...) {
-        }
     }
     // The preview presentations are now the committed document presentations;
     // release controller ownership without removing them.
     clearState();
     notifyPreviewStateChanged();
-    return needsRedraw
+    return needsRedraw || carriedFaceLooks
         ? BevelApplyResult::AppliedNeedsDocumentRedraw
         : BevelApplyResult::Applied;
 }
