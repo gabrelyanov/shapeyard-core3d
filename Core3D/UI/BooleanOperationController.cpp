@@ -3,6 +3,7 @@
 //  Core3D
 //
 
+#include "CheckedBitsGuard.hxx"
 #include "BooleanOperationController.hpp"
 #include "BooleanMetadataTransfer.hxx"
 
@@ -2390,6 +2391,22 @@ void BooleanOperationController::acceptWorkerResult(
     notifyPreviewStateChanged();
 }
 
+namespace {
+// The stored shapes behind presentations a Join/Cut preview hides and shows again, for
+// CheckedBitsGuard (Fable engine review 16 item 1).
+template <typename Presentations>
+std::vector<TopoDS_Shape> PresentedShapesOf(const Presentations& thePresentations) noexcept {
+    std::vector<TopoDS_Shape> shapes;
+    try {
+        for (const auto& anObject : thePresentations) {
+            const Handle(AIS_Shape) aShape = Handle(AIS_Shape)::DownCast(anObject);
+            if (!aShape.IsNull()) shapes.push_back(aShape->Shape());
+        }
+    } catch (...) { shapes.clear(); }
+    return shapes;
+}
+} // namespace
+
 Standard_Boolean BooleanOperationController::installSubtractPreview(
     const std::vector<TopoDS_Shape>& theResults) noexcept
 {
@@ -2399,6 +2416,7 @@ Standard_Boolean BooleanOperationController::installSubtractPreview(
         TemporalBooleanObject state;
     };
     std::vector<Preview> aPreviews;
+    const core3d::CheckedBitsGuard keepSourceBits(PresentedShapesOf(_actedIOArray));
     const auto forgetOwnedResult = [&](
         const Handle(AIS_InteractiveObject)& theResult) noexcept {
         _ownedPresentations.erase(
@@ -2519,6 +2537,7 @@ Standard_Boolean BooleanOperationController::installSingleResultPreview(
     const TopoDS_Shape& theResult) noexcept
 {
     Handle(AIS_InteractiveObject) aResult;
+    const core3d::CheckedBitsGuard keepSourceBits(PresentedShapesOf(_actedIOArray));
     const auto rollbackPresentation = [&]() noexcept {
         bool didRollbackAll = true;
         bool didRemoveResult = aResult.IsNull();
@@ -3426,6 +3445,10 @@ Standard_Boolean BooleanOperationController::cancelImpl() noexcept
         return Standard_False;
     }
 
+    // Showing the parts again must not change their stored bytes (Fable review 16 item 1).
+    std::vector<Handle(AIS_InteractiveObject)> aShownAgain;
+    for (const auto& aSelection : _selectionMap) aShownAgain.push_back(aSelection.second.original);
+    const core3d::CheckedBitsGuard keepOriginalBits(PresentedShapesOf(aShownAgain));
     for (const auto& aSelection : _selectionMap) {
         const Handle(AIS_InteractiveObject)& anOriginal =
             aSelection.second.original;

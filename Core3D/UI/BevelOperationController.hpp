@@ -145,10 +145,10 @@ class BevelOperationController
     : public std::enable_shared_from_this<BevelOperationController> {
 public:
     static constexpr std::size_t kMaxSourceBodies = 8;
-    static constexpr Standard_Size kMaxSelectedEdges = 64;
+    static constexpr Standard_Size kMaxSelectedEdges = 128;
     //! kMaxSelectedEdges; a DEBUG build may raise it with the environment
     //! variable SHAPEYARD_BEVEL_MAX_EDGES (1...1024) to measure what a larger
-    //! limit costs (CTO 22 Nov 18:47). A user's build always takes 64.
+    //! limit costs (CTO 22 Nov 18:47). A user's build always takes kMaxSelectedEdges.
     static Standard_Size MaxSelectedEdges() noexcept;
     static constexpr Standard_Size kMaxSourceTopologyNodes = 1'024;
     static constexpr Standard_Size kMaxCaptureTopologyNodes = 8'192;
@@ -245,6 +245,8 @@ private:
         std::shared_ptr<const RetainedBevelAdapter::Capture> retainedCapture;
         // A standalone saved Hole that Apply bakes in its own command.
         Standard_Boolean bakesSavedCut = Standard_False;
+        // R9-C3 Ramp (A): the part carries an editable Ramp; Apply bakes it.
+        Standard_Boolean bakesRamp = Standard_False;
         //! True when any face of the part carries its own look (a painted
         //! face, or a Join of parts that look different). A flat Bevel then
         //! never merges flat seams: the merge would give a two-look side one

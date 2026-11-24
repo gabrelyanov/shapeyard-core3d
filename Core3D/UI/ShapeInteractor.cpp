@@ -3204,10 +3204,14 @@ namespace core3d {
 
 	Standard_Boolean ShapeInteractor::tryCaptureBevelSelection(
 		std::vector<BevelSourceSelection>& theSelection,
-		Standard_Boolean* theOverEdgeLimit) const noexcept {
+		Standard_Boolean* theOverEdgeLimit,
+		Standard_Boolean* theTooDetailed) const noexcept {
 		theSelection.clear();
 		if (theOverEdgeLimit != nullptr) {
 			*theOverEdgeLimit = Standard_False;
+		}
+		if (theTooDetailed != nullptr) {
+			*theTooDetailed = Standard_False;
 		}
 		if (myContext.IsNull() || myDoc.IsNull()
 			|| _bevelController == nullptr
@@ -3236,7 +3240,10 @@ namespace core3d {
 
 		struct CapturedSource {
 			Handle(AIS_Shape) presentation;
+			// The solid Bevel works on, and the shape the part shows (a
+			// compound around that solid for a Ramp).
 			TopoDS_Shape shape;
+			TopoDS_Shape presentedShape;
 			BevelSourceSelection selection;
 			TopTools_IndexedMapOfShape edges;
 			TopTools_IndexedMapOfShape faces;
@@ -3302,7 +3309,19 @@ namespace core3d {
 						>= BevelOperationController::kMaxSourceBodies) {
 						return Standard_False;
 					}
-					const TopoDS_Shape aShape = aPresentation->Shape();
+					// R9-C3 Ramp (CTO 23 Nov 00:55): a part stored as a compound around
+					// its one solid (a Ramp, an App Store 5.34.1 Union) is bevelled on
+					// that solid, as the controller does (BevelOperationController).
+					const TopoDS_Shape aPresentedShape = aPresentation->Shape();
+					TopoDS_Shape aShape = aPresentedShape;
+					while (!aShape.IsNull() && aShape.ShapeType() == TopAbs_COMPOUND) {
+						TopoDS_Iterator anOnly(aShape);
+						if (!anOnly.More()) break;
+						const TopoDS_Shape aChild = anOnly.Value();
+						anOnly.Next();
+						if (anOnly.More()) break;
+						aShape = aChild;
+					}
 					const TDF_Label aLabel = myDoc->ShapeLabel(aPresentation);
 					const TopoDS_Shape aStoredShape =
 						XCAFDoc_ShapeTool::GetShape(aLabel);
@@ -3313,19 +3332,31 @@ namespace core3d {
 						|| !IsBRepModelingLabel(myDoc, aLabel, Standard_True)
 						|| !myDoc->IsPresentationEditable(aPresentation)
 						|| aStoredShape.IsNull()
-						|| !aStoredShape.IsEqual(aShape)
-						|| !ConsumeBevelSourceTopologyBudget(
+						|| !aStoredShape.IsEqual(aPresentedShape)) {
+						return Standard_False;
+					}
+					if (!ConsumeBevelSourceTopologyBudget(
 							aShape,
 							aPerSourceTopologyLimit,
 							anAggregateTopologyLimit,
 							anAggregateTopologyCount,
 							aSourceTopologyCount)) {
+						// CTO 23 Nov 00:55 (3b): a solid part past Bevel's piece budget
+						// keeps Bevel offered, dimmed with the same reason as the
+						// edge limit.
+						if (theOverEdgeLimit != nullptr) {
+							*theOverEdgeLimit = Standard_True;
+						}
+						if (theTooDetailed != nullptr) {
+							*theTooDetailed = Standard_True;
+						}
 						return Standard_False;
 					}
 
 					auto aCaptured = std::make_unique<CapturedSource>();
 					aCaptured->presentation = aPresentation;
 					aCaptured->shape = aShape;
+					aCaptured->presentedShape = aPresentedShape;
 					aCaptured->selection.original = aPresentation;
 					aCaptured->selection.documentLabel = aLabel;
 					aCaptured->selection.selectionMode =
@@ -3348,8 +3379,7 @@ namespace core3d {
 				const TopoDS_Shape anOwnedShape = aBRepOwner->Shape();
 				TopoDS_Shape aCanonicalSelectedShape;
 				if (_topAbsSelMode == TopAbs_SHAPE) {
-					if (anOwnedShape.ShapeType() != TopAbs_SOLID
-						|| !anOwnedShape.IsEqual(aSource->shape)) {
+					if (!anOwnedShape.IsEqual(aSource->presentedShape)) {
 						return Standard_False;
 					}
 					aCanonicalSelectedShape = aSource->shape;
@@ -3452,8 +3482,16 @@ namespace core3d {
 						 anEdge.More(); anEdge.Next()) {
 						if (++anEdgeOccurrenceCount
 								> BevelOperationController::
-									kMaxSourceTopologyNodes
-							|| !captureEdge(TopoDS::Edge(anEdge.Current()))) {
+									kMaxSourceTopologyNodes) {
+							if (theOverEdgeLimit != nullptr) {
+								*theOverEdgeLimit = Standard_True;
+							}
+							if (theTooDetailed != nullptr) {
+								*theTooDetailed = Standard_True;
+							}
+							return Standard_False;
+						}
+						if (!captureEdge(TopoDS::Edge(anEdge.Current()))) {
 							return Standard_False;
 						}
 					}
@@ -3503,6 +3541,15 @@ namespace core3d {
 		std::vector<BevelSourceSelection> aSelection;
 		Standard_Boolean anOverLimit = Standard_False;
 		return !tryCaptureBevelSelection(aSelection, &anOverLimit) && anOverLimit;
+	}
+
+	Standard_Boolean ShapeInteractor::bevelSelectionTooDetailed() const noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		Standard_Boolean aTooDetailed = Standard_False;
+		return !tryCaptureBevelSelection(aSelection, nullptr, &aTooDetailed) && aTooDetailed;
 	}
 
 	Standard_Boolean ShapeInteractor::canBeginRoundSelection() const noexcept {
