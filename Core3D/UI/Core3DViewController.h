@@ -2667,6 +2667,10 @@ __attribute__((objc_subclassing_restricted))
 - (NSString *)debugLastFacePBRRefusal;
 - (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
+//! Fable review 20, check j: the same tap through the Move arrows' "select
+//! behind" walk, as when a tap began on the selected part's arrows.
+- (NSDictionary<NSString *, id> *)debugTapBehindMoveArrowsAtWorldPointX:(double)x y:(double)y z:(double)z
+    NS_SWIFT_NAME(debugTapBehindMoveArrowsAtWorldPoint(x:y:z:));
 //! Detection only, at UIKit's rounded projected pixel: the viewer's own hit
 //! test (the MoveTo the Shell and Cut/Join/Overlap taps read), nothing selected.
 //! Answers the detected part ("entity"), its face index and the face the exact

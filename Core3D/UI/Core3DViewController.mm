@@ -15240,6 +15240,18 @@ static void DebugPickRay(const Handle(V3d_View)& view, const Handle(AIS_Interact
     return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES];
 }
 
+// Fable review 20, check j: the tap goes through the Move arrows' "select
+// behind" walk (Core3DViewer::SelectBehindMoveHandles, OcctViewer::SelectBehind)
+// as when a tap began on the arrows, instead of the plain Select.
+static BOOL sDebugTapBehindMoveArrows = NO;
+
+- (NSDictionary<NSString *, id> *)debugTapBehindMoveArrowsAtWorldPointX:(double)x y:(double)y z:(double)z {
+    sDebugTapBehindMoveArrows = YES;
+    NSDictionary<NSString *, id> *answer = [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES];
+    sDebugTapBehindMoveArrows = NO;
+    return answer;
+}
+
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z nativeTouch:(BOOL)nativeTouch {
     if (!NSThread.isMainThread || !GLController.viewer
         || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return @{@"error":@"Invalid pick"};
@@ -15270,7 +15282,8 @@ static void DebugPickRay(const Handle(V3d_View)& view, const Handle(AIS_Interact
                 viewer->StartRotation(px,py);
                 viewer->CancelInteraction(px,py);
             }
-            viewer->Select(px,py);
+            if (sDebugTapBehindMoveArrows) viewer->SelectBehindMoveHandles(px,py);
+            else viewer->Select(px,py);
             answer[@"after"]=@([GLController debugSelectedShapeCount]);
             answer[@"hasDetected"]=@(context->HasDetected());
             if (context->HasDetected()) {
