@@ -3136,6 +3136,8 @@ BevelApplyResult BevelOperationController::apply() noexcept
 		// Phase 3: adopt the canonical solids as this operation's preview
 		// shapes, replacing the old presentations in the context.
 		Standard_Boolean aCanonicalAdopted = Standard_True;
+		{
+		// Marks put back when this block closes, before any notice (Fable engine review 21 item 3).
 		const core3d::CheckedBitsGuard keepStoredBits(StoredShapesOf(mySources));
 		try {
 			OCC_CATCH_SIGNALS
@@ -3158,6 +3160,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			myContext->UpdateCurrentViewer();
 		} catch (...) {
 			aCanonicalAdopted = Standard_False;
+		}
 		}
 		if (!aCanonicalAdopted) {
 			// Mirror installPreview recovery: drop every preview and restore
@@ -3355,33 +3358,36 @@ BevelApplyResult BevelOperationController::apply() noexcept
     }
 
     bool needsRedraw = false;
-    // The committed shapes are stored now: redrawing them must leave the bytes as committed.
-    const core3d::CheckedBitsGuard keepCommittedBits(ShapesOf(myPreviewResults));
-    try {
-        for (Standard_Size anIndex = 0;
-             anIndex < myPreviewResults.size(); ++anIndex) {
-            myContext->Display(
-                myPreviewResults[anIndex],
-                AIS_Shaded,
-                mySources[anIndex].selectionMode,
-                Standard_False);
-            myContext->Activate(
-                myPreviewResults[anIndex],
-                mySources[anIndex].selectionMode,
-                Standard_False);
-            myContext->Remove(
-                mySources[anIndex].original,
-                Standard_False);
+    {
+        // The committed shapes are stored now: redrawing them must leave the bytes as committed.
+        // The marks are put back when this scope closes, BEFORE anyone is told of the change
+        // (Fable engine review 21 item 3: a listener could read or save in between).
+        const core3d::CheckedBitsGuard keepCommittedBits(ShapesOf(myPreviewResults));
+        try {
+            for (Standard_Size anIndex = 0;
+                 anIndex < myPreviewResults.size(); ++anIndex) {
+                myContext->Display(
+                    myPreviewResults[anIndex],
+                    AIS_Shaded,
+                    mySources[anIndex].selectionMode,
+                    Standard_False);
+                myContext->Activate(
+                    myPreviewResults[anIndex],
+                    mySources[anIndex].selectionMode,
+                    Standard_False);
+                myContext->Remove(
+                    mySources[anIndex].original,
+                    Standard_False);
+            }
+            myContext->ClearSelected(Standard_False);
+            myContext->UpdateCurrentViewer();
+        } catch (...) {
+            needsRedraw = true;
         }
-        myContext->ClearSelected(Standard_False);
-        myContext->UpdateCurrentViewer();
+    }
+    try {
         myDoc->NotifyChanges();
     } catch (...) {
-        needsRedraw = true;
-        try {
-            myDoc->NotifyChanges();
-        } catch (...) {
-        }
     }
     // The preview presentations are now the committed document presentations;
     // release controller ownership without removing them.

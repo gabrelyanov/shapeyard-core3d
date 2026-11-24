@@ -3075,6 +3075,7 @@ bool ValidateAttachmentRigDocument(
 #include "TextReliefNativeOwner.hxx"
 #include "TextReliefBuild.hxx"
 #include <BRepCheck_Analyzer.hxx>
+#include "BooleanPartLimit.hxx"
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
 #include <BRepGProp.hxx>
@@ -13199,7 +13200,7 @@ bool BakedBooleanShapeOfManyCopies(const TopoDS_Shape& targetStored, const gp_Tr
         OCC_CATCH_SIGNALS
         result.Nullify();
         if (removedShare) *removedShare = 1.0;
-        if (toolsStored.empty() || toolsStored.size() > 32
+        if (toolsStored.empty() || toolsStored.size() > core3d::kMaximumBooleanParts
             || (operation == 2 && toolsStored.size() != 1)) return false;
         // Work on copies: the stored parts (and a Join record that Undo brings
         // back) must stay byte-identical; building can touch tolerances.
@@ -13858,9 +13859,9 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
     refusal = "unsupported-source";
     try {
         // One Cut / Join takes at most 32 parts in all; say so in its own word (CTO 23 Nov 03:55).
-        if (targets.size() + tools.size() > 32) { refusal = "too-many-parts"; return Standard_False; }
+        if (targets.size() + tools.size() > core3d::kMaximumBooleanParts) { refusal = "too-many-parts"; return Standard_False; }
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-            || targets.empty() || tools.empty() || targets.size() + tools.size() > 32
+            || targets.empty() || tools.empty() || targets.size() + tools.size() > core3d::kMaximumBooleanParts
             || operation < 0 || operation > 2
             || (operation != 1 && targets.size() != 1)) return Standard_False;
         // Every part once: no part is both kept and used up, none twice.
