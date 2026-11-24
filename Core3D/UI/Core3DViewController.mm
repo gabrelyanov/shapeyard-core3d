@@ -906,6 +906,10 @@ void Core3DAddDebugOrphanVisualMaterial(
 @interface Core3DGeometrySnapFeedback ()
 - (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value;
 @end
+// OcctDocument.mm: the edges between two faces of different looks on a stored part.
+bool LookBorderEdgesOfPart(const OcctDocument& document, const TDF_Label& part,
+    std::vector<TopoDS_Edge>& borders) noexcept;
+
 @implementation Core3DGeometrySnapFeedback
 - (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value {
     self = [super init];
@@ -13551,6 +13555,10 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     // Deliberately retain topology, owners and history: this exercises the
     // document-notification invalidation instead of a new shape cache key.
     colors->SetVisibility(faceLabel, visible);
+    // The XCAF presentation reads sub-shape styles (the hidden mark among them) on its first compute only;
+    // re-read them, as ClearEphemeralDecalAppearance does, or the face stays drawn while the scene says hidden.
+    if (const auto styled = Handle(CafShapePrs)::DownCast(presentation); !styled.IsNull())
+        styled->DispatchStyles(Standard_True);
     presentation->SetToUpdate();
     context->Redisplay(presentation, Standard_False);
     doc->NotifyChanges();
@@ -23876,6 +23884,22 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
     } catch (...) { return NO; }
 #else
     (void)entity; return NO;
+#endif
+}
+
+- (NSInteger)debugLookBorderEdgeCount:(NSString *)entity {
+#if DEBUG
+    if(![NSThread isMainThread]||!GLController||!GLController.viewer||!entity||!entity.UTF8String)return -1;
+    try {
+        const auto document=GLController.viewer->getDocument();
+        TDF_Label label;
+        if(document.IsNull()||!core3d::placement::Find(document,entity.UTF8String,label))return -1;
+        std::vector<TopoDS_Edge> borders;
+        if(!LookBorderEdgesOfPart(*document,label,borders))return -1;
+        return static_cast<NSInteger>(borders.size());
+    } catch (...) { return -1; }
+#else
+    (void)entity; return -1;
 #endif
 }
 

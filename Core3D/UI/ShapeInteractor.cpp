@@ -3205,13 +3205,17 @@ namespace core3d {
 	Standard_Boolean ShapeInteractor::tryCaptureBevelSelection(
 		std::vector<BevelSourceSelection>& theSelection,
 		Standard_Boolean* theOverEdgeLimit,
-		Standard_Boolean* theTooDetailed) const noexcept {
+		Standard_Boolean* theTooDetailed,
+		Standard_Boolean* theAllRound) const noexcept {
 		theSelection.clear();
 		if (theOverEdgeLimit != nullptr) {
 			*theOverEdgeLimit = Standard_False;
 		}
 		if (theTooDetailed != nullptr) {
 			*theTooDetailed = Standard_False;
+		}
+		if (theAllRound != nullptr) {
+			*theAllRound = Standard_False;
 		}
 		if (myContext.IsNull() || myDoc.IsNull()
 			|| _bevelController == nullptr
@@ -3424,6 +3428,7 @@ namespace core3d {
 				aSource->selectedTopology.Add(aCanonicalSelectedShape);
 
 				Standard_Size anOwnerEligibleEdgeCount = 0;
+				Standard_Size anOwnerSmoothEdgeCount = 0;
 				const auto captureEdge = [&](const TopoDS_Edge& anEdge) {
 					const Standard_Integer anIndex =
 						anEdge.IsNull() ? 0 : aSource->edges.FindIndex(anEdge);
@@ -3449,6 +3454,18 @@ namespace core3d {
 							aSource->facesOfEdgeMapped = true;
 						}
 						if (IsSmoothBevelEdge(aSource->facesOfEdge, aCanonicalEdge)) {
+							// A round made by Bevel meets another face; a seam that closes one
+							// face on itself (a sphere, a cylinder's side) is not a round.
+							const Standard_Integer aFacesIndex =
+								aSource->facesOfEdge.FindIndex(aCanonicalEdge);
+							if (aFacesIndex > 0) {
+								const TopTools_ListOfShape& aFaces =
+									aSource->facesOfEdge.FindFromIndex(aFacesIndex);
+								if (aFaces.Extent() == 2
+									&& !aFaces.First().IsSame(aFaces.Last())) {
+									++anOwnerSmoothEdgeCount;
+								}
+							}
 							return Standard_True;
 						}
 					}
@@ -3497,6 +3514,17 @@ namespace core3d {
 					}
 				}
 				if (anOwnerEligibleEdgeCount == 0) {
+					// Round 10 R10P-S1: every edge is already round (a cube after one round
+					// Bevel). Bevel stays in the column, dimmed with its reason, instead of
+					// leaving it.
+					if (anOwnerSmoothEdgeCount > 0 && _topAbsSelMode != TopAbs_EDGE) {
+						if (theOverEdgeLimit != nullptr) {
+							*theOverEdgeLimit = Standard_True;
+						}
+						if (theAllRound != nullptr) {
+							*theAllRound = Standard_True;
+						}
+					}
 					return Standard_False;
 				}
 			}
@@ -3550,6 +3578,15 @@ namespace core3d {
 		std::vector<BevelSourceSelection> aSelection;
 		Standard_Boolean aTooDetailed = Standard_False;
 		return !tryCaptureBevelSelection(aSelection, nullptr, &aTooDetailed) && aTooDetailed;
+	}
+
+	Standard_Boolean ShapeInteractor::bevelSelectionAllRound() const noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		Standard_Boolean anAllRound = Standard_False;
+		return !tryCaptureBevelSelection(aSelection, nullptr, nullptr, &anAllRound) && anAllRound;
 	}
 
 	Standard_Boolean ShapeInteractor::canBeginRoundSelection() const noexcept {
