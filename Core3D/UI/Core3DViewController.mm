@@ -13551,6 +13551,10 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     // Deliberately retain topology, owners and history: this exercises the
     // document-notification invalidation instead of a new shape cache key.
     colors->SetVisibility(faceLabel, visible);
+    // The XCAF presentation reads sub-shape styles (the hidden mark among them) on its first compute only;
+    // re-read them, as ClearEphemeralDecalAppearance does, or the face stays drawn while the scene says hidden.
+    if (const auto styled = Handle(CafShapePrs)::DownCast(presentation); !styled.IsNull())
+        styled->DispatchStyles(Standard_True);
     presentation->SetToUpdate();
     context->Redisplay(presentation, Standard_False);
     doc->NotifyChanges();
