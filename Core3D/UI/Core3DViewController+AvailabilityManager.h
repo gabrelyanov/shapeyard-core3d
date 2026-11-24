@@ -26,6 +26,9 @@ NS_ASSUME_NONNULL_BEGIN
 //! CTO 23 Nov 03:55: with bevelOverEdgeLimit, true when the part is past Bevel's
 //! piece budget (too detailed), not past the edge limit: its own sentence.
 - (BOOL)bevelTooDetailed NS_SWIFT_NAME(bevelTooDetailed());
+//! Round 10 R10P-S1: with bevelOverEdgeLimit, true when every edge of the part is
+//! already round (nothing sharp is left for a whole-part Bevel): its own sentence.
+- (BOOL)bevelAllRound NS_SWIFT_NAME(bevelAllRound());
 //! Export support is document-wide rather than selection-based. In
 //! particular, STEP is unavailable while any TriangleMesh definition remains.
 - (BOOL)canExportType:(ExportType)exportType
