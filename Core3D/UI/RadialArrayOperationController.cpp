@@ -988,6 +988,7 @@ Standard_Boolean RadialArrayOperationController::begin() noexcept
     clearCommandOwnership();
     _pendingResults.clear();
     _pendingReferenceEdit.reset();
+    _stagedReference.reset();
     _state = RadialArrayPreviewState::Selecting;
     ++_generation;
     if (!rebuildPreview()) {
@@ -1031,7 +1032,7 @@ Standard_Boolean RadialArrayOperationController::rebuildPreview() noexcept
             }
             const gp_Trsf aTransform = ArrayTransform(
                 _source->transform,
-                _source->worldAxis,
+                activeWorldAxis(),
                 anOrdinal,
                 _sweepDegrees,
                 _count);
@@ -1294,8 +1295,19 @@ OcctReferenceAxisReadState RadialArrayOperationController::referenceAxis(
         || !sourceIsCurrent(Standard_True)) {
         return OcctReferenceAxisReadState::Invalid;
     }
+    if (_stagedReference.has_value()) {
+        theAxis = _stagedReference->axis;
+        return _stagedReference->state;
+    }
     theAxis = _source->referenceAxis;
     return _source->referenceAxisState;
+}
+
+const gp_Ax1& RadialArrayOperationController::activeWorldAxis() const noexcept
+{
+    return _stagedReference.has_value()
+        ? _stagedReference->worldAxis
+        : _source->worldAxis;
 }
 
 std::uint64_t
@@ -1325,16 +1337,19 @@ RadialArrayOperationController::convertReferenceAxisSpaces(
         || !sourceIsCurrent(Standard_True)) {
         return Standard_False;
     }
+    const OcctReferenceAxis& aReference = _stagedReference.has_value()
+        ? _stagedReference->axis : _source->referenceAxis;
+    const gp_Ax1& aWorldAxis = activeWorldAxis();
     try {
         OCC_CATCH_SIGNALS
         gp_Trsf anInverse;
         const Standard_Boolean needsInverse =
             (thePivotSpace == OcctReferenceSpace::Object
                 && thePivotSpace
-                    != _source->referenceAxis.pivotSpace)
+                    != aReference.pivotSpace)
             || (theDirectionSpace == OcctReferenceSpace::Object
                 && theDirectionSpace
-                    != _source->referenceAxis.directionSpace);
+                    != aReference.directionSpace);
         if (needsInverse) {
             anInverse = _source->transform.Inverted();
         }
@@ -1342,17 +1357,17 @@ RadialArrayOperationController::convertReferenceAxisSpaces(
         aConverted.pivotSpace = thePivotSpace;
         aConverted.directionSpace = theDirectionSpace;
         aConverted.pivot =
-            thePivotSpace == _source->referenceAxis.pivotSpace
-            ? _source->referenceAxis.pivot
+            thePivotSpace == aReference.pivotSpace
+            ? aReference.pivot
             : thePivotSpace == OcctReferenceSpace::World
-                ? _source->worldAxis.Location()
-                : _source->worldAxis.Location().Transformed(anInverse);
+                ? aWorldAxis.Location()
+                : aWorldAxis.Location().Transformed(anInverse);
         aConverted.direction =
-            theDirectionSpace == _source->referenceAxis.directionSpace
-            ? _source->referenceAxis.direction
+            theDirectionSpace == aReference.directionSpace
+            ? aReference.direction
             : theDirectionSpace == OcctReferenceSpace::World
-                ? _source->worldAxis.Direction()
-                : _source->worldAxis.Direction().Transformed(anInverse);
+                ? aWorldAxis.Direction()
+                : aWorldAxis.Direction().Transformed(anInverse);
         const std::array<Standard_Real, 3> aPivot = {{
             aConverted.pivot.X(),
             aConverted.pivot.Y(),
@@ -1457,7 +1472,7 @@ Standard_Boolean RadialArrayOperationController::capturePreview(
                     aPreview->Transformation(),
                     ArrayTransform(
                         _source->transform,
-                        _source->worldAxis,
+                        activeWorldAxis(),
                         static_cast<Standard_Integer>(anIndex + 1U),
                         _sweepDegrees,
                         _count))) {
@@ -1802,6 +1817,35 @@ RadialArrayOperationController::inspectPendingResults() noexcept
             }
             ++aCommittedCount;
         }
+        if (_stagedReference.has_value()) {
+            // The staged centre is written in the same command as the copies:
+            // all copies committed means it is stored, none means it is not.
+            OcctReferenceAxis aSourceAxis;
+            const OcctReferenceAxisReadState aSourceState =
+                _document->ReadReferenceAxisForLabel(
+                    _source->label, aSourceAxis);
+            const Standard_Boolean isBefore =
+                aSourceState == _source->referenceAxisState
+                && aSourceState != OcctReferenceAxisReadState::Invalid
+                && !ReferenceAxisDiffers(aSourceAxis, _source->referenceAxis);
+            const Standard_Boolean isAfter =
+                aSourceState == _stagedReference->state
+                && aSourceState != OcctReferenceAxisReadState::Invalid
+                && !ReferenceAxisDiffers(aSourceAxis, _stagedReference->axis);
+            if (_pendingResults.empty()) {
+                return isBefore ? DocumentState::None
+                                : DocumentState::PartialOrMismatched;
+            }
+            if (aCommittedCount == _pendingResults.size()) {
+                return isAfter ? DocumentState::AllCommitted
+                               : DocumentState::PartialOrMismatched;
+            }
+            if (aMissingCount == _pendingResults.size()) {
+                return isBefore ? DocumentState::None
+                                : DocumentState::PartialOrMismatched;
+            }
+            return DocumentState::PartialOrMismatched;
+        }
         if (aCommittedCount == _pendingResults.size()) {
             return DocumentState::AllCommitted;
         }
@@ -2037,103 +2081,107 @@ RadialArrayOperationController::editReferenceAxis(
         || !sourceIsCurrent(Standard_True)) {
         return RadialArrayReferenceEditResult::RetryableFailure;
     }
-    if (theAxis.has_value()
-        && _source->referenceAxisState
-            == OcctReferenceAxisReadState::Authored
-        && !ReferenceAxisDiffers(*theAxis, _source->referenceAxis)) {
-        return RadialArrayReferenceEditResult::NoChange;
-    }
-    if (!theAxis.has_value()
-        && _source->referenceAxisState
-            == OcctReferenceAxisReadState::ImplicitDefault) {
-        return RadialArrayReferenceEditResult::NoChange;
-    }
-
-    PendingReferenceEdit anEdit;
-    anEdit.previousState = _source->referenceAxisState;
-    anEdit.previousAxis = _source->referenceAxis;
-    anEdit.expectedState = theAxis.has_value()
+    // Queue row 4 / DESIGN-SYSTEM rule 8: where the circle turns is part of
+    // the open tool. Nothing is written to the document here: the choice is
+    // kept in the operation, the preview follows it, Cancel drops it and Apply
+    // writes it with the copies in one owned command (one Undo step).
+    const OcctReferenceAxisReadState aWantedState = theAxis.has_value()
         ? OcctReferenceAxisReadState::Authored
         : OcctReferenceAxisReadState::ImplicitDefault;
-    anEdit.expectedAxis = theAxis.has_value()
+    const OcctReferenceAxis aWantedAxis = theAxis.has_value()
         ? *theAxis : OcctReferenceAxis{};
-    _pendingReferenceEdit = anEdit;
-    _state = RadialArrayPreviewState::Committing;
-    ++_generation;
-    notifyStateChanged();
+    const OcctReferenceAxisReadState aCurrentState =
+        _stagedReference.has_value()
+        ? _stagedReference->state : _source->referenceAxisState;
+    const OcctReferenceAxis aCurrentAxis = _stagedReference.has_value()
+        ? _stagedReference->axis : _source->referenceAxis;
+    if (aWantedState == aCurrentState
+        && (aWantedState == OcctReferenceAxisReadState::ImplicitDefault
+            || !ReferenceAxisDiffers(aWantedAxis, aCurrentAxis))) {
+        return RadialArrayReferenceEditResult::NoChange;
+    }
+    if ((aWantedAxis.pivotSpace != OcctReferenceSpace::Object
+            && aWantedAxis.pivotSpace != OcctReferenceSpace::World)
+        || (aWantedAxis.directionSpace != OcctReferenceSpace::Object
+            && aWantedAxis.directionSpace != OcctReferenceSpace::World)) {
+        return RadialArrayReferenceEditResult::RetryableFailure;
+    }
 
-    Handle(TDocStd_Document) aDocument;
-    try {
-        aDocument = _document->ChangeDocument();
-    } catch (...) {
-    }
-    if (aDocument.IsNull() || aDocument != _source->document
-        || !beginOwnedCommand(aDocument)) {
-        return reconcileReferenceEdit();
-    }
+    StagedReference aStaged;
+    aStaged.state = aWantedState;
+    aStaged.axis = aWantedAxis;
     try {
         OCC_CATCH_SIGNALS
-        const Standard_Boolean didWrite = theAxis.has_value()
-            ? _document->SetReferenceAxisForLabel(
-                _source->label, *theAxis)
-            : _document->ResetReferenceAxisForLabel(_source->label);
-        OcctReferenceAxis aStoredAxis;
-        const OcctReferenceAxisReadState aStoredState =
-            _document->ReadReferenceAxisForLabel(
-                _source->label, aStoredAxis);
-        gp_Ax1 aStoredWorldAxis;
-        if (!didWrite
-            || aStoredState != anEdit.expectedState
-            || ReferenceAxisDiffers(aStoredAxis, anEdit.expectedAxis)
-            || !_document->ResolveReferenceAxisInWorld(
-                _source->label,
-                TopLoc_Location(),
-                aStoredWorldAxis)
-            || !axisAdmitsCurrentPreview(aStoredWorldAxis)
-            || !_document->ValidateGeometryRepresentations()
-            || !_document->ValidateReferenceAxes()) {
-            (void)abortOwnedCommand();
-            return reconcileReferenceEdit();
-        }
-#ifdef DEBUG
-        if (_debugProfileCopyFault == 15 && !_source->profileOwner.object.enclosure.label.IsNull()) {
-            _debugProfileCopyFault = 0;
-            TDataStd_AsciiString::Set(_source->profileOwner.object.enclosure.label, enclosure::IdentityID(),
-                TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
-        }
-        if (_debugProfileCopyFault == 7 || _debugProfileCopyFault == 8) {
-            const Standard_Integer aFault = _debugProfileCopyFault;
-            _debugProfileCopyFault = 0;
-            if (aFault == 7 && !_source->profileOwner.object.profile.label.IsNull()) {
-                TDataStd_AsciiString::Set(_source->profileOwner.object.profile.label, profile::IdentityID(),
-                    TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
-            } else if (aFault == 8) {
-                TDataStd_Name::Set(_source->label, TCollection_ExtendedString("Injected unexpected reference-edit name"));
+        const std::array<Standard_Real, 6> aValues = {{
+            aWantedAxis.pivot.X(), aWantedAxis.pivot.Y(),
+            aWantedAxis.pivot.Z(), aWantedAxis.direction.X(),
+            aWantedAxis.direction.Y(), aWantedAxis.direction.Z(),
+        }};
+        for (std::size_t anIndex = 0; anIndex < aValues.size(); ++anIndex) {
+            if (!std::isfinite(aValues[anIndex])
+                || (anIndex < 3
+                    && std::abs(aValues[anIndex])
+                        > limits::kMaximumModelCoordinateMagnitude)) {
+                return RadialArrayReferenceEditResult::RetryableFailure;
             }
         }
-#endif
-        try {
-            Standard_Boolean aCommitReported =
-                aDocument->CommitCommand();
-#ifdef DEBUG
-            const Standard_Integer aCommitMode =
-                _debugReferenceEditCommitMode;
-            _debugReferenceEditCommitMode = 0;
-            if (aCommitMode == 1) {
-                aCommitReported = Standard_False;
-            } else if (aCommitMode == 2) {
-                throw Standard_Failure(
-                    "Injected Radial reference commit exception after close");
-            }
-#endif
-            (void)aCommitReported;
-        } catch (...) {
-            // Readback below is authoritative for false/throw-after-close.
+        // Same resolution as OcctDocument::ResolveReferenceAxisInWorld for
+        // a free definition: Object-bound parts go through the validated
+        // object transform, World-bound parts stay fixed.
+        gp_Pnt aWorldPivot = aWantedAxis.pivot;
+        if (aWantedAxis.pivotSpace == OcctReferenceSpace::Object) {
+            aWorldPivot.Transform(_source->transform);
         }
+        gp_Vec aWorldDirection(aWantedAxis.direction);
+        if (aWantedAxis.directionSpace == OcctReferenceSpace::Object) {
+            aWorldDirection.Transform(_source->transform);
+        }
+        const Standard_Real aSquaredMagnitude =
+            aWorldDirection.SquareMagnitude();
+        if (!std::isfinite(aWorldPivot.X()) || !std::isfinite(aWorldPivot.Y())
+            || !std::isfinite(aWorldPivot.Z())
+            || !std::isfinite(aSquaredMagnitude)
+            || aSquaredMagnitude
+                <= std::numeric_limits<Standard_Real>::epsilon()) {
+            return RadialArrayReferenceEditResult::RetryableFailure;
+        }
+        aStaged.worldAxis = gp_Ax1(aWorldPivot, gp_Dir(aWorldDirection));
     } catch (...) {
-        (void)abortOwnedCommand();
+        return RadialArrayReferenceEditResult::RetryableFailure;
     }
-    return reconcileReferenceEdit();
+    if (!axisAdmitsCurrentPreview(aStaged.worldAxis)) {
+        return RadialArrayReferenceEditResult::RetryableFailure;
+    }
+
+    const Standard_Boolean matchesDocument =
+        aWantedState == _source->referenceAxisState
+        && (aWantedState == OcctReferenceAxisReadState::ImplicitDefault
+            || !ReferenceAxisDiffers(aWantedAxis, _source->referenceAxis));
+    if (matchesDocument) {
+        _stagedReference.reset();
+    } else {
+        _stagedReference = aStaged;
+    }
+    if (!advanceReferenceAuthorityToken()) {
+        (void)clearPreviewObjects();
+        _previewValid = Standard_False;
+        _state = RadialArrayPreviewState::Failed;
+        ++_generation;
+        notifyStateChanged();
+        return RadialArrayReferenceEditResult::Applied;
+    }
+    if (IsNearZeroStep(_sweepDegrees, _count)) {
+        _state = clearPreviewObjects()
+            ? RadialArrayPreviewState::Selecting
+            : RadialArrayPreviewState::Failed;
+    } else if (!rebuildPreview()) {
+        _state = RadialArrayPreviewState::Failed;
+    } else {
+        _state = RadialArrayPreviewState::Ready;
+    }
+    ++_generation;
+    notifyStateChanged();
+    return RadialArrayReferenceEditResult::Applied;
 }
 
 RadialArrayReferenceEditResult
@@ -2178,8 +2226,9 @@ RadialArrayOperationController::finishCommittedOperation() noexcept
 RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
 {
     if (!hasActiveOperation() || _pendingReferenceEdit.has_value()) {
-        // Reference metadata has its own command and recovery ledger. Radial
-        // Apply never folds it into geometry persistence or reconciles it.
+        // A legacy reference ledger is never folded into Apply. A reference
+        // chosen while the tool is open is staged (_stagedReference) and is
+        // written below inside Apply's own command, with the copies.
         return RadialArrayApplyResult::NoChange;
     }
     if (_state == RadialArrayPreviewState::OutcomeUnknown
@@ -2300,7 +2349,7 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
             }
             const gp_Trsf aTransform = ArrayTransform(
                 _source->transform,
-                _source->worldAxis,
+                activeWorldAxis(),
                 anOrdinal,
                 _sweepDegrees,
                 _count);
@@ -2506,6 +2555,46 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
         return retainRetryableOrUnknown();
     }
 #endif
+    if (_stagedReference.has_value()) {
+        Standard_Boolean isWritten = Standard_False;
+        try {
+            OCC_CATCH_SIGNALS
+            const Standard_Boolean didWrite =
+                _stagedReference->state == OcctReferenceAxisReadState::Authored
+                ? _document->SetReferenceAxisForLabel(
+                    _source->label, _stagedReference->axis)
+                : _document->ResetReferenceAxisForLabel(_source->label);
+            OcctReferenceAxis aStoredAxis;
+            const OcctReferenceAxisReadState aStoredState =
+                _document->ReadReferenceAxisForLabel(
+                    _source->label, aStoredAxis);
+            gp_Ax1 aStoredWorldAxis;
+            isWritten = didWrite
+                && aStoredState == _stagedReference->state
+                && !ReferenceAxisDiffers(aStoredAxis, _stagedReference->axis)
+                && _document->ResolveReferenceAxisInWorld(
+                    _source->label, TopLoc_Location(), aStoredWorldAxis)
+                && !WorldAxisDiffers(
+                    aStoredWorldAxis, _stagedReference->worldAxis);
+        } catch (...) {
+            isWritten = Standard_False;
+        }
+        if (!isWritten) {
+            _state = abortOwnedCommand()
+                ? (_previewValid ? RadialArrayPreviewState::Ready
+                                 : RadialArrayPreviewState::Failed)
+                : RadialArrayPreviewState::OutcomeUnknown;
+            ++_generation;
+            notifyStateChanged();
+            return RadialArrayApplyResult::NoChange;
+        }
+    }
+    const OcctReferenceAxisReadState aResultReferenceState =
+        _stagedReference.has_value()
+        ? _stagedReference->state : _source->referenceAxisState;
+    const OcctReferenceAxis aResultReferenceAxis =
+        _stagedReference.has_value()
+        ? _stagedReference->axis : _source->referenceAxis;
     try {
         OCC_CATCH_SIGNALS
         _pendingResults.reserve(aPrepared.size());
@@ -2523,8 +2612,8 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                 _source->destinationRepresentation,
                 aResult.presentation->Shape(),
                 aResult.transform,
-                _source->referenceAxisState,
-                _source->referenceAxis,
+                aResultReferenceState,
+                aResultReferenceAxis,
             });
             PendingResult& aPending = _pendingResults.back();
             if (aPending.entityIdentifier.empty()
@@ -2683,6 +2772,26 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                 TDataStd_Name::Set(aTarget, TCollection_ExtendedString("Injected unexpected array name"));
             }
         }
+        // Faults 7, 8 and 15 once hit the separate reference command. The
+        // chosen centre is now written inside Apply's command, so they fire
+        // here, after the staged centre and every copy are written.
+        if (_stagedReference.has_value()) {
+            if (_debugProfileCopyFault == 15 && !_source->profileOwner.object.enclosure.label.IsNull()) {
+                _debugProfileCopyFault = 0;
+                TDataStd_AsciiString::Set(_source->profileOwner.object.enclosure.label, enclosure::IdentityID(),
+                    TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
+            }
+            if (_debugProfileCopyFault == 7 || _debugProfileCopyFault == 8) {
+                const Standard_Integer aFault = _debugProfileCopyFault;
+                _debugProfileCopyFault = 0;
+                if (aFault == 7 && !_source->profileOwner.object.profile.label.IsNull()) {
+                    TDataStd_AsciiString::Set(_source->profileOwner.object.profile.label, profile::IdentityID(),
+                        TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
+                } else if (aFault == 8) {
+                    TDataStd_Name::Set(_source->label, TCollection_ExtendedString("Injected unexpected reference-edit name"));
+                }
+            }
+        }
 #endif
         try {
             Standard_Boolean aCommitReported =
@@ -2759,6 +2868,7 @@ void RadialArrayOperationController::clearInactiveState() noexcept
     _previewObjects.clear();
     _pendingResults.clear();
     _pendingReferenceEdit.reset();
+    _stagedReference.reset();
     _source.reset();
     _count = kDefaultCount;
     _maximumAdmittedCount = kMaximumCount;
