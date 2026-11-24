@@ -1569,6 +1569,9 @@ __attribute__((objc_subclassing_restricted))
 //! stored recipe records; it never checks recipe currency, so a stale recipe
 //! (e.g. a filleted seat) stays observable. Refuses off-main, busy, open or
 //! unresolved edit, invalid unit, non-BRep or excessive topology with nil.
+//! DEBUG builds only (-1 otherwise): how many edges of the part lie between two faces that look
+//! different (LookBorderEdgesOfPart, the user's colour lines Hole size must keep).
+- (NSInteger)debugLookBorderEdgeCount:(NSString *)entity NS_SWIFT_NAME(debugLookBorderEdgeCount(_:));
 - (nullable NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity
     NS_SWIFT_NAME(debugNativeSolidEvidence(_:));
 //! DEBUG probe (base lane, lamp Width Undo 10->14): remembers the face TShapes of every

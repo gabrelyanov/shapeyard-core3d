@@ -2,6 +2,7 @@
 #include <BRep_Builder.hxx>
 #include <sstream>
 #import "Core3DAuthoredParameterOpening.h"
+#include "../OCCTKit/BooleanPartLimit.hxx"
 #import "../OCCTKit/GLViewController.h"
 #import "../Viewport/Core3DSceneSnapshot.h"
 
@@ -1377,10 +1378,10 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     if ([NSThread isMainThread]) sLastBakedBooleanPreviewRefusal = @"unsupported-source";
     // One Cut / Join takes at most 32 parts in all; say so in its own word (CTO 23 Nov 03:55).
     if ([NSThread isMainThread] && [targets isKindOfClass:NSArray.class] && [tools isKindOfClass:NSArray.class]
-        && targets.count + tools.count > 32) { sLastBakedBooleanPreviewRefusal = @"too-many-parts"; return NO; }
+        && targets.count + tools.count > core3d::kMaximumBooleanParts) { sLastBakedBooleanPreviewRefusal = @"too-many-parts"; return NO; }
     if (![NSThread isMainThread] || ![targets isKindOfClass:NSArray.class]
         || ![tools isKindOfClass:NSArray.class] || targets.count == 0 || tools.count == 0
-        || targets.count + tools.count > 32) return NO;
+        || targets.count + tools.count > core3d::kMaximumBooleanParts) return NO;
     try {
         GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
             ? (GLViewController *)self.glController : nil;
@@ -1404,16 +1405,20 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     } catch (...) { return NO; }
 }
 
++ (NSInteger)maximumBooleanParts {
+    return static_cast<NSInteger>(core3d::kMaximumBooleanParts);
+}
+
 - (BOOL)applyBakedBooleanTargets:(NSArray<NSString *> *)targets
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation
     refusal:(NSString * _Nullable * _Nullable)refusal {
     if (refusal) *refusal = @"unsupported-source";
     if ([targets isKindOfClass:NSArray.class] && [tools isKindOfClass:NSArray.class]
-        && targets.count + tools.count > 32) { if (refusal) *refusal = @"too-many-parts"; return NO; }
+        && targets.count + tools.count > core3d::kMaximumBooleanParts) { if (refusal) *refusal = @"too-many-parts"; return NO; }
     if (![NSThread isMainThread] || ![targets isKindOfClass:NSArray.class]
         || ![tools isKindOfClass:NSArray.class] || targets.count == 0 || tools.count == 0
-        || targets.count + tools.count > 32) return NO;
+        || targets.count + tools.count > core3d::kMaximumBooleanParts) return NO;
     try {
         GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
             ? (GLViewController *)self.glController : nil;
