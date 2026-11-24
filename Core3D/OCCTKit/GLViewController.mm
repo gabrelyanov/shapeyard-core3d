@@ -6213,6 +6213,12 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
 			state.customPlaneMinimumOffset),
 		@"customPlaneMaximumOffset": @(
 			state.customPlaneMaximumOffset),
+		@"customPlaneOriginX": @(state.customPlaneOrigin[0]),
+		@"customPlaneOriginY": @(state.customPlaneOrigin[1]),
+		@"customPlaneOriginZ": @(state.customPlaneOrigin[2]),
+		@"customPlaneNormalX": @(state.customPlaneNormal[0]),
+		@"customPlaneNormalY": @(state.customPlaneNormal[1]),
+		@"customPlaneNormalZ": @(state.customPlaneNormal[2]),
     };
 }
 

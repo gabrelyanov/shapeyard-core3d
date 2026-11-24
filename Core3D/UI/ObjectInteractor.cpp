@@ -8223,6 +8223,16 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		const auto anOffsetRange = mirrorPlaneOffsetRange();
 		aState.customPlaneMinimumOffset = anOffsetRange.first;
 		aState.customPlaneMaximumOffset = anOffsetRange.second;
+		if (_customMirrorPlane.has_value()) {
+			const gp_Pnt& anOrigin = _customMirrorPlane->worldOrigin;
+			const gp_Dir& aNormal = _customMirrorPlane->worldNormal;
+			aState.customPlaneOrigin[0] = anOrigin.X();
+			aState.customPlaneOrigin[1] = anOrigin.Y();
+			aState.customPlaneOrigin[2] = anOrigin.Z();
+			aState.customPlaneNormal[0] = aNormal.X();
+			aState.customPlaneNormal[1] = aNormal.Y();
+			aState.customPlaneNormal[2] = aNormal.Z();
+		}
 		try {
 			const Handle(TDocStd_Document) aDocument = myDoc.IsNull()
 				? Handle(TDocStd_Document)()
