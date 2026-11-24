@@ -15247,8 +15247,15 @@ static BOOL sDebugTapBehindMoveArrows = NO;
 
 - (NSDictionary<NSString *, id> *)debugTapBehindMoveArrowsAtWorldPointX:(double)x y:(double)y z:(double)z {
     sDebugTapBehindMoveArrows = YES;
-    NSDictionary<NSString *, id> *answer = [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES];
+#ifdef DEBUG
+    OcctViewer::DebugLastBehindWalk().clear();
+#endif
+    NSMutableDictionary<NSString *, id> *answer =
+        [[self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES] mutableCopy];
     sDebugTapBehindMoveArrows = NO;
+#ifdef DEBUG
+    answer[@"walk"] = [NSString stringWithUTF8String:OcctViewer::DebugLastBehindWalk().c_str()];
+#endif
     return answer;
 }
 

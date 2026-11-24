@@ -20,6 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE
 
 #include "OcctViewer.h"
+#include <cstdio>
 #include <Aspect_Window.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <gp_Trsf.hxx>
@@ -786,6 +787,20 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
         // their active mode on again.
         aSelector->Pick(theX, theY, myView);
         Handle(SelectMgr_EntityOwner) aBehind;
+#ifdef DEBUG
+        std::string& aWalk = DebugLastBehindWalk();
+        aWalk.clear();
+        auto aNote = [&](Standard_Integer theRank, const char* theWhat) {
+            const SelectMgr_SortCriterion& aHit = aSelector->PickedData(theRank);
+            char aText[160];
+            std::snprintf(aText, sizeof aText, "r%d %s d%.3f t%.3f at(%.2f,%.2f,%.2f) n(%.2f,%.2f,%.2f); ",
+                theRank, theWhat, aHit.Depth, aHit.Tolerance, aHit.Point.X(), aHit.Point.Y(), aHit.Point.Z(),
+                aHit.Normal.x(), aHit.Normal.y(), aHit.Normal.z());
+            aWalk += aText;
+        };
+#else
+        auto aNote = [](Standard_Integer, const char*) {};
+#endif
         const Standard_Integer aCount = std::min<Standard_Integer>(aSelector->NbPicked(), 256);
         for (Standard_Integer aRank = 1; aRank <= aCount; ++aRank) {
             const Handle(SelectMgr_EntityOwner) anOwner = aSelector->Picked(aRank);
@@ -794,7 +809,7 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
             // The selected part itself (the cutter behind its own arrows) is
             // not what the tap is for: go on to the part behind it. A part
             // counts as selected when any of its owners is.
-            if (anOwner->IsSelected()) { continue; }
+            if (anOwner->IsSelected()) { aNote(aRank, "selected"); continue; }
             const Handle(AIS_InteractiveObject) aPart =
                 Handle(AIS_InteractiveObject)::DownCast(anOwner->Selectable());
             if (aPart.IsNull() || myContext->IsSelected(aPart)) { continue; }
@@ -820,7 +835,8 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
             // order (a covered cutter's side beside the tap): the same rule as
             // a plain tap decides whether the ray really reaches it (Fable
             // review 20 finding 2).
-            if (myContext->IsEdgeOnHitPassedBy(myView, aRank)) { continue; }
+            if (myContext->IsEdgeOnHitPassedBy(myView, aRank)) { aNote(aRank, "edge-on passed"); continue; }
+            aNote(aRank, "taken");
             aBehind = anOwner;
             break;
         }
