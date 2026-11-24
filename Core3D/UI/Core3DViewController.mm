@@ -15244,6 +15244,25 @@ static void DebugPickRay(const Handle(V3d_View)& view, const Handle(AIS_Interact
     return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES];
 }
 
+// Fable review 20, check j: the tap goes through the Move arrows' "select
+// behind" walk (Core3DViewer::SelectBehindMoveHandles, OcctViewer::SelectBehind)
+// as when a tap began on the arrows, instead of the plain Select.
+static BOOL sDebugTapBehindMoveArrows = NO;
+
+- (NSDictionary<NSString *, id> *)debugTapBehindMoveArrowsAtWorldPointX:(double)x y:(double)y z:(double)z {
+    sDebugTapBehindMoveArrows = YES;
+#ifdef DEBUG
+    OcctViewer::DebugLastBehindWalk().clear();
+#endif
+    NSMutableDictionary<NSString *, id> *answer =
+        [[self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES] mutableCopy];
+    sDebugTapBehindMoveArrows = NO;
+#ifdef DEBUG
+    answer[@"walk"] = [NSString stringWithUTF8String:OcctViewer::DebugLastBehindWalk().c_str()];
+#endif
+    return answer;
+}
+
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z nativeTouch:(BOOL)nativeTouch {
     if (!NSThread.isMainThread || !GLController.viewer
         || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return @{@"error":@"Invalid pick"};
@@ -15274,7 +15293,8 @@ static void DebugPickRay(const Handle(V3d_View)& view, const Handle(AIS_Interact
                 viewer->StartRotation(px,py);
                 viewer->CancelInteraction(px,py);
             }
-            viewer->Select(px,py);
+            if (sDebugTapBehindMoveArrows) viewer->SelectBehindMoveHandles(px,py);
+            else viewer->Select(px,py);
             answer[@"after"]=@([GLController debugSelectedShapeCount]);
             answer[@"hasDetected"]=@(context->HasDetected());
             if (context->HasDetected()) {
@@ -15394,6 +15414,16 @@ static void DebugPickRay(const Handle(V3d_View)& view, const Handle(AIS_Interact
     }];
     if (!current) answer[@"error"]=@"No rendering context";
     return answer;
+}
+
++ (double)debugEdgeOnRayMillisecondsWithFaceCount:(NSInteger)faceCount {
+#ifdef DEBUG
+    if (faceCount < 6 || faceCount > 4096) return -1;
+    return Core3DContext::DebugEdgeOnRayMilliseconds(static_cast<int>(faceCount));
+#else
+    (void)faceCount;
+    return -1;
+#endif
 }
 
 - (NSArray<NSString *> *)debugNativeFaceTapTrace {
