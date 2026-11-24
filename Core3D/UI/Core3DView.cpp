@@ -67,6 +67,8 @@ void Core3DView::debugSetNearPlaneIgnoresFloor(bool ignore) { gDebugNearPlaneIgn
 // infinite structure and is left out), never nearer than OCCT's own value and never past the far
 // plane, nor past half the camera's focus distance. When the eye is inside or beside that box
 // (nearest corner not in front), OCCT's near stays.
+// Limits (CTO 24 Nov 09:49, follow-up b): with the eye inside the box of all parts there is no lift, so
+// faces a hair apart can still fight there; a low camera that sees the floor near it gets a smaller lift.
 // Only the drawing uses the lifted value: OCCT's own range is put back after the frame, so taps,
 // picks and every other reader of the camera see exactly what they saw before.
 bool Core3DView::FitDepthRangeForFrame(Standard_Real& theOcctNear, Standard_Real& theOcctFar) const
