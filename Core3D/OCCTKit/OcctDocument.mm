@@ -30903,6 +30903,52 @@ Standard_Boolean OcctDocument::CaptureObjectNameStateForLabel(
     } catch (...) { state = OcctObjectNameState(); return Standard_False; }
 }
 
+TCollection_ExtendedString OcctDocument::NextFreeCopyName(
+    const TCollection_ExtendedString& sourceName,
+    const std::vector<TCollection_ExtendedString>& reserved) const noexcept {
+    try {
+        const auto isDigit = [](Standard_ExtCharacter c) { return c >= '0' && c <= '9'; };
+        TCollection_ExtendedString base = sourceName;
+        Standard_Integer digits = 0;
+        while (digits < base.Length() && isDigit(base.Value(base.Length() - digits))) { ++digits; }
+        if (digits > 0 && base.Length() > digits + 1 && base.Value(base.Length() - digits) == ' ') {
+            base.Trunc(base.Length() - digits - 1);
+        }
+        std::set<long long> used;
+        const auto note = [&](const TCollection_ExtendedString& name) {
+            const Standard_Integer length = name.Length(), prefix = base.Length();
+            if (length < prefix + 2 || length > prefix + 10 || name.Value(prefix + 1) != ' '
+                || name.Value(prefix + 2) == '0') { return; }
+            for (Standard_Integer i = 1; i <= prefix; ++i) {
+                if (name.Value(i) != base.Value(i)) { return; }
+            }
+            long long number = 0;
+            for (Standard_Integer i = prefix + 2; i <= length; ++i) {
+                if (!isDigit(name.Value(i))) { return; }
+                number = number * 10 + (name.Value(i) - '0');
+            }
+            used.insert(number);
+        };
+        for (const auto& name : reserved) { note(name); }
+        if (!myOcafDoc.IsNull() && XCAFDoc_DocumentTool::CheckShapeTool(myOcafDoc->Main())) {
+            const Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+            TDF_LabelSequence roots;
+            if (!shapes.IsNull()) { shapes->GetFreeShapes(roots); }
+            for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+                Handle(TDataStd_Name) name;
+                if (roots.Value(index).FindAttribute(TDataStd_Name::GetID(), name) && !name.IsNull()) {
+                    note(name->Get());
+                }
+            }
+        }
+        long long next = 2;
+        while (used.count(next)) { ++next; }
+        TCollection_ExtendedString copy = base;
+        copy += TCollection_ExtendedString((" " + std::to_string(next)).c_str());
+        return OcctObjectNameIsValid(copy) ? copy : sourceName;
+    } catch (...) { return sourceName; }
+}
+
 Standard_Boolean OcctDocument::SetObjectNameForLabel(
     const TDF_Label& label, const TCollection_ExtendedString& name) noexcept {
     if (![NSThread isMainThread] || myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()

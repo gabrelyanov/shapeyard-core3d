@@ -1557,6 +1557,13 @@ public:
     Standard_EXPORT Standard_Boolean StageSavedGroups(const std::vector<OcctSavedGroup>& groups) noexcept;
     Standard_EXPORT Standard_Boolean CaptureObjectNameStateForLabel(
         const TDF_Label& label, OcctObjectNameState& state) const noexcept;
+    //! Round 10 F11: the name a copy of a named part takes. The source's name
+    //! without a trailing " <number>", plus the lowest free number from 2 among
+    //! the parts' names and `reserved` ("Sight" -> "Sight 2", "Sight 2" -> "Sight 3").
+    //! Read-only. A result that would not be a valid name gives `sourceName` back.
+    Standard_EXPORT TCollection_ExtendedString NextFreeCopyName(
+        const TCollection_ExtendedString& sourceName,
+        const std::vector<TCollection_ExtendedString>& reserved) const noexcept;
     Standard_EXPORT Standard_Boolean CaptureExactFreeLabel(
         const TDF_Label& label, OcctExactLabelReceipt& receipt) const noexcept;
     Standard_EXPORT Standard_Boolean ReadExactFreeLabel(
