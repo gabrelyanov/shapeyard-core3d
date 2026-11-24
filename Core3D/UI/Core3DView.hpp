@@ -28,6 +28,8 @@ public:
     //! Round 10 (founder a, d), picture checks only: YES draws with OCCT's own fitted near plane
     //! (before the repair), NO (default) with the near plane lifted toward the model.
     Standard_EXPORT static void debugSetLegacyNearPlane(bool legacy);
+    //! Fable review 22 P2, checks only: YES lifts the near plane from the model alone (before the repair).
+    Standard_EXPORT static void debugSetNearPlaneIgnoresFloor(bool ignore);
 #endif
 
     Standard_EXPORT void StartRotation(const Standard_Integer X,

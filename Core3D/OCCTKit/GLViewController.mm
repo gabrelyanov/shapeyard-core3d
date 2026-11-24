@@ -66,6 +66,8 @@
 #include <XCAFPrs_Texture.hxx>
 #include <algorithm>
 #include <array>
+#include <Graphic3d_Camera.hxx>
+#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -172,6 +174,8 @@ void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
 // picture check can show the fault and the repair in one run. Read when a boundary structure is built.
 static bool gDebugLegacyBoundaryDepthStep = false;
 #endif
+// Fable review 22 P1: set only by a DEBUG check (debugSetSelectedOutlineKeyedOnProjectionCounter).
+static bool gDebugOutlineKeyedOnProjectionCounter = false;
 Handle(Graphic3d_ShaderProgram) NativeBoundaryLineShader(bool screenContour = false)
 {
     Handle(Graphic3d_ShaderProgram) program = new Graphic3d_ShaderProgram();
@@ -1452,6 +1456,13 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     return kPlainTapsSelectBehindMoveHandles;
 }
 
+// Fable review 22 P1: the selected outline depends on the projection's kind, field of view, aspect
+// and scale (with the camera's world-view state), never on the depth range.
+static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d_Camera)& camera)
+{
+    return {camera->IsOrthographic() ? 1.0 : 0.0, camera->FOVy(), camera->Aspect(), camera->Scale()};
+}
+
 @implementation GLViewController {
     dispatch_queue_t _assetDataQueue;
     NSUInteger _pendingAssetDataCount;
@@ -1491,7 +1502,13 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     std::vector<TopoDS_Shape> _selectedWashFaces;
     std::vector<NativeContourGeometry> _selectedContourGeometry;
     Standard_Size _selectedContourViewState;
-    Standard_Size _selectedContourProjectionState;
+    // Fable review 22 P1: the projection is keyed on the values the outline depends on, not on
+    // the camera's ProjectionState() counter. The per-frame near-plane lift (Core3DView::RenderFrame)
+    // changes the depth range and puts it back on every drawn frame, which moves that counter twice
+    // per frame; keyed on the counter, a selected part's outline was rebuilt (scene snapshot + wash
+    // display) on every frame and asked for the next one. The outline does not depend on near/far.
+    std::array<double, 4> _selectedContourProjectionKey;
+    Standard_Size _selectedContourProjectionState;   // DEBUG legacy key only
     CGSize _selectedContourDrawable;
     const void *_selectedContourDocument;
 
@@ -2239,7 +2256,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             });
     if (sameGeometry && _selectedSurfaceWidthPixels == pixels
         && _selectedContourViewState == camera->WorldViewState()
-        && _selectedContourProjectionState == camera->ProjectionState()
+        && (gDebugOutlineKeyedOnProjectionCounter
+                ? _selectedContourProjectionState == camera->ProjectionState()
+                : _selectedContourProjectionKey == SelectedContourProjectionKey(camera))
         && CGSizeEqualToSize(_selectedContourDrawable,drawable)) {
         context->UnhilightSelected(Standard_False);
         return;
@@ -2411,6 +2430,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         _selectedSurfaceWasFace = faceMode;
         _selectedSurfaceAppearanceDirty = NO;
         _selectedContourViewState = camera->WorldViewState();
+        _selectedContourProjectionKey = SelectedContourProjectionKey(camera);
         _selectedContourProjectionState = camera->ProjectionState();
         _selectedContourDrawable = drawable;
         _selectedContourDocument = document->Document().get();
@@ -6903,6 +6923,10 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 
 + (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy {
     gDebugLegacyBoundaryDepthStep = legacy;
+}
+
++ (void)debugSetSelectedOutlineKeyedOnProjectionCounter:(BOOL)legacy {
+    gDebugOutlineKeyedOnProjectionCounter = legacy;
 }
 
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {

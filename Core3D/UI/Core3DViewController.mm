@@ -15017,6 +15017,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return [GLController debugDisplayedShapePresentationStates];
 }
 
++ (void)debugSetSelectedOutlineKeyedOnProjectionCounter:(BOOL)legacy {
+#ifdef DEBUG
+    [GLViewController debugSetSelectedOutlineKeyedOnProjectionCounter:legacy];
+#else
+    (void)legacy;
+#endif
+}
+
 + (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy {
 #ifdef DEBUG
     [GLViewController debugSetLegacyBoundaryDepthStep:legacy];
@@ -15028,6 +15036,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 + (void)debugSetLegacyNearPlane:(BOOL)legacy {
 #if DEBUG
     Core3DView::debugSetLegacyNearPlane(legacy);
+#else
+    (void)legacy;
+#endif
+}
+
++ (void)debugSetNearPlaneIgnoresFloor:(BOOL)legacy {
+#if DEBUG
+    Core3DView::debugSetNearPlaneIgnoresFloor(legacy);
 #else
     (void)legacy;
 #endif

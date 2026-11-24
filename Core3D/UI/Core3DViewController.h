@@ -2630,9 +2630,14 @@ __attribute__((objc_subclassing_restricted))
 //! Round 10 (R10P-S11), picture checks only: YES draws committed boundaries built from now on
 //! with the old fixed depth step; NO (default) with the perspective pull toward the eye.
 + (void)debugSetLegacyBoundaryDepthStep:(BOOL)legacy;
+//! Fable review 22 P1, checks only: YES keys the selected outline's cache on the camera's
+//! ProjectionState() counter (before the repair); NO (default) on the projection's values.
++ (void)debugSetSelectedOutlineKeyedOnProjectionCounter:(BOOL)legacy;
 //! Round 10 (founder a, d), picture checks only: YES draws with OCCT's own fitted near plane
 //! (before the repair); NO (default) with the near plane lifted toward the model for each frame.
 + (void)debugSetLegacyNearPlane:(BOOL)legacy;
+//! Fable review 22 P2, checks only: YES lifts the near plane from the model alone, ignoring the floor grid.
++ (void)debugSetNearPlaneIgnoresFloor:(BOOL)legacy;
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics;
 //! Read-only last native tangent-preparation failure and render counters.
 - (NSDictionary<NSString *, NSNumber *> *)debugNativeFramePreparationState;

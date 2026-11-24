@@ -9,6 +9,8 @@
 #include <Aspect_DisplayConnection.hxx>
 #include <GP_Quaternion.hxx>
 #include <Bnd_Box.hxx>
+#include <gp_Ax3.hxx>
+#include <V3d_Viewer.hxx>
 #include <Graphic3d_CView.hxx>
 #include <Standard_Failure.hxx>
 #include <algorithm>
@@ -51,6 +53,8 @@ void Core3DView::InvalidateAndRequestFrame() const
 #if DEBUG
 static bool gDebugLegacyNearPlane = false;
 void Core3DView::debugSetLegacyNearPlane(bool legacy) { gDebugLegacyNearPlane = legacy; }
+static bool gDebugNearPlaneIgnoresFloor = false;
+void Core3DView::debugSetNearPlaneIgnoresFloor(bool ignore) { gDebugNearPlaneIgnoresFloor = ignore; }
 #endif
 
 // Round 10 (founder items a and d; R10P-S7): OCCT's auto depth fit also measures the floor grid,
@@ -91,6 +95,36 @@ bool Core3DView::FitDepthRangeForFrame(Standard_Real& theOcctNear, Standard_Real
         aNearest = std::min(aNearest, (aPoint - anEye).Dot(aForward));
     }
     if (!(aNearest > 0.0) || !std::isfinite(aNearest)) return true;
+    // Fable review 22 P2: the floor grid is not in the model's box, but the part of it the camera
+    // sees must not be cut by the lifted near plane (a low camera sees the floor in front of the model
+    // along the bottom of the screen). View depth is linear on the grid plane, so its nearest visible
+    // point lies on one of the four corner rays of the view's frustum: each corner ray that meets the
+    // plane in front of the eye counts with the view depth of that meeting point.
+    bool aCountFloor = true;
+#if DEBUG
+    aCountFloor = !gDebugNearPlaneIgnoresFloor;
+#endif
+    if (aCountFloor && !Viewer().IsNull() && Viewer()->IsGridActive()) {
+        const gp_Ax3& aPlane = Viewer()->PrivilegedPlane();
+        const gp_XYZ aNormal = aPlane.Direction().XYZ();
+        const gp_XYZ anOrigin = aPlane.Location().XYZ();
+        const gp_XYZ anUp = aCamera->Up().XYZ();
+        const gp_XYZ aRight = aForward.Crossed(anUp).Normalized();
+        const gp_XYZ aTrueUp = aRight.Crossed(aForward).Normalized();
+        const Standard_Real aHalfY = std::tan(0.5 * aCamera->FOVy() * M_PI / 180.0);
+        const Standard_Real aHalfX = aHalfY * aCamera->Aspect();
+        const Standard_Real anEyeHeight = aNormal.Dot(anOrigin - anEye);
+        for (int aCorner = 0; aCorner < 4; ++aCorner) {
+            // A ray with view depth 1 per unit: its parameter at the plane is the view depth there.
+            const gp_XYZ aRay = aForward + aRight * ((aCorner & 1) ? aHalfX : -aHalfX)
+                                         + aTrueUp * ((aCorner & 2) ? aHalfY : -aHalfY);
+            const Standard_Real aSlope = aNormal.Dot(aRay);
+            if (std::abs(aSlope) < 1.0e-12) continue;
+            const Standard_Real aDepth = anEyeHeight / aSlope;
+            if (aDepth > 0.0 && std::isfinite(aDepth)) aNearest = std::min(aNearest, aDepth);
+        }
+        if (std::abs(anEyeHeight) < 1.0e-9) return true;   // eye on the floor plane: keep OCCT's near
+    }
     // Also stay in front of the camera's focus, where OCCT draws the corner axes.
     const Standard_Real aLifted = std::min(0.5 * aNearest, 0.5 * aCamera->Distance());
     if (aLifted > theOcctNear && aLifted < 0.5 * theOcctFar) {
