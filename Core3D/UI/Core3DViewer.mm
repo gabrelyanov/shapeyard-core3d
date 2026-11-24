@@ -10038,7 +10038,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
         // Round 10 R10P-S5: the Case is built from its corner, so a typed Width or Depth kept the corner and
         // the part slid (Depth 34 -> 30 moved the middle 2 mm). Keep the middle on those two; Height keeps
         // the bottom as before. A bevelled Case (paired treatment) keeps today's placement.
-        if (!original.edgeTreatment) {
+        // A current Case always carries a treatment capture; only a real Round or Bevel has a definition.
+        if (!(original.edgeTreatment && original.edgeTreatment->definition_)) {
             const auto& was = original.parameters.definition.dimensions;
             const auto& now = parameters.definition.dimensions;
             const double halfWidth = (was.width - now.width) / 2, halfDepth = (was.depth - now.depth) / 2;
