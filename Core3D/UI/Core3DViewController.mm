@@ -5629,7 +5629,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     int inserted = 0;
     bool openSurface = false;
     const auto result = GLController.viewer->insertPartsFromImportedDocument(
-        std::string(url.path.UTF8String ?: ""), inserted, /*solidify*/ false, &openSurface);
+        std::string(url.path.UTF8String ?: ""), inserted, /*solidify*/ true, &openSurface);
     if (openSurface) return Core3DImportRefusalOpenSurface;
     if (result != core3d::OrdinaryEditResult::Committed || inserted <= 0) return 0;
     [self sendNotifyUIState:UIStateChangingHistory];
