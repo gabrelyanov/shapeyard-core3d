@@ -15076,18 +15076,6 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 #endif
 }
 
-+ (void)debugSetDrawnColourProposal:(BOOL)on {
-#if DEBUG
-    Core3DView::debugSetDrawnColourProposal(on);
-#else
-    (void)on;
-#endif
-}
-
-+ (double)debugDrawnColourProposalHeadlight {
-    return Core3DView::DrawnColourProposalHeadlight;
-}
-
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {
     return [GLController debugViewportRGBA];
 }

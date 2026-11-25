@@ -55,11 +55,6 @@ static bool gDebugLegacyNearPlane = false;
 void Core3DView::debugSetLegacyNearPlane(bool legacy) { gDebugLegacyNearPlane = legacy; }
 static bool gDebugNearPlaneIgnoresFloor = false;
 void Core3DView::debugSetNearPlaneIgnoresFloor(bool ignore) { gDebugNearPlaneIgnoresFloor = ignore; }
-static bool gDebugDrawnColourProposal = false;
-void Core3DView::debugSetDrawnColourProposal(bool on) { gDebugDrawnColourProposal = on; }
-bool Core3DView::drawnColourProposal() { return gDebugDrawnColourProposal; }
-#else
-bool Core3DView::drawnColourProposal() { return false; }
 #endif
 
 // Round 10 (founder items a and d; R10P-S7): OCCT's auto depth fit also measures the floor grid,

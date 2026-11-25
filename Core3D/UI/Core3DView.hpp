@@ -30,14 +30,7 @@ public:
     Standard_EXPORT static void debugSetLegacyNearPlane(bool legacy);
     //! Fable review 22 P2, checks only: YES lifts the near plane from the model alone (before the repair).
     Standard_EXPORT static void debugSetNearPlaneIgnoresFloor(bool ignore);
-    //! CTO 25 Nov 15:30 colour PROPOSAL (the founder decides; not shipped), checks only: YES lights
-    //! viewers and app PBR shaders made from now on so a face turned to the camera shows the picked colour.
-    Standard_EXPORT static void debugSetDrawnColourProposal(bool on);
 #endif
-    //! The colour proposal's switch (above): always false in Release.
-    Standard_EXPORT static bool drawnColourProposal();
-    //! The headlight's intensity under the colour proposal (OCCT's default lights; 1 without it).
-    static constexpr float DrawnColourProposalHeadlight = 1.7f;
 
     Standard_EXPORT void StartRotation(const Standard_Integer X,
                                        const Standard_Integer Y,

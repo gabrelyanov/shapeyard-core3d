@@ -2646,11 +2646,6 @@ __attribute__((objc_subclassing_restricted))
 + (void)debugSetLegacyNearPlane:(BOOL)legacy;
 //! Fable review 22 P2, checks only: YES lifts the near plane from the model alone, ignoring the floor grid.
 + (void)debugSetNearPlaneIgnoresFloor:(BOOL)legacy;
-//! CTO 25 Nov 15:30 colour PROPOSAL, checks only (the founder decides; NO in Release): YES lights the
-//! viewers and app PBR shaders made from now on so a face turned to the camera shows the picked colour.
-+ (void)debugSetDrawnColourProposal:(BOOL)on;
-//! The headlight intensity the colour proposal uses (OCCT's default lights; 1 without the proposal).
-+ (double)debugDrawnColourProposalHeadlight;
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics;
 //! Read-only last native tangent-preparation failure and render counters.
 - (NSDictionary<NSString *, NSNumber *> *)debugNativeFramePreparationState;
