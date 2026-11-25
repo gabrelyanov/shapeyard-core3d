@@ -5878,8 +5878,12 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             }
             // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is mirrored
             // as a plain solid; the source keeps its record.
-            const bool savedCutCopiedPlain = retained_solid::HasRecord(source->second)
-                && myDoc->CanBakeSavedCutForFaceEdit(source->second);
+            // R13F-1 (25 Nov): so is an ordinary joined part (a Join that keeps
+            // its two parts), by the rule Duplicate has used since R2-N02.
+            const bool savedCutCopiedPlain = (retained_solid::HasRecord(source->second)
+                    && myDoc->CanBakeSavedCutForFaceEdit(source->second))
+                || (composite_recipe::HasRecord(source->second)
+                    && myDoc->CanBakeBooleanResultForFaceEdit(source->second));
             profileRequests.push_back({source->second, 1, !profile.label.IsNull(),
                                        !enclosure.label.IsNull(), !enclosure.label.IsNull(),
                                        true, true, false, false, savedCutCopiedPlain});
@@ -5947,8 +5951,10 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			anAggregateTopologyNodes += sourceNodeCount;
             OcctObjectNameState profileOwner;
             pattern_recipe_clone::Source sweepLoft;
-            const bool savedCutCopiedPlain = retained_solid::HasRecord(sourceLabel)
-                && myDoc->CanBakeSavedCutForFaceEdit(sourceLabel);
+            const bool savedCutCopiedPlain = (retained_solid::HasRecord(sourceLabel)
+                    && myDoc->CanBakeSavedCutForFaceEdit(sourceLabel))
+                || (composite_recipe::HasRecord(sourceLabel)
+                    && myDoc->CanBakeBooleanResultForFaceEdit(sourceLabel));
             if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)
                 || !pattern_recipe_clone::Capture(aSourceDocument, sourceLabel, sweepLoft,
                     savedCutCopiedPlain))
