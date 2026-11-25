@@ -1112,9 +1112,11 @@ typedef struct {
     double directionZ;
 } Core3DReferenceAxisValue;
 
-//! One immutable compare-and-swap lease for editing the active Radial Array
-//! source's persistent Reference Axis. Token zero is unavailable, never a
-//! wildcard. Callers must submit this exact token to Set or Reset.
+//! One immutable compare-and-swap lease for choosing the active Radial Array's
+//! centre (Reference Axis) while the tool is open. The choice is held by the
+//! open tool and written to the part only by Apply, in the same Undo step as
+//! the copies. Token zero is unavailable, never a wildcard. Callers must
+//! submit this exact token to Set or Reset.
 typedef struct {
     Core3DReferenceAxisReadState readState;
     Core3DReferenceAxisValue value;
@@ -1134,9 +1136,11 @@ typedef struct {
     double metersPerUnit;
 } Core3DRadialArrayParameters;
 
-//! Truthful result for an atomic persistent Reference Axis edit. An unknown
-//! outcome retains the same operation and recovery controls; retryable failure
-//! means the edit was not accepted and may be attempted again with fresh state.
+//! Result of choosing or resetting the centre in the open Radial Array tool.
+//! Applied means the open tool holds the choice (nothing is written until
+//! Apply); retryable failure means it was not accepted and may be tried again
+//! with fresh state. OutcomeUnknown is kept for callers but is no longer
+//! produced: a centre choice writes nothing to the document.
 typedef NS_ENUM(NSInteger, Core3DRadialArrayReferenceEditResult) {
     Core3DRadialArrayReferenceEditResultNoChange = 0,
     Core3DRadialArrayReferenceEditResultApplied,

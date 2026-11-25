@@ -6513,14 +6513,6 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
             ->debugMutateRadialArraySourcePersistedTransform();
 }
 
-- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode {
-    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
-        _viewer->getObjectInteractor()
-            ->debugSetRadialArrayReferenceEditCommitMode(
-                static_cast<Standard_Integer>(mode));
-    }
-}
-
 - (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState {
     if (_viewer == nullptr) {
         return @{};

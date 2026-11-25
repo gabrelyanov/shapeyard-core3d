@@ -160,8 +160,6 @@ public:
     void debugSetProfileCopyFault(Standard_Integer mode) noexcept;
     void debugSetMaximumTopologyNodes(Standard_Size limit) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
-    //! 0 normal, 1 false-after-close, 2 throw-after-close.
-    void debugSetReferenceEditCommitMode(Standard_Integer mode) noexcept;
 #endif
 
 private:
@@ -224,15 +222,6 @@ private:
         Standard_Boolean faceFinishesSealed = Standard_False;
     };
 
-    struct PendingReferenceEdit {
-        OcctReferenceAxisReadState previousState =
-            OcctReferenceAxisReadState::Invalid;
-        OcctReferenceAxis previousAxis;
-        OcctReferenceAxisReadState expectedState =
-            OcctReferenceAxisReadState::Invalid;
-        OcctReferenceAxis expectedAxis;
-    };
-
     //! Where the circle turns while the tool is open (DESIGN-SYSTEM rule 8,
     //! queue row 4). It lives only in the open operation: the preview follows
     //! it, Cancel drops it, and Apply writes it to the source in the same owned
@@ -252,15 +241,6 @@ private:
         Unavailable,
     };
 
-    enum class ReferenceDocumentState : std::uint8_t {
-        None = 0,
-        Expected,
-        Previous,
-        OpenCommand,
-        Mismatched,
-        Unavailable,
-    };
-
     Standard_Boolean captureSelectedSource(SourceSnapshot& source) const
         noexcept;
     Standard_Boolean sourceIsCurrent(
@@ -276,7 +256,6 @@ private:
         const SourceSnapshot& source) const noexcept;
     Standard_Boolean rebuildPreview() noexcept;
     Standard_Boolean clearPreviewObjects() noexcept;
-    Standard_Boolean refreshSourceAfterReferenceEdit() noexcept;
     const gp_Ax1& activeWorldAxis() const noexcept;
     Standard_Boolean axisAdmitsCurrentPreview(
         const gp_Ax1& worldAxis) const noexcept;
@@ -288,8 +267,6 @@ private:
     Standard_Boolean abortOwnedCommand() noexcept;
     void clearCommandOwnership() noexcept;
     DocumentState inspectPendingResults() noexcept;
-    ReferenceDocumentState inspectPendingReferenceEdit() noexcept;
-    RadialArrayReferenceEditResult reconcileReferenceEdit() noexcept;
     RadialArrayReferenceEditResult editReferenceAxis(
         const std::optional<OcctReferenceAxis>& axis,
         std::uint64_t expectedAuthorityToken) noexcept;
@@ -305,7 +282,6 @@ private:
     std::optional<SourceSnapshot> _source;
     std::vector<Handle(AIS_Shape)> _previewObjects;
     std::vector<PendingResult> _pendingResults;
-    std::optional<PendingReferenceEdit> _pendingReferenceEdit;
     std::optional<StagedReference> _stagedReference;
     Standard_Integer _count = kDefaultCount;
     Standard_Integer _maximumAdmittedCount = kMaximumCount;
@@ -330,7 +306,6 @@ private:
     Standard_Integer _debugProfileCopyFault = 0;
     Standard_Size _debugMaximumTopologyNodes =
         kMaximumAggregateTopologyNodes;
-    Standard_Integer _debugReferenceEditCommitMode = 0;
 #endif
 };
 

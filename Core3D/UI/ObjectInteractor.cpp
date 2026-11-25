@@ -5656,14 +5656,6 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			&& _radialArrayController
 				->debugMutateSourcePersistedTransform();
 	}
-
-	void ObjectInteractor::debugSetRadialArrayReferenceEditCommitMode(
-		const Standard_Integer mode) noexcept {
-		if (_radialArrayController != nullptr) {
-			_radialArrayController
-				->debugSetReferenceEditCommitMode(mode);
-		}
-	}
 #endif
 
 	Standard_Boolean ObjectInteractor::tryMirror(

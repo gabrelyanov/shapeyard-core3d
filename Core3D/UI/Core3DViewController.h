@@ -1930,9 +1930,6 @@ __attribute__((objc_subclassing_restricted))
 - (void)debugSetRadialArrayProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateRadialArraySourcePersistedTransform;
-//! Reference-edit CommitCommand modes: 0 normal, 1 false-after-close,
-//! 2 throw-after-close.
-- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode;
 //! Read-only identity proof over every committed free-simple definition.
 //! Pairwise shape partnership and TriangleMesh triangulation handle identity
 //! are intentionally unavailable in renderer-neutral scene snapshots.

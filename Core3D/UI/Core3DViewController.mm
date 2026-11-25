@@ -24641,10 +24641,6 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
     return [GLController debugMutateRadialArraySourcePersistedTransform];
 }
 
-- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode {
-    [GLController debugSetRadialArrayReferenceEditCommitMode:mode];
-}
-
 - (NSDictionary<NSString *, NSNumber *> *)debugGeometryCopyIndependenceState {
     Standard_Size definitionCount = 0;
     Standard_Size triangleMeshDefinitionCount = 0;

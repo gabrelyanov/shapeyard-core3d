@@ -274,7 +274,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetRadialArrayProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateRadialArraySourcePersistedTransform;
-- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode;
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode;
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;

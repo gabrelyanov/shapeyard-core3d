@@ -15402,7 +15402,7 @@ Core3DViewer::captureSceneSnapshot(
     if (_objectInteractor != nullptr
         && _objectInteractor->radialArrayPreviewState()
             == RadialArrayPreviewState::OutcomeUnknown) {
-        // The geometry command or separate reference-axis edit may already
+        // Apply's one command (the chosen centre and the copies) may already
         // have committed. Do not advance committed renderer revision state
         // until the controller's retained ledger proves the exact outcome.
         return {};

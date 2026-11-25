@@ -443,8 +443,6 @@ namespace core3d {
             Standard_Size limit) noexcept;
         Standard_Boolean
             debugMutateRadialArraySourcePersistedTransform() noexcept;
-        void debugSetRadialArrayReferenceEditCommitMode(
-            Standard_Integer mode) noexcept;
 #endif
         MirrorApplyResult applyMirror() noexcept;
 		Standard_Boolean cancelMirror() noexcept;

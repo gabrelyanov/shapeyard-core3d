@@ -987,7 +987,6 @@ Standard_Boolean RadialArrayOperationController::begin() noexcept
     _previewValid = Standard_False;
     clearCommandOwnership();
     _pendingResults.clear();
-    _pendingReferenceEdit.reset();
     _stagedReference.reset();
     _state = RadialArrayPreviewState::Selecting;
     ++_generation;
@@ -1172,7 +1171,6 @@ Standard_Boolean RadialArrayOperationController::setCount(
         || _state == RadialArrayPreviewState::Committing
         || _state == RadialArrayPreviewState::OutcomeUnknown
         || _ownsDocumentCommand || !_pendingResults.empty()
-        || _pendingReferenceEdit.has_value()
         || !sourceIsCurrent(Standard_True)
         || !canAdmitCount(*_source, theCount)) {
         return Standard_False;
@@ -1216,7 +1214,6 @@ Standard_Boolean RadialArrayOperationController::setSweepDegrees(
         || _state == RadialArrayPreviewState::Committing
         || _state == RadialArrayPreviewState::OutcomeUnknown
         || _ownsDocumentCommand || !_pendingResults.empty()
-        || _pendingReferenceEdit.has_value()
         || !sourceIsCurrent(Standard_True)) {
         return Standard_False;
     }
@@ -1291,7 +1288,6 @@ OcctReferenceAxisReadState RadialArrayOperationController::referenceAxis(
 {
     if (!_source.has_value()
         || _referenceAuthorityToken == 0
-        || _pendingReferenceEdit.has_value()
         || !sourceIsCurrent(Standard_True)) {
         return OcctReferenceAxisReadState::Invalid;
     }
@@ -1313,7 +1309,7 @@ const gp_Ax1& RadialArrayOperationController::activeWorldAxis() const noexcept
 std::uint64_t
 RadialArrayOperationController::referenceAuthorityToken() const noexcept
 {
-    return _source.has_value() && !_pendingReferenceEdit.has_value()
+    return _source.has_value()
         && sourceIsCurrent(Standard_True)
         ? _referenceAuthorityToken
         : 0;
@@ -1333,7 +1329,6 @@ RadialArrayOperationController::convertReferenceAxisSpaces(
             && theDirectionSpace != OcctReferenceSpace::World)
         || theExpectedAuthorityToken == 0
         || theExpectedAuthorityToken != _referenceAuthorityToken
-        || _pendingReferenceEdit.has_value()
         || !sourceIsCurrent(Standard_True)) {
         return Standard_False;
     }
@@ -1414,7 +1409,7 @@ Standard_Boolean
 RadialArrayOperationController::hasUnresolvedState() const noexcept
 {
     return !_previewObjects.empty() || !_pendingResults.empty()
-        || _pendingReferenceEdit.has_value() || _ownsDocumentCommand;
+        || _ownsDocumentCommand;
 }
 
 Standard_Boolean
@@ -1428,12 +1423,10 @@ Standard_Boolean RadialArrayOperationController::canApply() const noexcept
 {
     return (_state == RadialArrayPreviewState::Ready
             && _previewValid && _source.has_value()
-            && !_pendingReferenceEdit.has_value()
             && !IsNearZeroStep(_sweepDegrees, _count)
             && _previewObjects.size()
                 == static_cast<std::size_t>(_count - 1))
         || (_state == RadialArrayPreviewState::OutcomeUnknown
-            && !_pendingReferenceEdit.has_value()
             && (_ownsDocumentCommand || !_pendingResults.empty()));
 }
 
@@ -1444,7 +1437,6 @@ Standard_Boolean RadialArrayOperationController::capturePreview(
     if (_state != RadialArrayPreviewState::Ready || !_previewValid
         || !_source.has_value() || !sourceIsCurrent(Standard_True)
         || _referenceAuthorityToken == 0
-        || _pendingReferenceEdit.has_value()
         || HasUnsupportedOverlayTexture(_source->label)
         || _previewObjects.empty()
         || _previewObjects.size()
@@ -1532,7 +1524,6 @@ RadialArrayOperationController::canPublishEmptyPreview() const noexcept
         && IsNearZeroStep(_sweepDegrees, _count)
         && _previewObjects.empty()
         && _pendingResults.empty()
-        && !_pendingReferenceEdit.has_value()
         && !_ownsDocumentCommand
         && sourceIsCurrent(Standard_True)
         && !HasUnsupportedOverlayTexture(_source->label);
@@ -1858,120 +1849,6 @@ RadialArrayOperationController::inspectPendingResults() noexcept
     }
 }
 
-RadialArrayOperationController::ReferenceDocumentState
-RadialArrayOperationController::inspectPendingReferenceEdit() noexcept
-{
-    if (_document.IsNull()) {
-        return ReferenceDocumentState::Unavailable;
-    }
-    try {
-        OCC_CATCH_SIGNALS
-        const Handle(TDocStd_Document) aDocument = _document->Document();
-        if (aDocument.IsNull() || aDocument->GetData().IsNull()) {
-            return ReferenceDocumentState::Unavailable;
-        }
-        if (aDocument->HasOpenCommand()) {
-            if (ownedCommandIsCurrent(aDocument)) {
-                return ReferenceDocumentState::OpenCommand;
-            }
-            clearCommandOwnership();
-            return ReferenceDocumentState::Unavailable;
-        }
-        clearCommandOwnership();
-        if (!_pendingReferenceEdit.has_value()) {
-            return ReferenceDocumentState::None;
-        }
-        if (!_source.has_value() || _source->label.IsNull()
-            || _source->label.Data() != aDocument->GetData()) {
-            return ReferenceDocumentState::Mismatched;
-        }
-        OcctReferenceAxis anAxis;
-        const OcctReferenceAxisReadState aState =
-            _document->ReadReferenceAxisForLabel(
-                _source->label, anAxis);
-        if (aState == OcctReferenceAxisReadState::Invalid) {
-            return ReferenceDocumentState::Mismatched;
-        }
-        if (aState == _pendingReferenceEdit->expectedState
-            && !ReferenceAxisDiffers(
-                anAxis, _pendingReferenceEdit->expectedAxis)) {
-            return ReferenceDocumentState::Expected;
-        }
-        if (aState == _pendingReferenceEdit->previousState
-            && !ReferenceAxisDiffers(
-                anAxis, _pendingReferenceEdit->previousAxis)) {
-            return ReferenceDocumentState::Previous;
-        }
-        return ReferenceDocumentState::Mismatched;
-    } catch (...) {
-        return ReferenceDocumentState::Unavailable;
-    }
-}
-
-Standard_Boolean
-RadialArrayOperationController::refreshSourceAfterReferenceEdit() noexcept
-{
-    if (!_source.has_value()) {
-        return Standard_False;
-    }
-    const SourceSnapshot aPrevious = *_source;
-    SourceSnapshot aReplacement;
-    if (!captureSelectedSource(aReplacement)
-        || aReplacement.document != aPrevious.document
-        || aReplacement.presentation != aPrevious.presentation
-        || !aReplacement.label.IsEqual(aPrevious.label)
-        || aReplacement.entityIdentifier != aPrevious.entityIdentifier
-        || aReplacement.definitionIdentifier
-            != aPrevious.definitionIdentifier
-        || aReplacement.representation != aPrevious.representation
-        || aReplacement.destinationRepresentation
-            != aPrevious.destinationRepresentation
-        || aReplacement.storedShape.IsNull()
-        || !aReplacement.storedShape.IsEqual(aPrevious.storedShape)
-        || TransformDiffers(aReplacement.transform, aPrevious.transform)
-        || aReplacement.topologyNodeCount
-            != aPrevious.topologyNodeCount
-        || aReplacement.metersPerUnit != aPrevious.metersPerUnit
-        || !aReplacement.profileOwner.IsEqual(aPrevious.profileOwner)
-        || aReplacement.profileCurrent != aPrevious.profileCurrent
-        || aReplacement.retainedProfileTopologyNodes != aPrevious.retainedProfileTopologyNodes
-        || aReplacement.enclosureCurrent != aPrevious.enclosureCurrent
-        || aReplacement.retainedEnclosureTopologyNodes != aPrevious.retainedEnclosureTopologyNodes) {
-        return Standard_False;
-    }
-    const Standard_Integer aMaximum = maximumAdmittedCount(aReplacement);
-    if (aMaximum < _count || !canAdmitCount(aReplacement, _count)) {
-        return Standard_False;
-    }
-    _source = std::move(aReplacement);
-    _maximumAdmittedCount = aMaximum;
-    if (!advanceReferenceAuthorityToken()) {
-        // The edit/rollback outcome is known, but no globally unique lease can
-        // be issued. Invalidate mutation/capture authority and fail closed
-        // without retaining an OutcomeUnknown document ledger forever.
-        (void)clearPreviewObjects();
-        _previewValid = Standard_False;
-        _state = RadialArrayPreviewState::Failed;
-        ++_generation;
-        notifyStateChanged();
-        return Standard_True;
-    }
-    if (IsNearZeroStep(_sweepDegrees, _count)) {
-        if (!clearPreviewObjects()) {
-            _state = RadialArrayPreviewState::Failed;
-        } else {
-            _state = RadialArrayPreviewState::Selecting;
-        }
-    } else if (!rebuildPreview()) {
-        _state = RadialArrayPreviewState::Failed;
-    } else {
-        _state = RadialArrayPreviewState::Ready;
-    }
-    ++_generation;
-    notifyStateChanged();
-    return Standard_True;
-}
-
 Standard_Boolean
 RadialArrayOperationController::axisAdmitsCurrentPreview(
     const gp_Ax1& theWorldAxis) const noexcept
@@ -2011,67 +1888,10 @@ RadialArrayOperationController::axisAdmitsCurrentPreview(
 }
 
 RadialArrayReferenceEditResult
-RadialArrayOperationController::reconcileReferenceEdit() noexcept
-{
-    ReferenceDocumentState aState = inspectPendingReferenceEdit();
-    if (aState == ReferenceDocumentState::OpenCommand
-        && abortOwnedCommand()) {
-        aState = inspectPendingReferenceEdit();
-    }
-    if (aState == ReferenceDocumentState::Expected) {
-        const PendingReferenceEdit anEdit = *_pendingReferenceEdit;
-        _pendingReferenceEdit.reset();
-        if (!refreshSourceAfterReferenceEdit()) {
-            _pendingReferenceEdit = anEdit;
-            _state = RadialArrayPreviewState::OutcomeUnknown;
-            ++_generation;
-            notifyStateChanged();
-            return RadialArrayReferenceEditResult::OutcomeUnknown;
-        }
-        try {
-            _document->NotifyChanges();
-        } catch (...) {
-        }
-        return RadialArrayReferenceEditResult::Applied;
-    }
-    if (aState == ReferenceDocumentState::Previous
-        || aState == ReferenceDocumentState::None) {
-        if (aState == ReferenceDocumentState::Previous) {
-            const PendingReferenceEdit anEdit = *_pendingReferenceEdit;
-            _pendingReferenceEdit.reset();
-            if (!refreshSourceAfterReferenceEdit()) {
-                _pendingReferenceEdit = anEdit;
-                _state = RadialArrayPreviewState::OutcomeUnknown;
-                ++_generation;
-                notifyStateChanged();
-                return RadialArrayReferenceEditResult::OutcomeUnknown;
-            }
-        }
-        _pendingReferenceEdit.reset();
-        if (_state == RadialArrayPreviewState::Committing
-            || _state == RadialArrayPreviewState::OutcomeUnknown) {
-            _state = _previewValid
-                ? RadialArrayPreviewState::Ready
-                : RadialArrayPreviewState::Failed;
-            ++_generation;
-            notifyStateChanged();
-        }
-        return RadialArrayReferenceEditResult::RetryableFailure;
-    }
-    _state = RadialArrayPreviewState::OutcomeUnknown;
-    ++_generation;
-    notifyStateChanged();
-    return RadialArrayReferenceEditResult::OutcomeUnknown;
-}
-
-RadialArrayReferenceEditResult
 RadialArrayOperationController::editReferenceAxis(
     const std::optional<OcctReferenceAxis>& theAxis,
     const std::uint64_t theExpectedAuthorityToken) noexcept
 {
-    if (_pendingReferenceEdit.has_value()) {
-        return reconcileReferenceEdit();
-    }
     if (!_source.has_value()
         || theExpectedAuthorityToken == 0
         || theExpectedAuthorityToken != _referenceAuthorityToken
@@ -2225,10 +2045,10 @@ RadialArrayOperationController::finishCommittedOperation() noexcept
 
 RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
 {
-    if (!hasActiveOperation() || _pendingReferenceEdit.has_value()) {
-        // A legacy reference ledger is never folded into Apply. A reference
-        // chosen while the tool is open is staged (_stagedReference) and is
-        // written below inside Apply's own command, with the copies.
+    if (!hasActiveOperation()) {
+        // A reference chosen while the tool is open is staged
+        // (_stagedReference) and is written below inside Apply's own
+        // command, with the copies.
         return RadialArrayApplyResult::NoChange;
     }
     if (_state == RadialArrayPreviewState::OutcomeUnknown
@@ -2872,8 +2692,7 @@ Standard_Boolean RadialArrayOperationController::cancel() noexcept
     }
     if (_state == RadialArrayPreviewState::Committing
         || _state == RadialArrayPreviewState::OutcomeUnknown
-        || _ownsDocumentCommand || !_pendingResults.empty()
-        || _pendingReferenceEdit.has_value()) {
+        || _ownsDocumentCommand || !_pendingResults.empty()) {
         _state = RadialArrayPreviewState::OutcomeUnknown;
         ++_generation;
         notifyStateChanged();
@@ -2893,7 +2712,6 @@ void RadialArrayOperationController::clearInactiveState() noexcept
 {
     _previewObjects.clear();
     _pendingResults.clear();
-    _pendingReferenceEdit.reset();
     _stagedReference.reset();
     _source.reset();
     _count = kDefaultCount;
@@ -2915,8 +2733,9 @@ RadialArrayOperationController::debugPreviewState() const noexcept
     aState.referenceAuthorityToken = _referenceAuthorityToken;
     aState.previewBodyCount = _previewObjects.size();
     aState.pendingResultCount = _pendingResults.size();
-    aState.hasPendingReferenceEdit =
-        _pendingReferenceEdit.has_value();
+    // The September centre ledger is gone (Fable review 23, finding 6): a
+    // centre chosen in the open tool is staged, never a separate command.
+    aState.hasPendingReferenceEdit = Standard_False;
     aState.activeOperation = hasActiveOperation();
     aState.previewValid = _previewValid;
     aState.canApply = canApply();
@@ -2986,13 +2805,6 @@ void RadialArrayOperationController::debugSetMaximumTopologyNodes(
     _debugMaximumTopologyNodes = std::max<Standard_Size>(
         1,
         std::min(theLimit, kMaximumAggregateTopologyNodes));
-}
-
-void RadialArrayOperationController::debugSetReferenceEditCommitMode(
-    const Standard_Integer theMode) noexcept
-{
-    _debugReferenceEditCommitMode = theMode >= 0 && theMode <= 2
-        ? theMode : 0;
 }
 
 Standard_Boolean RadialArrayOperationController::
