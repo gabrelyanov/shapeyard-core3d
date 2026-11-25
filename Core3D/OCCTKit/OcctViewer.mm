@@ -424,6 +424,11 @@ bool OcctViewer::InitViewer (Core3DPlatformView* theWin)
             && light.Value()->Type() == Graphic3d_TOLS_DIRECTIONAL
             && light.Value()->IsHeadlight()) {
             light.Value()->SetDirection(gp_Dir(0.35, -0.45, -1.0));
+            // Colour proposal (CTO 25 Nov 15:30, checks only until the founder decides): today a face
+            // turned to the camera shows 0.67 of the picked colour; a stronger headlight brings it to
+            // the swatch while faces turned away keep their shading.
+            if (Core3DView::drawnColourProposal())
+                light.Value()->SetIntensity(Core3DView::DrawnColourProposalHeadlight);
         }
     }
     

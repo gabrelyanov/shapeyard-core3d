@@ -5,6 +5,7 @@
 #include <Graphic3d_ShaderProgram.hxx>
 #include <Graphic3d_TextureSetBits.hxx>
 #include <Graphic3d_ShaderAttribute.hxx>
+#include "../UI/Core3DView.hpp"
 
 namespace {
 bool IsCore3DDataMapShader(const Handle(Graphic3d_ShaderProgram)& program)
@@ -128,7 +129,16 @@ void main() {
     float geometry = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
     vec3 specular = distribution * geometry * fresnel / max(4.0 * nv * nl, 0.0001);
     vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * base / 3.14159265;
+#ifdef SY_DRAWN_COLOUR_PROPOSAL
+    // Colour proposal (CTO 25 Nov 15:30, checks only until the founder decides): the diffuse
+    // light comes along the camera's own axis, scaled so that a dielectric face turned to the
+    // camera gets exactly its base colour from diffuse + ambient (0.87 + 0.13 for metallic 0).
+    // The shine keeps the key light above/left, so its highlight does not sit on that face.
+    float nd = clamp(dot(n, view), 0.0, 1.0);
+    vec3 direct = diffuse * nd * (0.87 * 3.14159265 / max(1.0 - dielectric, 0.0001)) + specular * nl * 2.2;
+#else
     vec3 direct = (diffuse + specular) * nl * 2.2;
+#endif
     vec3 ambient = base * (0.055 + 0.075 * (1.0 - metallic)) + f0 * (0.025 * (1.0 - roughness));
     // GLView explicitly owns an ES2 RGBA8 drawable, and OCCT's ES2 path has
     // no sRGB framebuffer encoding. Texture color samples and PBR factors
@@ -142,7 +152,10 @@ void main() {
     occSetFragColor(vec4(encoded, surface.a));
 }
 )GLSL";
-    const TCollection_AsciiString prefix = normal ? "#define SY_HAS_NORMAL_MAP\n" : "";
+    // The colour proposal is read when the program is made (a viewer keeps one choice; the program
+    // id is unchanged, and each viewer has its own OCCT driver and program cache).
+    const TCollection_AsciiString prefix = TCollection_AsciiString(normal ? "#define SY_HAS_NORMAL_MAP\n" : "")
+        + (Core3DView::drawnColourProposal() ? "#define SY_DRAWN_COLOUR_PROPOSAL\n" : "");
     program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_VERTEX, prefix + vertex));
     program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_FRAGMENT, prefix + fragment));
     return program;
