@@ -5810,15 +5810,24 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 		TDF_Label label;
 		Graphic3d_NameOfMaterial material;
 		Quantity_NameOfColor color;
+		bool replacesFaceLooks;
 	};
 	std::vector<PendingStyle> pendingStyles;
     NSMutableArray* materials = [NSMutableArray array];
     NSMutableArray* colors = [NSMutableArray array];
-    // Object mode: a swatch is the part's own colour, and a colour painted on one face stays
-    // (round 3 S6-F4; Material > PBR already kept it). Face mode keeps its whole-part paint
-    // (62574950f, waiting on the founder's decision about painting one face).
-    const BOOL replacesFaceColours = wholeParts
+    // Face mode keeps its whole-part paint (62574950f, waiting on the founder's decision about
+    // painting one face): every face colour of the part is replaced, and a part whose face
+    // colours cannot be replaced stops the command.
+    const BOOL faceModeWholeParts = wholeParts
         && _currentSelectionType != PrimitiveSelectionTypeShape;
+    // Object mode (round 11 iPad, R11P-6): a colour for the whole part is the whole part's
+    // colour. Since 7ebd95cb (round 3 S6-F4) Object mode wrote only the part's own colour and
+    // left every face that has its own look alone. After a Join of parts that look different
+    // EVERY face has its own look (JoinFaceLooks), so the swatch showed nowhere: the panel said
+    // Green, Undo got a step, the part stayed blue and orange. A part that draws at least one
+    // face in its own look now has those looks replaced, as in Face mode and as this method's
+    // header says; Undo brings them back in the same step. A part with no such face goes
+    // exactly as before. Material > PBR in Object mode is not changed here (see the note).
 
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         auto selected = context->SelectedInteractive();
@@ -5856,7 +5865,16 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 				colorName = (Quantity_NameOfColor)color.identity;
 			}
         }
-		pendingStyles.push_back({shape, label, materialName, colorName});
+        bool replacesFaceLooks = faceModeWholeParts;
+        if (wholeParts && !replacesFaceLooks) {
+            // The same question the drawing asks (LoadAuthoredFaceMaterials): a face label
+            // of this part with its own PBR look.
+            std::vector<TDF_Label> faceLabels;
+            std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> faceLooks;
+            replacesFaceLooks = doc->CaptureFaceColours(label, 1.0, faceLabels, faceLooks)
+                && !faceLooks.empty();
+        }
+		pendingStyles.push_back({shape, label, materialName, colorName, replacesFaceLooks});
 
         if(material != nil) {
             [materials addObject:material];
@@ -5874,11 +5892,16 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 		if (!transaction->HasOpenCommand()) {
 			return;
 		}
-		for (const PendingStyle& style : pendingStyles) {
+		for (PendingStyle& style : pendingStyles) {
 
-            if (replacesFaceColours && !doc->ClearPartSubshapeAppearance(style.label)) {
-                Core3DAbortCommandNoThrow(transaction);
-                return;
+            if (style.replacesFaceLooks && !doc->ClearPartSubshapeAppearance(style.label)) {
+                if (faceModeWholeParts) {
+                    Core3DAbortCommandNoThrow(transaction);
+                    return;
+                }
+                // Object mode: a part whose face looks cannot be replaced (the refusal comes
+                // before any look is changed) still takes its own colour, as before R11P-6.
+                style.replacesFaceLooks = false;
             }
 			if (!doc->ClearObjectVisualMaterial(style.label)) {
 				Core3DAbortCommandNoThrow(transaction);
@@ -5898,7 +5921,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 	doc->NotifyChanges();
 
 	for (const PendingStyle& style : pendingStyles) {
-        if (replacesFaceColours) {
+        if (style.replacesFaceLooks) {
             const auto colored = Handle(AIS_ColoredShape)::DownCast(style.shape);
             if (!colored.IsNull()) {
                 for (AIS_DataMapOfShapeDrawer::Iterator entry(colored->CustomAspectsMap()); entry.More(); entry.Next()) {
