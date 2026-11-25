@@ -833,6 +833,8 @@ private:
 - (BOOL)removeOwnedFile;
 @end
 
+extern "C" void ShapeyardDebugNoteGestureTrace(const char* site, int mode, int detail);
+
 @implementation Core3DQueuedPrivateFile {
     BOOL _created;
     BOOL _identityKnown;
@@ -2893,6 +2895,13 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     [super touchesCancelled:touches withEvent:event];
 	_rawTouchWasCancelled = YES;
 	_pendingTapBehindManipulator = NO;
+	if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr
+		&& _viewer->getObjectInteractor()->isManipulatorGestureActive()) {
+		// R14F-5 probe: the system or a gesture recognizer took the touch away.
+		NSLog(@"SHAPEYARD_GESTURE_DROPPED site=touches-cancelled forwarded=%d",
+			(int)_cancelTouches);
+		ShapeyardDebugNoteGestureTrace("touchescancelled", 99, (int)_cancelTouches);
+	}
 
     UITouch *aTouch = [touches anyObject];
     if (!_isPreviewMode && aTouch != NULL) {
