@@ -32552,6 +32552,28 @@ void RestoreNamingVersions(const std::vector<NamingVersionNote>& notes) noexcept
         }
     } catch (...) {}
 }
+// M14-2 (build 12 matrix). XCAFDoc_ShapeTool keeps, on every part, a map of that part's
+// sub-shapes (XCAFDoc_ShapeMapTool) and answers IsSubShape(part, face) from it. SetShape rewrites
+// the map without a backup and the attribute's Restore is empty, so a history step that puts
+// another shape back on a part left the map describing the shape just taken away. A part with a
+// look on single faces (one painted face; a Join of parts that look different) then failed
+// every reader that asks IsSubShape about its painted faces: Duplicate made no copy, In a row and
+// In a circle did not open, a whole-part colour fell back to the part's own colour only. The map
+// is not saved, so reopening the project healed it. Rebuild the map of every part whose shape
+// this step carried, from the shape the step left on it. Only the map changes: no command, no
+// saved attribute. A part without a map is skipped; the shape tool builds one when first asked.
+void RefreshSubShapeMaps(const std::vector<NamingVersionNote>& notes) noexcept {
+    for (const auto& note : notes) {
+        try {
+            Handle(XCAFDoc_ShapeMapTool) map;
+            if (note.label.IsNull()
+                || !note.label.FindAttribute(XCAFDoc_ShapeMapTool::GetID(), map) || map.IsNull())
+                continue;
+            const TopoDS_Shape current = XCAFDoc_ShapeTool::GetShape(note.label);
+            if (!current.IsNull()) map->SetShape(current);
+        } catch (...) {}
+    }
+}
 } // namespace
 
 Standard_Boolean OcctDocument::undo() {
@@ -32582,6 +32604,7 @@ Standard_Boolean OcctDocument::undo() {
         const auto namingNotes = NamingVersionsCarriedBy(ordinaryDelta);
         if (myOcafDoc->Undo()) {
             RestoreNamingVersions(namingNotes);
+            RefreshSubShapeMaps(namingNotes); // M14-2
             if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_True)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
@@ -32641,6 +32664,7 @@ Standard_Boolean OcctDocument::redo() {
         const auto namingNotes = NamingVersionsCarriedBy(ordinaryDelta);
 		if (myOcafDoc->Redo()) {
             RestoreNamingVersions(namingNotes);
+            RefreshSubShapeMaps(namingNotes); // M14-2
             if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_False)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
