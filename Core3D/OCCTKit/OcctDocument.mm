@@ -14829,9 +14829,12 @@ Standard_Boolean OcctDocument::BuildHoleResize(
 }
 
 // The commit half of ApplyThroughHole, for a solid that is already built.
+// `decidedLooks` (Hole size only, may be null): faces of `result` whose look the caller has already worked
+// out (HoleResizeLooks below). They are matched first, each to itself; every other face is matched as before.
 Standard_Boolean OcctDocument::CommitDrilledShape(
     const TDF_Label& label, const Handle(AIS_Shape)& presentation,
-    const TopoDS_Shape& result, std::string& refusal) noexcept {
+    const TopoDS_Shape& result, std::string& refusal,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>* decidedLooks) noexcept {
     try {
         if (presentation.IsNull() || result.IsNull() || myOcafDoc.IsNull()
             || myOcafDoc->HasOpenCommand()) { refusal = "unsupported-source"; return Standard_False; }
@@ -14854,6 +14857,9 @@ Standard_Boolean OcctDocument::CommitDrilledShape(
             refusal = "invalid-result";
             return Standard_False;
         }
+        // First match wins in CarryFaceColours: a face of `result` listed here matches itself before any old face.
+        if (decidedLooks && !decidedLooks->empty())
+            colouredFaces.insert(colouredFaces.begin(), decidedLooks->begin(), decidedLooks->end());
         refusal = "stale-source";
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
@@ -14895,6 +14901,138 @@ Standard_Boolean OcctDocument::ApplyHoleRow(
     } catch (...) { refusal = "invalid-result"; return Standard_False; }
 }
 
+// ---- Hole size: the looks that follow the hole itself (Fable, 24 Nov 2026; FABLE-HOLE-FOLLOWUPS-20261124.md) ----
+// CarryFaceColours gives a face of the new solid the look of the old painted face that the face's FIRST inside
+// point lies on. For Hole size that rule lost a colour without a word in two places:
+//  1. The wall of the resized hole lies on no old face at all (its radius changed), and the floor of a blind
+//     hole made bigger mostly lies outside the old floor: a painted hole wall went back to the part's colour on
+//     every Hole size.
+//  2. A face that grew over the ring a smaller hole fills back can have its first inside point IN that ring,
+//     where the old face had the hole: a painted face kept or lost its colour by where the hole sat on it.
+// Here every face of the resized solid is asked at a place where the old part still was:
+//  - a wall face of the resized hole: its inside point moved straight in or out to the old wall's radius (the
+//    same height along the hole, the same side of it);
+//  - the flat floor of a resized blind hole: its inside point drawn towards the hole's middle by old radius /
+//    new radius, so it lands on the old floor;
+//  - any other face: an inside point outside the wider of the old and the new hole, where the solid did not
+//    change.
+// A face whose asked point lies on an old painted face is listed with that look, as a face of `result`.
+// CommitDrilledShape matches these first, each to itself. A face not listed is matched exactly as before, and
+// nothing is listed when the resized hole cannot be told from the two solids (then all is as before).
+namespace {
+// An inside point of `face` farther than `clear` from `axis`, on the grids InteriorPointOfFace uses.
+bool InteriorPointClearOfAxis(const TopoDS_Face& face, const gp_Lin& axis, const double clear,
+                              gp_Pnt& point) noexcept {
+    try {
+        Standard_Real u0, u1, v0, v1;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (surface.IsNull()) return false;
+        for (const int cells : {8, 64})
+            for (int i = 1; i < cells; ++i)
+                for (int j = 1; j < cells; ++j) {
+                    const gp_Pnt2d uv(u0 + (u1 - u0) * ((i + (i % 2) * 0.088) / cells),
+                                      v0 + (v1 - v0) * ((j + (j % 2) * 0.104) / cells));
+                    const gp_Pnt at = surface->Value(uv.X(), uv.Y());
+                    if (axis.Distance(at) <= clear) continue;
+                    BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
+                    if (inside.State() == TopAbs_IN) { point = at; return true; }
+                }
+        return false;
+    } catch (...) { return false; }
+}
+
+// `before`: the part's solid as stored; `result`: the resized solid; `radius`: the radius asked for (part frame);
+// `painted`: the part's painted faces as CaptureFaceColours gives them.
+void HoleResizeLooks(const TopoDS_Shape& before, const TopoDS_Shape& result, const double radius,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& painted,
+    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& decided) noexcept {
+    decided.clear();
+    try {
+        OCC_CATCH_SIGNALS
+        if (painted.empty() || before.IsNull() || result.IsNull()
+            || before.ShapeType() != TopAbs_SOLID || result.ShapeType() != TopAbs_SOLID) return;
+        Bnd_Box box; BRepBndLib::Add(result, box);
+        if (box.IsVoid()) return;
+        const double reach = std::sqrt(box.SquareExtent());
+        const double linear = std::max(reach * 1e-7, Precision::Confusion());
+        const double tolerance = 1.0e-5 * reach;            // the tolerance MatchFaceLooks uses
+        // The resized hole: a hole of the new solid with the radius asked for, on the axis of a hole of the old
+        // solid that had another radius (the nearest such pair, should two holes share one axis).
+        const std::vector<RoundHoleOfSolid> oldHoles = RoundHolesOfSolid(before);
+        const std::vector<RoundHoleOfSolid> newHoles = RoundHolesOfSolid(result);
+        const RoundHoleOfSolid* was = nullptr;
+        const RoundHoleOfSolid* now = nullptr;
+        double apart = 0;
+        for (const RoundHoleOfSolid& made : newHoles) {
+            if (std::abs(made.radius - radius) > linear * 100) continue;
+            const gp_Lin madeAxis(made.entry, made.into);
+            for (const RoundHoleOfSolid& old : oldHoles) {
+                if (std::abs(old.radius - radius) <= linear * 100 || !old.into.IsParallel(made.into, 1e-7)
+                    || madeAxis.Distance(old.entry) > linear * 100) continue;
+                const double distance = old.entry.Distance(made.entry);
+                if (!was || distance < apart) { was = &old; now = &made; apart = distance; }
+            }
+        }
+        if (!was || !now || !(was->radius > linear) || !(now->radius > linear)) return;
+        const gp_Lin axis(was->entry, was->into);
+        const gp_Vec along(axis.Direction());
+        const double clear = std::max(was->radius, now->radius) + tolerance;
+        const auto lookAt = [&painted, tolerance](const gp_Pnt& point, XCAFDoc_VisMaterialPBR& look) {
+            for (const auto& entry : painted)
+                if (PointOnFace(point, entry.first, tolerance)) { look = entry.second; return true; }
+            return false;
+        };
+        TopTools_MapOfShape wallFaces;
+        TopTools_IndexedMapOfShape wallEdges;
+        for (const TopoDS_Face& wall : now->walls) {
+            wallFaces.Add(wall);
+            TopExp::MapShapes(wall, TopAbs_EDGE, wallEdges);
+        }
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(result, TopAbs_FACE, faces);
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            // A face OCCT cannot handle is only left to the ordinary matching.
+            try {
+                const TopoDS_Face face = TopoDS::Face(faces(index));
+                gp_Pnt point, asked;
+                if (wallFaces.Contains(face)) {
+                    if (!InteriorPointOfFace(face, point)) continue;
+                    const gp_Pnt foot = axis.Location().Translated(
+                        along.Multiplied(gp_Vec(axis.Location(), point).Dot(along)));
+                    const gp_Vec outward(foot, point);
+                    if (!(outward.Magnitude() > linear)) continue;
+                    asked = foot.Translated(outward.Multiplied(was->radius / outward.Magnitude()));
+                } else {
+                    bool any = false, all = true;
+                    for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+                        any = true;
+                        if (!wallEdges.Contains(edge.Current())) { all = false; break; }
+                    }
+                    if (any && all) {
+                        // The floor of a blind hole (every edge of it is an edge of the wall, as BuildHoleResize reads it).
+                        const BRepAdaptor_Surface surface(face, Standard_True);
+                        if (surface.GetType() != GeomAbs_Plane || !InteriorPointOfFace(face, point)) continue;
+                        const gp_Pln plane = surface.Plane();
+                        const gp_Vec normal(plane.Axis().Direction());
+                        const double slope = normal.Dot(along);
+                        if (std::abs(slope) < 1e-9) continue;
+                        const gp_Pnt middle = axis.Location().Translated(
+                            along.Multiplied(gp_Vec(axis.Location(), plane.Location()).Dot(normal) / slope));
+                        asked = middle.Translated(gp_Vec(middle, point).Multiplied(was->radius / now->radius));
+                    } else {
+                        if (!InteriorPointClearOfAxis(face, axis, clear, point)) continue;
+                        asked = point;
+                    }
+                }
+                XCAFDoc_VisMaterialPBR look;
+                if (lookAt(asked, look)) decided.emplace_back(face, look);
+            } catch (...) {}
+        }
+    } catch (...) { decided.clear(); }
+}
+} // namespace
+
 Standard_Boolean OcctDocument::ApplyHoleResize(
     const TDF_Label& label, const Handle(AIS_Shape)& presentation,
     double radius, const gp_Pnt* nearPoint, std::string& refusal) noexcept {
@@ -14902,7 +15040,17 @@ Standard_Boolean OcctDocument::ApplyHoleResize(
         if (presentation.IsNull()) { refusal = "unsupported-source"; return Standard_False; }
         TopoDS_Shape result;
         if (!BuildHoleResize(label, radius, nearPoint, result, refusal)) return Standard_False;
-        return CommitDrilledShape(label, presentation, result, refusal);
+        // A part with no painted face takes none of this (the list stays empty).
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> decidedLooks;
+        {
+            TopoDS_Shape before; std::string unusedCode;
+            std::vector<TDF_Label> unusedLabels;
+            std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> painted;
+            if (CaptureFaceColours(label, 1.0, unusedLabels, painted) && !painted.empty()
+                && HoleEditSource(label, before, unusedCode, Standard_False))
+                HoleResizeLooks(before, result, radius, painted, decidedLooks);
+        }
+        return CommitDrilledShape(label, presentation, result, refusal, &decidedLooks);
     } catch (...) { refusal = "invalid-result"; return Standard_False; }
 }
 

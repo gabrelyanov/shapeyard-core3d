@@ -2049,9 +2049,11 @@ public:
     Standard_Boolean HoleEditSource(const TDF_Label& label, TopoDS_Shape& source,
         std::string& refusal, Standard_Boolean verified) const noexcept;
     //! Shared: writes a drilled solid as one command, as ApplyThroughHole does.
+    //! `decidedLooks` (Hole size only): faces of `result` whose look is already known; matched first.
     Standard_Boolean CommitDrilledShape(const TDF_Label& label,
         const Handle(AIS_Shape)& presentation, const TopoDS_Shape& result,
-        std::string& refusal) noexcept;
+        std::string& refusal,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>* decidedLooks = nullptr) noexcept;
     //! The prepared result (in the target's own frame) and the two entity
     //! identifiers, for an on-model preview before Apply. Read-only.
     Standard_EXPORT Standard_Boolean BooleanPairPreparedPreview(
