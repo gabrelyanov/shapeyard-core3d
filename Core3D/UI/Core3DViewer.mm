@@ -107,6 +107,9 @@
 #include <Poly_Triangulation.hxx>
 #include <StdPrs_ToolTriangulatedShape.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
@@ -11788,9 +11791,93 @@ OrdinaryEditResult Core3DViewer::publishCreatedPrimitives(
 // app-created import document (the native importer's BinXCAF result) are added to the open
 // model as ONE ordinary creation: one Undo removes them all; names are kept; a colour is kept
 // as its nearest named colour; lengths are scaled when the two documents' units differ.
+
+namespace {
+// Job 4 (22 Nov): "+" Import makes each closed triangle part of an STL or OBJ one solid, by the same steps as
+// Make solid (OcctDocument::PrepareMeshSolidConversion: one flat face per triangle, sewn into one closed shell,
+// made a solid, faces in one plane merged), read straight from the part's triangles where the part is placed.
+// Its own budget: the editable-mesh capture stops at 4096 triangles, and the app's own Fine STLs pass that.
+enum class ImportedSolidResult { Made, Open, TooLarge, Failed };
+constexpr std::size_t kImportedSolidTriangleBudget = 20000;
+ImportedSolidResult MakeImportedMeshSolid(const TopoDS_Shape& shape, TopoDS_Shape& solidOut) noexcept {
+    solidOut.Nullify();
+    try {
+        OCC_CATCH_SIGNALS
+        std::vector<std::array<gp_Pnt, 3>> triangles;
+        Bnd_Box extent;
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            TopLoc_Location location;
+            const Handle(Poly_Triangulation) mesh = BRep_Tool::Triangulation(face, location);
+            if (mesh.IsNull()) return ImportedSolidResult::Failed;
+            if (triangles.size() + std::size_t(std::max(0, mesh->NbTriangles())) > kImportedSolidTriangleBudget)
+                return ImportedSolidResult::TooLarge;
+            const gp_Trsf placed = location.Transformation();
+            const bool reversed = face.Orientation() == TopAbs_REVERSED;
+            for (int index = 1; index <= mesh->NbTriangles(); ++index) {
+                int a = 0, b = 0, c = 0;
+                mesh->Triangle(index).Get(a, b, c);
+                std::array<gp_Pnt, 3> p{mesh->Node(a).Transformed(placed), mesh->Node(b).Transformed(placed),
+                                        mesh->Node(c).Transformed(placed)};
+                if (reversed) std::swap(p[1], p[2]);
+                for (const auto& point : p) extent.Add(point);
+                triangles.push_back(p);
+            }
+        }
+        if (triangles.size() < 4 || extent.IsVoid()) return ImportedSolidResult::Failed;
+        const double diagonal = std::sqrt(extent.SquareExtent());
+        if (!std::isfinite(diagonal) || diagonal <= 1.e-9) return ImportedSolidResult::Failed;
+        const double tolerance = std::max(1.e-7, diagonal * 1.e-6);
+        BRepBuilderAPI_Sewing sewing(tolerance, Standard_True, Standard_True, Standard_True, Standard_False);
+        std::size_t added = 0;
+        for (const auto& p : triangles) {
+            // Zero-area slivers carry no surface; their edges collapse within the sewing tolerance.
+            if (gp_Vec(p[0], p[1]).Crossed(gp_Vec(p[0], p[2])).Magnitude() <= tolerance * tolerance) continue;
+            BRepBuilderAPI_MakePolygon polygon(p[0], p[1], p[2], Standard_True);
+            if (!polygon.IsDone()) return ImportedSolidResult::Failed;
+            BRepBuilderAPI_MakeFace made(polygon.Wire(), Standard_True);
+            if (!made.IsDone()) return ImportedSolidResult::Failed;
+            sewing.Add(made.Face());
+            ++added;
+        }
+        if (added < 4) return ImportedSolidResult::Failed;
+        sewing.Perform();
+        if (sewing.NbFreeEdges() != 0 || sewing.NbMultipleEdges() != 0) return ImportedSolidResult::Open;
+        TopoDS_Shell shell;
+        int shells = 0;
+        for (TopExp_Explorer it(sewing.SewedShape(), TopAbs_SHELL); it.More(); it.Next()) {
+            if (!BRep_Tool::IsClosed(it.Current())) return ImportedSolidResult::Open;
+            shell = TopoDS::Shell(it.Current());
+            ++shells;
+        }
+        // Several closed bodies in one part stay a mesh, as before (no one-solid answer for them yet).
+        if (shells != 1) return shells == 0 ? ImportedSolidResult::Open : ImportedSolidResult::Failed;
+        BRepBuilderAPI_MakeSolid made(shell);
+        if (!made.IsDone()) return ImportedSolidResult::Failed;
+        TopoDS_Solid solid = made.Solid();
+        if (!BRepLib::OrientClosedSolid(solid)) return ImportedSolidResult::Failed;
+        ShapeUpgrade_UnifySameDomain unify(solid, Standard_True, Standard_True, Standard_False);
+        unify.SetLinearTolerance(tolerance);
+        unify.SetAngularTolerance(1.e-7);
+        unify.Build();
+        TopoDS_Shape result;
+        int solids = 0;
+        for (TopExp_Explorer it(unify.Shape(), TopAbs_SOLID); it.More(); it.Next()) { result = it.Current(); ++solids; }
+        if (solids != 1 || result.IsNull() || result.Orientation() != TopAbs_FORWARD
+            || !BRepCheck_Analyzer(result, Standard_True).IsValid()) return ImportedSolidResult::Failed;
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(result, props);
+        if (!std::isfinite(props.Mass()) || props.Mass() <= 0) return ImportedSolidResult::Failed;
+        solidOut = result;
+        return ImportedSolidResult::Made;
+    } catch (...) { solidOut.Nullify(); return ImportedSolidResult::Failed; }
+}
+}
+
 OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::string& path,
-                                                                 int& inserted) noexcept {
+    int& inserted, bool solidify, bool* openSurface) noexcept {
     inserted = 0;
+    if (openSurface) *openSurface = false;
     if (![NSThread isMainThread] || path.empty() || myDoc.IsNull() || !canBeginCommittedEdit())
         return OrdinaryEditResult::Busy;
     Handle(OcctDocument) source = new OcctDocument();
@@ -11818,6 +11905,22 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
             const TDF_Label label = roots.Value(index);
             TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
             if (shape.IsNull()) continue;
+            auto representation = source->StoredGeometryRepresentationForLabel(label);
+            if (representation != OcctGeometryRepresentation::TriangleMesh)
+                representation = OcctGeometryRepresentation::BRep;
+            if (solidify && representation == OcctGeometryRepresentation::TriangleMesh) {
+                TopoDS_Shape solid;
+                const auto made = MakeImportedMeshSolid(shape, solid);
+                if (made == ImportedSolidResult::Open) {
+                    if (openSurface) *openSurface = true;
+                    return OrdinaryEditResult::Invalid;
+                }
+                // Too many triangles, or several bodies in one part: it comes in as a mesh, as before.
+                if (made == ImportedSolidResult::Made) {
+                    shape = solid;
+                    representation = OcctGeometryRepresentation::BRep;
+                }
+            }
             if (std::abs(scale - 1.0) > 1e-12) {
                 gp_Trsf scaling;
                 scaling.SetScale(gp::Origin(), scale);
@@ -11830,9 +11933,7 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
             OrdinaryCreationRequest request;
             request.presentation = new AIS_ColoredShape(shape);
             myContext->ApplyDefaultMaterial(request.presentation);
-            request.representation = source->StoredGeometryRepresentationForLabel(label);
-            if (request.representation != OcctGeometryRepresentation::TriangleMesh)
-                request.representation = OcctGeometryRepresentation::BRep;
+            request.representation = representation;
             Quantity_Color color;
             if (!colors.IsNull() && (colors->GetColor(label, XCAFDoc_ColorSurf, color)
                                      || colors->GetColor(label, XCAFDoc_ColorGen, color)))
