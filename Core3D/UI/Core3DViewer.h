@@ -582,6 +582,8 @@ namespace core3d {
         gp_Pnt& worldPoint, gp_Dir& worldDirection) noexcept;
     //! True when the part is a Join, Cut or Overlap result keeping its originals.
     bool isBooleanResult(const std::string& entity) noexcept;
+    //! True when the part is stored as a triangle mesh, not as a solid (read only).
+    bool isTriangleMeshPart(const std::string& entity) noexcept;
     //! The same point and direction in the part's own coordinates (document
     //! units, before its placement), for the saved-hole command.
     bool partLocalAnchor(const std::string& entity, const gp_Pnt& worldPoint,
