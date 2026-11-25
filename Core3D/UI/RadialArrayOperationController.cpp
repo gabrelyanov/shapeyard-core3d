@@ -2579,6 +2579,15 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
         } catch (...) {
             isWritten = Standard_False;
         }
+#ifdef DEBUG
+        // Fault 16 (Fable review 23, finding 2): the document took the centre, but the
+        // read-back is treated as differing, so the abort below is the only thing that gives
+        // the part its old centre back. Without a staged centre the fault stays unused.
+        if (_debugProfileCopyFault == 16) {
+            _debugProfileCopyFault = 0;
+            isWritten = Standard_False;
+        }
+#endif
         if (!isWritten) {
             _state = abortOwnedCommand()
                 ? (_previewValid ? RadialArrayPreviewState::Ready
@@ -2953,7 +2962,7 @@ void RadialArrayOperationController::debugSetPostCommitInspectMode(
 void RadialArrayOperationController::debugSetProfileCopyFault(
     const Standard_Integer theMode) noexcept
 {
-    _debugProfileCopyFault = theMode >= 0 && theMode <= 15 ? theMode : 0;
+    _debugProfileCopyFault = theMode >= 0 && theMode <= 16 ? theMode : 0;
 }
 
 void RadialArrayOperationController::debugSetMaximumTopologyNodes(

@@ -153,6 +153,8 @@ public:
     void debugSetApplyCommitMode(Standard_Integer mode) noexcept;
     //! 0 normal, 1 one-shot unavailable, 2 one-shot partial/mismatched.
     void debugSetPostCommitInspectMode(Standard_Integer mode) noexcept;
+    //! 16 (one tick, staged centre only): the centre read-back at Apply counts as differing,
+    //! so Apply must abort its command and give the part its stored centre back.
     void debugSetProfileCopyFault(Standard_Integer mode) noexcept;
     void debugSetMaximumTopologyNodes(Standard_Size limit) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
