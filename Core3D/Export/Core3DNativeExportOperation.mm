@@ -28,7 +28,6 @@
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepTools_ShapeSet.hxx>
-#include <TopoDS_Iterator.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #endif
@@ -70,6 +69,7 @@
 #include <TopAbs_Orientation.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS.hxx>
 #include <UnitsMethods.hxx>
 #include <UnitsMethods_LengthUnit.hxx>
