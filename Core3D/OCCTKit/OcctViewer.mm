@@ -110,6 +110,7 @@ void PrepareNativeLessonLighting(const Handle(AIS_InteractiveContext)& context,
 #include <OpenGl_GraphicDriver.hxx>
 #include <OpenGl_Context.hxx>
 #include <Graphic3d_CLight.hxx>
+#include <V3d_DirectionalLight.hxx>
 #include <Standard_Failure.hxx>
 
 #include <AIS_ConnectedInteractive.hxx>
@@ -424,11 +425,21 @@ bool OcctViewer::InitViewer (Core3DPlatformView* theWin)
             && light.Value()->Type() == Graphic3d_TOLS_DIRECTIONAL
             && light.Value()->IsHeadlight()) {
             light.Value()->SetDirection(gp_Dir(0.35, -0.45, -1.0));
-            // Colour proposal (CTO 25 Nov 15:30, checks only until the founder decides): today a face
-            // turned to the camera shows 0.67 of the picked colour; a stronger headlight brings it to
-            // the swatch while faces turned away keep their shading.
-            if (Core3DView::drawnColourProposal())
-                light.Value()->SetIntensity(Core3DView::DrawnColourProposalHeadlight);
+        }
+    }
+    // Colour proposal (CTO 25 Nov 15:30, checks only until the founder decides): today a face turned
+    // to the camera shows 0.67 of the picked colour. A second headlight along the same direction makes
+    // the headlight's diffuse light DrawnColourProposalHeadlight times as strong, so that face reaches
+    // the swatch while faces turned away keep their shading. Its strength is its grey (sRGB, as OCCT's
+    // ES2 path shades sRGB values), not SetIntensity, which OCCT's header files under ray-tracing / PBR
+    // light properties (Graphic3d_CLight.hxx), so the Phong path may not read it.
+    if (Core3DView::drawnColourProposal()) {
+        for (Standard_Real extra = Core3DView::DrawnColourProposalHeadlight - 1.0; extra > 1.0e-3; extra -= 1.0) {
+            const Standard_Real grey = extra < 1.0 ? extra : 1.0;
+            Handle(V3d_DirectionalLight) boost = new V3d_DirectionalLight(gp_Dir(0.35, -0.45, -1.0),
+                Quantity_Color(grey, grey, grey, Quantity_TOC_sRGB), Standard_True);
+            myViewer->AddLight(boost);
+            myViewer->SetLightOn(boost);
         }
     }
     
