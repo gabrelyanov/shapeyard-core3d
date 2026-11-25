@@ -577,7 +577,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 CORE3D_CUT_REFUSE("ordinary.profile-d4-capability",
                     reject(OrdinaryEditResult::Invalid));
             }
-            if (request.enclosureRebuild.has_value() != (request.operation == OrdinaryTransformOperation::EnclosureRebuild)) {
+            if (request.enclosureRebuild.has_value() != (request.operation == OrdinaryTransformOperation::EnclosureRebuild)
+                || (request.enclosureKeepsMiddle && request.operation != OrdinaryTransformOperation::EnclosureRebuild)) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.sweepRebuild.has_value() != (request.operation == OrdinaryTransformOperation::SweepRebuild)
@@ -971,9 +972,24 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             }
             if (request.operation == OrdinaryTransformOperation::EnclosureRebuild) {
                 std::vector<double> values;
+                // R10P-S5: a Case rebuild keeps the placement. Only the Case sheet's request may move the
+                // part, and only by the one move that keeps the Case where the person put it
+                // (enclosure::SheetEditShift), worked out here again from the stored recipe and placement:
+                // the same arithmetic on the same values as the preparation, so the comparison is exact.
+                // Never a turn, a scale or another move; a bevelled Case (paired treatment, whose staging
+                // writes no placement) never moves.
+                gp_Trsf expectedPlacement = record.previous.transform;
+                gp_Vec keepMiddle;
+                const bool keepMiddleKnown = !request.enclosureKeepsMiddle || pairedTreatment
+                    || enclosure::SheetEditShift(record.previous.enclosure.parameters,
+                        *request.enclosureRebuild, record.previous.transform, keepMiddle);
+                if (keepMiddleKnown && keepMiddle.SquareMagnitude() > 0) {
+                    gp_Trsf move; move.SetTranslation(keepMiddle);
+                    expectedPlacement = record.previous.transform.Multiplied(move);
+                }
                 if (changes.size() != 1 || representation != OcctGeometryRepresentation::BRep
                     || !record.previous.enclosure.IsCurrent(document,request.label)
-                    || !MatricesEqual(record.previous.transform,request.transform)
+                    || !keepMiddleKnown || !MatricesEqual(expectedPlacement,request.transform)
                     || request.rotationAroundPivot || !geometryChanges
                     || !enclosure::HasOnlyMetadataSubshapes(document,request.label)
                     || !enclosure::Encode(*request.enclosureRebuild,values)

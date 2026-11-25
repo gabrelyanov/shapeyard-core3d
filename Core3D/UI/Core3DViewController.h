@@ -1236,6 +1236,16 @@ __attribute__((objc_subclassing_restricted))
     definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildStoredEnclosure(_:definition:expected:completion:));
+//! The person's Case sheet (round 10 R10P-S5). As above, and with keepingMiddle a new Width or Depth keeps
+//! the middle of the Case's outline where it was: the part is moved by half the change, along the Case's own
+//! axes, in the same step (one Undo). Height keeps the Case's bottom. A size that stands upright on a Case
+//! standing on the floor keeps the floor, as Dimensions do. A Case with a Round or Bevel on it, and an edit
+//! that also changes the plane, keep the placement as above. NO is exactly the method above.
+- (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
+    definition:(Core3DEnclosureDefinition *)definition keepingMiddle:(BOOL)keepingMiddle
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildStoredEnclosure(_:definition:keepingMiddle:expected:completion:));
 //! Prepare passive Object/MoveRotate/Scale state for a separate planning
 //! capture. Preserves model and selected targets; rejects active work, gestures,
 //! modeling previews, readonly views and recovery without cancelling them.

@@ -18202,6 +18202,14 @@ namespace core3d::part_boolean::owner { int CommitReadbackFailureCount() noexcep
 - (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
     definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self rebuildStoredEnclosure:original definition:definition keepingMiddle:NO
+        expected:expected completion:completion];
+}
+
+- (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
+    definition:(Core3DEnclosureDefinition *)definition keepingMiddle:(BOOL)keepingMiddle
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
     if (!completion) return;
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
@@ -18219,7 +18227,8 @@ namespace core3d::part_boolean::owner { int CommitReadbackFailureCount() noexcep
         auto requested = [definition nativeParameters];
         const auto work = GLController.viewer->prepareStoredEnclosureRebuild(requested,
             originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
-            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)),
+            keepingMiddle == YES);
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
