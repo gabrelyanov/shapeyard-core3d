@@ -129,17 +129,25 @@ void main() {
     float geometry = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
     vec3 specular = distribution * geometry * fresnel / max(4.0 * nv * nl, 0.0001);
     vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * base / 3.14159265;
+    vec3 ambient = base * (0.055 + 0.075 * (1.0 - metallic)) + f0 * (0.025 * (1.0 - roughness));
 #ifdef SY_DRAWN_COLOUR_PROPOSAL
     // Colour proposal (CTO 25 Nov 15:30, checks only until the founder decides): the diffuse
-    // light comes along the camera's own axis, scaled so that a dielectric face turned to the
-    // camera gets exactly its base colour from diffuse + ambient (0.87 + 0.13 for metallic 0).
-    // The shine keeps the key light above/left, so its highlight does not sit on that face.
+    // light comes along the camera's own axis, sized so that a face turned to the camera gets
+    // exactly its base colour from ambient + diffuse + the shine it receives there. The shine
+    // keeps the key light above/left; on a face turned to the camera (n = view, so nv = 1 and
+    // nh = vh) it is shineFace below, which equals specular * nl * 2.2 at that face. The 25 Nov
+    // 16:41 check run puts that shine at about 0.012 linear (#DA2020 drawn 190,41,41), which alone
+    // lifts the dark channels 32 -> ~46 if the diffuse budget ignores it.
     float nd = clamp(dot(n, view), 0.0, 1.0);
-    vec3 direct = diffuse * nd * (0.87 * 3.14159265 / max(1.0 - dielectric, 0.0001)) + specular * nl * 2.2;
+    float nlFace = clamp(dot(view, light), 0.0, 1.0);
+    float dFace = max(vh * vh * (alpha2 - 1.0) + 1.0, 0.0001);
+    vec3 shineFace = alpha2 / (3.14159265 * dFace * dFace) * (nlFace / (nlFace * (1.0 - k) + k)) * fresnel
+        / max(4.0 * nlFace, 0.0001) * nlFace * 2.2;
+    vec3 diffuseFace = max(base - ambient - shineFace, vec3(0.0)) * (1.0 - metallic);
+    vec3 direct = diffuseFace * nd + specular * nl * 2.2;
 #else
     vec3 direct = (diffuse + specular) * nl * 2.2;
 #endif
-    vec3 ambient = base * (0.055 + 0.075 * (1.0 - metallic)) + f0 * (0.025 * (1.0 - roughness));
     // GLView explicitly owns an ES2 RGBA8 drawable, and OCCT's ES2 path has
     // no sRGB framebuffer encoding. Texture color samples and PBR factors
     // are linear, so encode the final light sum once for that display target.
