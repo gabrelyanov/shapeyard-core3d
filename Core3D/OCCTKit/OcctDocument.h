@@ -2170,7 +2170,8 @@ public:
 #if DEBUG
     std::array<std::size_t, 3> DebugOrdinaryNamingHistoryStorage() const noexcept;
 #endif
-    enum class OrdinaryNamingFamily { Profile, UnretainedShell, SavedCutShell, BoundedCurveCreation, Removal };
+    enum class OrdinaryNamingFamily { Profile, UnretainedShell, SavedCutShell, BoundedCurveCreation, Removal,
+        BooleanResultShell };
     // Only the ordinary Delete route issues these tokens. Its command stamp
     // retains the token through exact prior/candidate settlement.
     std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryRemovalNamingHistory(
@@ -2630,6 +2631,19 @@ public:
     //! Requires the face edit's open command: abort/undo restores the record.
     //! Other saved feature families are never removed by this operation.
     Standard_Boolean PrepareBooleanResultForFaceEdit(const TDF_Label& label) noexcept;
+
+    //! Shell on a Join/Cut/Overlap that keeps its parts (CanBakeBooleanResultForFaceEdit; round 11
+    //! R11I-8 and control C1a, 25 Nov): the solid Shell hollows. Such a result keeps the flat sides
+    //! its parts share in pieces (only the plain Join tidies them), so `tidied` is `solid` with
+    //! those pieces made one face each, by the plain Join's own tidy and with its guards, and
+    //! `openings` (with their face indices in `tidied`, ascending) are the faces of it that the
+    //! `picked` faces of `solid` lie on. Read-only: nothing in the document changes.
+    //! False, with empty outputs, when the part has no such record, carries a picture on a face,
+    //! has nothing to tidy, or a picked face cannot be placed for certain: Shell then works on the
+    //! stored solid, as before.
+    Standard_Boolean TidiedBooleanResultForShell(const TDF_Label& label, const TopoDS_Shape& solid,
+        const std::vector<TopoDS_Face>& picked, TopoDS_Shape& tidied,
+        std::vector<TopoDS_Face>& openings, std::vector<Standard_Size>& openingIndices) const noexcept;
 
     Standard_Boolean ReplaceShape(
         const TDF_Label& label,
