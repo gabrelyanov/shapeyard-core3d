@@ -91,6 +91,20 @@ if [[ "${3:-}" == "ShellAfterBevelTests" ]]; then
     done
     exit "$failed"
 fi
+# Bevel on a shelled part (M14-0, 25 Nov 2026), one process per case: exit 139 = kernel fault.
+if [[ "${3:-}" == "BevelAfterShellTests" ]]; then
+    : "${2:?focused bevel tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-ignored-qualifiers -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/BevelAfterShellTests.cpp" -L "$2" \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel -o "$output_dir/BevelAfterShellTests"
+    failed=0
+    for number in 1 2 3 4 5 6; do
+        "$output_dir/BevelAfterShellTests" "$number" || { echo "case $number: exit $?"; failed=1; }
+    done
+    exit "$failed"
+fi
 # Standalone production angle helper; no simulator or OCCT libraries required.
 if [[ -z "${3:-}" || "${3:-}" == "manipulator_angle_wrap_tests" ]]; then
     /usr/bin/clang++ -std=c++17 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-overloaded-virtual -O2 \
