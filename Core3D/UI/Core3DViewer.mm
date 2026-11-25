@@ -11882,6 +11882,11 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
         return OrdinaryEditResult::Busy;
     Handle(OcctDocument) source = new OcctDocument();
     std::vector<OrdinaryCreationRequest> requests;
+    // Job 4: the same parts as they were before the one-solid step (meshes stay meshes), used when a part made
+    // solid cannot be added (the app's own Fine Sweep band STL, R2-O03, measure-20261123-002308-17936): the file
+    // then comes in as it did before Job 4 instead of not at all.
+    std::vector<OrdinaryCreationRequest> asBefore;
+    bool anySolidified = false;
     try {
         if (!source->OpenPrivateExportSnapshot(path, Message_ProgressRange()))
             return OrdinaryEditResult::Invalid;
@@ -11908,6 +11913,33 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
             auto representation = source->StoredGeometryRepresentationForLabel(label);
             if (representation != OcctGeometryRepresentation::TriangleMesh)
                 representation = OcctGeometryRepresentation::BRep;
+            const auto makeRequest = [&](TopoDS_Shape part, OcctGeometryRepresentation kind, bool& ok) {
+                OrdinaryCreationRequest request;
+                ok = false;
+                if (std::abs(scale - 1.0) > 1e-12) {
+                    gp_Trsf scaling;
+                    scaling.SetScale(gp::Origin(), scale);
+                    // Copy the triangles too: a triangle-only part (STL, OBJ) is otherwise left at its
+                    // file size in an inch or metre project (Fable review 17 Nov, K18).
+                    BRepBuilderAPI_Transform scaled(part, scaling, Standard_True, Standard_True);
+                    if (!scaled.IsDone() || scaled.Shape().IsNull()) return request;
+                    part = scaled.Shape();
+                }
+                request.presentation = new AIS_ColoredShape(part);
+                myContext->ApplyDefaultMaterial(request.presentation);
+                request.representation = kind;
+                Quantity_Color color;
+                if (!colors.IsNull() && (colors->GetColor(label, XCAFDoc_ColorSurf, color)
+                                         || colors->GetColor(label, XCAFDoc_ColorGen, color)))
+                    request.color = color.Name();
+                Handle(TDataStd_Name) named;
+                if (label.FindAttribute(TDataStd_Name::GetID(), named) && !named.IsNull()
+                    && named->Get().Length() > 0 && named->Get().Length() <= 128)
+                    request.name = named->Get();
+                ok = true;
+                return request;
+            };
+            bool ok = false;
             if (solidify && representation == OcctGeometryRepresentation::TriangleMesh) {
                 TopoDS_Shape solid;
                 const auto made = MakeImportedMeshSolid(shape, solid);
@@ -11917,36 +11949,37 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
                 }
                 // Too many triangles, or several bodies in one part: it comes in as a mesh, as before.
                 if (made == ImportedSolidResult::Made) {
-                    shape = solid;
-                    representation = OcctGeometryRepresentation::BRep;
+                    auto request = makeRequest(solid, OcctGeometryRepresentation::BRep, ok);
+                    if (!ok) return OrdinaryEditResult::Invalid;
+                    requests.push_back(std::move(request));
+                    anySolidified = true;
+                    auto previous = makeRequest(shape, representation, ok);
+                    if (!ok) return OrdinaryEditResult::Invalid;
+                    asBefore.push_back(std::move(previous));
+                    continue;
                 }
             }
-            if (std::abs(scale - 1.0) > 1e-12) {
-                gp_Trsf scaling;
-                scaling.SetScale(gp::Origin(), scale);
-                // Copy the triangles too: a triangle-only part (STL, OBJ) is otherwise left at its
-                // file size in an inch or metre project (Fable review 17 Nov, K18).
-                BRepBuilderAPI_Transform scaled(shape, scaling, Standard_True, Standard_True);
-                if (!scaled.IsDone() || scaled.Shape().IsNull()) return OrdinaryEditResult::Invalid;
-                shape = scaled.Shape();
-            }
-            OrdinaryCreationRequest request;
-            request.presentation = new AIS_ColoredShape(shape);
-            myContext->ApplyDefaultMaterial(request.presentation);
-            request.representation = representation;
-            Quantity_Color color;
-            if (!colors.IsNull() && (colors->GetColor(label, XCAFDoc_ColorSurf, color)
-                                     || colors->GetColor(label, XCAFDoc_ColorGen, color)))
-                request.color = color.Name();
-            Handle(TDataStd_Name) named;
-            if (label.FindAttribute(TDataStd_Name::GetID(), named) && !named.IsNull()
-                && named->Get().Length() > 0 && named->Get().Length() <= 128)
-                request.name = named->Get();
+            auto request = makeRequest(shape, representation, ok);
+            if (!ok) return OrdinaryEditResult::Invalid;
             requests.push_back(std::move(request));
+            if (solidify) {
+                // Its own presentation: a refused first attempt must not leave anything shared behind.
+                auto previous = makeRequest(shape, representation, ok);
+                if (!ok) return OrdinaryEditResult::Invalid;
+                asBefore.push_back(std::move(previous));
+            }
         }
     } catch (...) { return OrdinaryEditResult::Invalid; }
     if (requests.empty()) return OrdinaryEditResult::Invalid;
-    const auto result = publishCreatedPrimitives(requests);
+    auto result = publishCreatedPrimitives(requests);
+#if DEBUG
+    if (anySolidified)
+        std::fprintf(stderr, "Job4 import solid publish=%d parts=%zu\n", int(result), requests.size());
+#endif
+    if (result != OrdinaryEditResult::Committed && anySolidified) {
+        requests = std::move(asBefore);
+        result = publishCreatedPrimitives(requests);
+    }
     if (result == OrdinaryEditResult::Committed) inserted = int(requests.size());
     return result;
 }
