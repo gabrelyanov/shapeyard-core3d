@@ -1490,7 +1490,8 @@ Standard_Boolean ShellOperationController::canBegin(
 
 Standard_Boolean ShellOperationController::tryPrepareSource(
     const ShellSourceSelection& theSelection,
-    std::unique_ptr<Source>& theSource) const noexcept
+    std::unique_ptr<Source>& theSource,
+    const Standard_Boolean tidyJoined) const noexcept
 {
     theSource.reset();
     if (myContext.IsNull() || myDoc.IsNull()
@@ -1563,6 +1564,7 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
         aSource->shape = aProof.shape;
         aSource->solid = aProof.solid;
         aSource->openingFaces = aProof.openingFaces;
+        aSource->pickedFaces = aProof.openingFaces;
         aSource->transform = aProof.transform;
         aSource->selectionMode = theSelection.selectionMode;
         aSource->openingFaceTopologyIndices = aProof.openingFaceTopologyIndices;
@@ -1606,8 +1608,39 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
 			// command, exactly as Push-pull and Bevel do.
 			aSource->profileShellOpenings.clear();
 			aSource->bakesSavedCut = Standard_True;
+		} else if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+				&& myDoc->CanBakeBooleanResultForFaceEdit(aProof.documentLabel)) {
+			// A Join/Cut/Overlap that keeps its two parts (what the Join tick makes
+			// from two parts that look the same): its record is baked inside Apply's
+			// own command, exactly as Bevel and Push-pull do (round 11 R11I-8 and
+			// control C1a, 25 Nov: Shell alone still refused such a part).
+			aSource->profileShellOpenings.clear();
+			aSource->bakesBooleanResult = Standard_True;
 		} else if (coverage != OcctRetainedRecipeCoverage::Absent) {
 			return Standard_False;
+		}
+		if (aSource->bakesBooleanResult && tidyJoined) {
+			// Such a part keeps the flat sides its parts share in pieces; only the
+			// plain Join tidies them. A person sees one side and taps one piece of
+			// it. Shell hollows the tidied solid through the whole side: the result
+			// a plain Join followed by Shell gives, which is what the part becomes
+			// once Apply has baked the record. No tidy to be had (nothing flush, a
+			// picture on a face, any doubt): the stored solid, and the kernel decides.
+			// The tidy validates a merged solid that still shares its untouched faces
+			// with the stored one. The stored part's Checked bits are saved bytes:
+			// put them back, so that opening Shell changes nothing in the project.
+			const SourceCheckedBits keepSourceBits(aProof.shape);
+			TopoDS_Shape aTidied;
+			std::vector<TopoDS_Face> aTidiedFaces;
+			std::vector<Standard_Size> aTidiedIndices;
+			if (myDoc->TidiedBooleanResultForShell(
+					aProof.documentLabel, aProof.solid, aProof.openingFaces,
+					aTidied, aTidiedFaces, aTidiedIndices)
+				&& ShellOpeningSetIsValid(aTidied, aTidiedFaces, aTidiedIndices)) {
+				aSource->solid = aTidied;
+				aSource->openingFaces = std::move(aTidiedFaces);
+				aSource->openingFaceTopologyIndices = std::move(aTidiedIndices);
+			}
 		}
 
         theSource = std::move(aSource);
@@ -1630,7 +1663,8 @@ Standard_Boolean ShellOperationController::begin(
         return Standard_False;
     }
     std::unique_ptr<Source> aSource;
-    if (!tryPrepareSource(theSelection, aSource) || aSource == nullptr) {
+    if (!tryPrepareSource(theSelection, aSource, Standard_True)
+        || aSource == nullptr) {
         return Standard_False;
     }
     try {
@@ -1658,7 +1692,9 @@ Standard_Boolean ShellOperationController::toggleOpening(
         || mySource == nullptr || presentation != mySource->original
         || !sourceIsCurrent()) return Standard_False;
     try {
-        auto faces = mySource->openingFaces;
+        // The picked faces, not the openings: on a tidied joined part an opening
+        // is a whole side and is not a face of the part as shown.
+        auto faces = mySource->pickedFaces;
         const auto found = std::find_if(faces.begin(), faces.end(),
             [&](const TopoDS_Face& existing) { return existing.IsEqual(face); });
         if (found != faces.end()) {
@@ -1672,7 +1708,7 @@ Standard_Boolean ShellOperationController::toggleOpening(
         if (!TryPrepareShellOperationSource(myContext, myDoc, presentation,
                                              faces, selection.proof)) return Standard_False;
         std::unique_ptr<Source> replacement;
-        if (!tryPrepareSource(selection, replacement)) return Standard_False;
+        if (!tryPrepareSource(selection, replacement, Standard_True)) return Standard_False;
         mySource = std::move(replacement);
         notifyPreviewStateChanged();
         return Standard_True;
@@ -1708,6 +1744,8 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
                 mySource->bakesSavedCut)
             || (mySource->bakesSavedCut
                 && !myDoc->CanBakeSavedCutForFaceEdit(mySource->label))
+            || (mySource->bakesBooleanResult
+                && !myDoc->CanBakeBooleanResultForFaceEdit(mySource->label))
             || !myDoc->IsPresentationEditable(mySource->original)
             || !myDoc->ShapeLabel(mySource->original).IsEqual(
                 mySource->label)
@@ -2430,9 +2468,11 @@ ShellApplyResult ShellOperationController::apply() noexcept
         }
         const auto namingFamily = mySource->bakesSavedCut
             ? OcctDocument::OrdinaryNamingFamily::SavedCutShell
-            : (mySource->profileRecord.label.IsNull()
-                ? OcctDocument::OrdinaryNamingFamily::UnretainedShell
-                : OcctDocument::OrdinaryNamingFamily::Profile);
+            : (mySource->bakesBooleanResult
+                ? OcctDocument::OrdinaryNamingFamily::BooleanResultShell
+                : (mySource->profileRecord.label.IsNull()
+                    ? OcctDocument::OrdinaryNamingFamily::UnretainedShell
+                    : OcctDocument::OrdinaryNamingFamily::Profile));
         myNamingHistory = myDoc->PrepareOrdinaryNamingHistory(0, mySource->label, namingFamily);
         if (!myNamingHistory) return ShellApplyResult::NoChange;
         myPendingCandidate = myPreviewResult->Shape();
@@ -2473,7 +2513,7 @@ ShellApplyResult ShellOperationController::apply() noexcept
             return resolveAfterMutation();
         }
 #endif
-        if ((mySource->bakesSavedCut
+        if (((mySource->bakesSavedCut || mySource->bakesBooleanResult)
                 && !myDoc->PrepareBooleanResultForFaceEdit(mySource->label))
             || !myDoc->ReplaceShape(mySource->label, myPreviewResult)
             || (myPendingProfile && !profile::Stage(aDocument, mySource->label,

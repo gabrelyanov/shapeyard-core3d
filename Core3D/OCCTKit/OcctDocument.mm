@@ -13883,6 +13883,55 @@ bool TidyJoinKeepingLooks(const OcctDocument& document, const TopoDS_Shape& resu
 }
 } // namespace
 
+// Shell on a Join / Cut / Overlap that keeps its parts (round 11 R11I-8, control C1a). See the header.
+Standard_Boolean OcctDocument::TidiedBooleanResultForShell(const TDF_Label& label, const TopoDS_Shape& solid,
+    const std::vector<TopoDS_Face>& picked, TopoDS_Shape& tidied,
+    std::vector<TopoDS_Face>& openings, std::vector<Standard_Size>& openingIndices) const noexcept {
+    tidied.Nullify(); openings.clear(); openingIndices.clear();
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData() || solid.IsNull()
+            || solid.ShapeType() != TopAbs_SOLID || picked.empty()
+            || !CanBakeBooleanResultForFaceEdit(label)
+            // TIDY-CHECK: a picture on a face is not a look the tidy knows; never merge under one.
+            || JoinInputCarriesPicture(myOcafDoc, label)) return Standard_False;
+        std::vector<TDF_Label> unusedLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> looks;
+        if (!CaptureFaceColours(label, 1.0, unusedLabels, looks)) return Standard_False;
+        TopoDS_Shape merged;
+        if (!TidyJoinKeepingLooks(*this, solid, looks, merged) || merged.IsNull()
+            || merged.ShapeType() != TopAbs_SOLID) return Standard_False;
+        Bnd_Box box; BRepBndLib::Add(merged, box);
+        const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(merged, TopAbs_FACE, faces);
+        std::vector<Standard_Size> found;
+        for (const TopoDS_Face& face : picked) {
+            // A point inside the picked piece lies on exactly one face of the tidied solid: the
+            // whole side that piece belongs to. None, or two: not sure, so no tidy at all.
+            gp_Pnt point;
+            if (face.IsNull() || !InteriorPointOfFace(face, point)) return Standard_False;
+            Standard_Integer match = 0;
+            for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+                if (!PointOnFace(point, TopoDS::Face(faces(index)), tolerance)) continue;
+                if (match != 0) return Standard_False;
+                match = index;
+            }
+            if (match == 0) return Standard_False;
+            found.push_back(static_cast<Standard_Size>(match - 1));
+        }
+        // Two picked pieces of one side are one opening.
+        std::sort(found.begin(), found.end());
+        found.erase(std::unique(found.begin(), found.end()), found.end());
+        for (const Standard_Size index : found)
+            openings.push_back(TopoDS::Face(faces(static_cast<Standard_Integer>(index) + 1)));
+        openingIndices = std::move(found);
+        tidied = merged;
+        return Standard_True;
+    } catch (...) { tidied.Nullify(); openings.clear(); openingIndices.clear(); return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::ApplyBakedBoolean(
     const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
     const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
@@ -30973,6 +31022,8 @@ struct Side {
     std::vector<std::uint8_t> source, treatment;
     core3d::inspector_primitive::Record inspectorPrimitive;
     core3d::retained_solid::Record savedCut;
+    // Boolean-result Shell: the label of the Join/Cut/Overlap record this side holds (null: none).
+    TDF_Label booleanResult;
     std::shared_ptr<const OcctBoundedCurveCapture> boundedCurve;
     std::string entityIdentifier, definitionIdentifier;
     std::string profileIdentifier;
@@ -31039,13 +31090,21 @@ bool CaptureOrdinaryNamingSide(const OcctDocument& owner,
             return true;
         }
         if (family == OcctDocument::OrdinaryNamingFamily::UnretainedShell
-            || family == OcctDocument::OrdinaryNamingFamily::SavedCutShell) {
+            || family == OcctDocument::OrdinaryNamingFamily::SavedCutShell
+            || family == OcctDocument::OrdinaryNamingFamily::BooleanResultShell) {
             // Only an admitted Shell may use these measured naming sides.
             // Ordinary Shell still requires all retained recipes to be absent.
             // Saved-cut Shell owns one explicit transition: an exactly captured,
             // bakeable standalone Hole before, no retained recipe afterwards.
+            // Boolean-result Shell owns the same kind of transition: one bakeable
+            // Join/Cut/Overlap record (its two frozen originals) before, none afterwards.
             const auto coverage = owner.RetainedRecipeCoverageForLabel(label);
-            if (coverage != OcctRetainedRecipeCoverage::Absent) {
+            if (coverage != OcctRetainedRecipeCoverage::Absent
+                && family == OcctDocument::OrdinaryNamingFamily::BooleanResultShell) {
+                if (!owner.CanBakeBooleanResultForFaceEdit(label)
+                    || !owner.BooleanResultRecordForBake(label, side.booleanResult)
+                    || side.booleanResult.IsNull()) return false;
+            } else if (coverage != OcctRetainedRecipeCoverage::Absent) {
                 if (family != OcctDocument::OrdinaryNamingFamily::SavedCutShell
                     || !owner.CanBakeSavedCutForFaceEdit(label)
                     || !core3d::retained_solid::Read(doc, label, side.savedCut)
@@ -31122,6 +31181,7 @@ bool OrdinaryNamingSideMatches(const OcctDocument& owner,
         && expected.profileLabel == actual.profileLabel
         && expected.inspectorPrimitive.IsEqual(actual.inspectorPrimitive)
         && expected.savedCut.IsEqual(actual.savedCut)
+        && expected.booleanResult == actual.booleanResult
         && bool(expected.boundedCurve) == bool(actual.boundedCurve)
         && (!expected.boundedCurve || expected.boundedCurve->IsEqual(*actual.boundedCurve))
         && expected.entityIdentifier == actual.entityIdentifier
@@ -31252,6 +31312,7 @@ std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNa
             || creationRootCount > 1024 || (creationRootCount == 0) == existingOwner.IsNull()
             || (family != OrdinaryNamingFamily::Profile && family != OrdinaryNamingFamily::UnretainedShell
                 && family != OrdinaryNamingFamily::SavedCutShell
+                && family != OrdinaryNamingFamily::BooleanResultShell
                 && family != OrdinaryNamingFamily::BoundedCurveCreation)
             || (creationRootCount > 0 && family != OrdinaryNamingFamily::Profile
                 && family != OrdinaryNamingFamily::BoundedCurveCreation)
@@ -31269,7 +31330,9 @@ std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNa
             record->roots[0].label = existingOwner;
             if (!CaptureOrdinaryNamingSide(*this, existingOwner, record->family, record->roots[0].before)
                 || (family == OrdinaryNamingFamily::SavedCutShell
-                    && !record->roots[0].before.savedCut.value)) return {};
+                    && !record->roots[0].before.savedCut.value)
+                || (family == OrdinaryNamingFamily::BooleanResultShell
+                    && record->roots[0].before.booleanResult.IsNull())) return {};
         }
         std::size_t bytes = OrdinaryNamingStorage(*record);
         for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
@@ -31338,7 +31401,9 @@ Standard_Boolean OcctDocument::CaptureOrdinaryNamingCandidate(
             }
             if (!CaptureOrdinaryNamingSide(*this, root.label, record->family, root.after)
                 || (record->family == OrdinaryNamingFamily::SavedCutShell
-                    && root.after.savedCut.value)) return Standard_False;
+                    && root.after.savedCut.value)
+                || (record->family == OrdinaryNamingFamily::BooleanResultShell
+                    && !root.after.booleanResult.IsNull())) return Standard_False;
             std::size_t bytes = 0;
             for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
             if (bytes > kOrdinaryNamingBytes) return Standard_False;
