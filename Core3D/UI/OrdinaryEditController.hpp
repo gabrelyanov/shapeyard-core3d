@@ -299,6 +299,10 @@ struct OrdinaryTransformLedger {
     OcctSavedGroupState groupsPrevious, groupsRequested, groupsCandidate;
     bool groupOriginChanges = false;
     bool candidateSealed = false;
+    // M14-1: this command put colours of single faces onto a rebuilt shape (a size change).
+    // The drawing kept in place still holds the old faces' colours and shows none of them,
+    // so reconciliation redraws from the document (the existing rebuildTransform fallback).
+    bool faceLooksCarried = false;
     // Typed, native-only failure evidence. This is set only when a retained
     // operation's checked budget rejects work. Reconciliation still proves
     // prior/candidate state; the flag merely preserves the refusal cause once
