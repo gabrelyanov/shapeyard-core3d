@@ -12,6 +12,9 @@
 #include "GLViewController+Trick.h"
 
 #include <TDF_LabelMap.hxx>
+#include <AIS_Shape.hxx>
+#include <SelectMgr_EntityOwner.hxx>
+#include <Standard_ErrorHandler.hxx>
 
 namespace {
 
@@ -561,6 +564,68 @@ Core3DModelCapability DocumentExportCapabilities(
             && CapabilitiesAllowGizmo(self.selectedModelCapabilities,
                                       PrimitiveGizmoTypeChamfer)
             && shapeInteractor->bevelSelectionAllRound();
+    } catch (...) {
+        return NO;
+    }
+}
+
+- (BOOL)singleSelectedPartIsMesh {
+    // Store-build twin of what debugTopologySelectionState reports as
+    // selectedCount 1, selectedKind Object, presentationRepresentation
+    // TriangleMesh (R10-F4: the column keeps a mesh part's other cells dimmed
+    // with a reason). Read-only; fails closed (NO) off-main or on any doubt.
+    if (![NSThread isMainThread] || GLController == nil) {
+        return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        if (viewer == nullptr) {
+            return NO;
+        }
+        const std::shared_ptr<core3d::ShapeInteractor> shapeInteractor =
+            viewer->getShapeInteractor();
+        const Handle(OcctDocument) document = viewer->getDocument();
+        const Handle(AIS_InteractiveContext)& context =
+            viewer->AisContext();
+        if (shapeInteractor == nullptr || document.IsNull()
+            || document->Document().IsNull() || context.IsNull()
+            || shapeInteractor->getSelectionMode()
+                != core3d::ShapeSelectionMode::WholeShape
+            || !shapeInteractor->selectionModeAuthorityIsExact()) {
+            return NO;
+        }
+        Standard_Size selectedCount = 0;
+        OcctGeometryRepresentation representation =
+            OcctGeometryRepresentation::Invalid;
+        for (context->InitSelected(); context->MoreSelected();
+             context->NextSelected()) {
+            const Handle(SelectMgr_EntityOwner) owner =
+                context->SelectedOwner();
+            const Handle(AIS_Shape) presentation =
+                Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+            if (owner.IsNull() || !owner->HasSelectable()
+                || presentation.IsNull() || presentation->Shape().IsNull()
+                || owner->Selectable() != presentation) {
+                continue;
+            }
+            const TDF_Label label = document->ShapeLabel(presentation);
+            if (label.IsNull()) {
+                continue;
+            }
+            const OcctGeometryRepresentation labelRepresentation =
+                document->GeometryRepresentationForLabel(label);
+            if (labelRepresentation == OcctGeometryRepresentation::Invalid
+                || document->EntityIdentifierForLabel(label).empty()) {
+                continue;
+            }
+            if (++selectedCount == 1) {
+                representation = labelRepresentation;
+            }
+        }
+        return selectedCount == 1
+            && representation == OcctGeometryRepresentation::TriangleMesh;
     } catch (...) {
         return NO;
     }
