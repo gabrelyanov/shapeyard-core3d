@@ -3839,6 +3839,17 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                         rotation.delta = _manipulator->GestureTransformation();
                         request.rotationAroundPivot = rotation;
                         request.transform = rotation.delta * before.transform;
+                    } else if (activeMode == AIS_MM_Scaling) {
+                        // M14-1 (build 12 matrix): a one-axis Scale handle rebuilds the solid,
+                        // as a size typed in By numbers does, but sent no map of old geometry
+                        // onto new. The commit then kept a face's own colour only on faces
+                        // that did not move: the orange cylinder of a joined part turned
+                        // blue, a red top turned grey. Send the map the preview was built
+                        // with. No map (nothing rebuilt): exactly as before.
+                        const auto& maps = _manipulator->axisScaleMaps();
+                        const auto map = maps.find(Handle(AIS_InteractiveObject)(change.first));
+                        if (map != maps.end() && !request.shape.IsEqual(before.shape))
+                            request.faceColourMap = map->second;
                     }
 #ifdef DEBUG
                     if (_debugGestureTraceActive && !_debugGestureTrace.empty()) {

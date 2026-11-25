@@ -930,6 +930,7 @@ void Core3DManipulator::Detach()
     
     Handle(AIS_InteractiveObject) anObject = Object();
 	mySourceShapes.clear();
+	myAxisScaleMaps.clear();
 
     const Handle(AIS_InteractiveContext)& aContext = anObject->GetContext();
     if (!aContext.IsNull())
@@ -1289,6 +1290,7 @@ Standard_Boolean Core3DManipulator::ProcessDragging (const Handle(AIS_Interactiv
 
 void Core3DManipulator::UpdateCachedShapes() {
 	mySourceShapes.clear();
+	myAxisScaleMaps.clear();
 	
 	Handle(Core3DManipulatorObjectSequence) anObjects = Objects();
 	Core3DManipulatorObjectSequence::Iterator anObjIter (*anObjects);
@@ -1414,6 +1416,8 @@ void Core3DManipulator::NonUniformScale (const Standard_Real scaleFactor, const 
                     theCtx->Redisplay(presentation, Standard_False);
                 }
             }
+            // M14-1: the source shapes are shown again, so no size change is pending.
+            myAxisScaleMaps.clear();
             myOldScaleFactor = 1.0;
             myOldIndexScale = myCurrentIndex;
             return;
@@ -1497,6 +1501,15 @@ void Core3DManipulator::NonUniformScale (const Standard_Real scaleFactor, const 
 				Handle(AIS_Shape) newShape = Handle(AIS_Shape)::DownCast(anObjIter.ChangeValue());
 				newShape->SetShape(tran.Shape());
 				theCtx->Redisplay(anObjIter.Value(), Standard_False);
+				// M14-1: the shape now shown is exactly `t` applied to the cached source shape
+				// (location removed, same coordinates). The commit hands this to the shared
+				// resize route so a colour put on one face follows that face, as By numbers
+				// does. Without a cached source `t` is only a step from the last preview: no map.
+				if (useCachedShape && mySourceShapes.find(anObjIter.Value()) != mySourceShapes.end()) {
+					myAxisScaleMaps[anObjIter.Value()] = t;
+				} else {
+					myAxisScaleMaps.erase(anObjIter.Value());
+				}
 //				std::cout << "replaced scaled shape with " << scaleFactor << std::endl;
 			}
 		}
