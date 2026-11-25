@@ -712,9 +712,13 @@ Standard_Boolean RadialArrayOperationController::captureSelectedSource(
         if (!_document->CaptureObjectNameStateForLabel(aLabel, aProfileOwner)
             // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is copied
             // as a plain solid; the source keeps its resizable Hole record.
+            // R13F-1 part 3 (25 Nov): so is an ordinary joined part (a Join
+            // that keeps its two parts), by Duplicate's rule since R2-N02.
             || !pattern_recipe_clone::Capture(aDocument, aLabel, aSweepLoft,
-                retained_solid::HasRecord(aLabel)
-                    && _document->CanBakeSavedCutForFaceEdit(aLabel))) {
+                (retained_solid::HasRecord(aLabel)
+                        && _document->CanBakeSavedCutForFaceEdit(aLabel))
+                    || (composite_recipe::HasRecord(aLabel)
+                        && _document->CanBakeBooleanResultForFaceEdit(aLabel)))) {
             return Standard_False;
         }
         // Replayed edge treatment replaces the copied topology. Do not guess
