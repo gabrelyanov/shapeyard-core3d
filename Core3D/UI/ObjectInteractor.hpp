@@ -672,6 +672,11 @@ namespace core3d {
             std::string enclosureIdentifier;
             pattern_recipe_clone::Source sweepLoft;
             pattern_recipe_clone::Prepared preparedSweepLoft;
+            // R13F-1: the source's face looks as the preview read them, and
+            // the same looks on the reflected faces of the copy (both empty
+            // for an unpainted part). Kept last: the snapshot is brace-built.
+            std::vector<LinearArrayFaceFinish> sourceFaceFinishes;
+            std::vector<LinearArrayFaceFinish> resultFaceFinishes;
 		};
 		struct MirrorPendingResult {
 			TDF_Label label;
