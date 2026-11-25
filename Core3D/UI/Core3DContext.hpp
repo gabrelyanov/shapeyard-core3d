@@ -56,6 +56,10 @@ public:
     //! Fable review 17, finding 4: time of the edge-on rule's exact ray on
     //! one part of about faceCount faces (at most 4096); -1 if it failed.
     Standard_EXPORT static double DebugEdgeOnRayMilliseconds(int faceCount) noexcept;
+    //! Faces the exact ray has tested since the last reset (this thread);
+    //! a face tested twice counts twice.
+    Standard_EXPORT static void DebugResetEdgeOnFacesTested() noexcept;
+    Standard_EXPORT static int DebugEdgeOnFacesTested() noexcept;
 #endif
 };
 #endif /* Core3DContext_hpp */

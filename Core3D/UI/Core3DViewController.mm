@@ -15276,12 +15276,20 @@ static BOOL sDebugTapBehindMoveArrows = NO;
     sDebugTapBehindMoveArrows = YES;
 #ifdef DEBUG
     OcctViewer::DebugLastBehindWalk().clear();
+    OcctViewer::DebugLastBehindWalkMilliseconds() = -1;
+    OcctViewer::DebugLastBehindWalkFacesTested() = -1;
+    Core3DContext::DebugResetEdgeOnFacesTested();
 #endif
     NSMutableDictionary<NSString *, id> *answer =
         [[self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES] mutableCopy];
     sDebugTapBehindMoveArrows = NO;
 #ifdef DEBUG
     answer[@"walk"] = [NSString stringWithUTF8String:OcctViewer::DebugLastBehindWalk().c_str()];
+    // Face budget once per tap (CTO 24 Nov 11:12): the exact ray's face tests over
+    // the whole tap (repeats count again) and the time of the walk itself.
+    answer[@"edgeOnFacesTested"] = @(Core3DContext::DebugEdgeOnFacesTested());
+    answer[@"walkMilliseconds"] = @(OcctViewer::DebugLastBehindWalkMilliseconds());
+    answer[@"walkFacesTested"] = @(OcctViewer::DebugLastBehindWalkFacesTested());
 #endif
     return answer;
 }

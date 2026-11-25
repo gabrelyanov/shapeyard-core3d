@@ -152,6 +152,7 @@ void PrepareNativeLessonLighting(const Handle(AIS_InteractiveContext)& context,
 #include <SelectMgr_EntityOwner.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
 #include <vector>
+#include <chrono>
 
 #include <StlAPI_Writer.hxx>
 #include <TDataStd_Name.hxx>
@@ -801,6 +802,10 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
 #else
         auto aNote = [](Standard_Integer, const char*) {};
 #endif
+#ifdef DEBUG
+        const auto aWalkStart = std::chrono::steady_clock::now();
+        const int aFacesBefore = Core3DContext::DebugEdgeOnFacesTested();
+#endif
         const Standard_Integer aCount = std::min<Standard_Integer>(aSelector->NbPicked(), 256);
         for (Standard_Integer aRank = 1; aRank <= aCount; ++aRank) {
             const Handle(SelectMgr_EntityOwner) anOwner = aSelector->Picked(aRank);
@@ -840,6 +845,11 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
             aBehind = anOwner;
             break;
         }
+#ifdef DEBUG
+        DebugLastBehindWalkMilliseconds() = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - aWalkStart).count();
+        DebugLastBehindWalkFacesTested() = Core3DContext::DebugEdgeOnFacesTested() - aFacesBefore;
+#endif
         // The context's detected list indexes the selector's previous hit
         // list: reset it so nothing reads stale ranks after this query.
         myContext->ClearDetected(Standard_False);
