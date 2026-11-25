@@ -1727,8 +1727,34 @@ RadialArrayOperationController::inspectPendingResults() noexcept
             return DocumentState::Unavailable;
         }
         clearCommandOwnership();
+        // A staged centre is written in the same command as the copies, before
+        // the first copy. Read the part's centre before the "no copies yet"
+        // answer (Fable review 23, finding 3): if that command was closed and
+        // kept by anything but this tool's abort, the part holds the chosen
+        // centre and an Undo step with no copy, and that is not "nothing
+        // happened". All copies committed still needs the chosen centre.
+        Standard_Boolean isSourceAxisBefore = Standard_True;
+        Standard_Boolean isSourceAxisAfter = Standard_True;
+        if (_stagedReference.has_value()) {
+            if (!_source.has_value() || aDocument != _source->document) {
+                return DocumentState::PartialOrMismatched;
+            }
+            OcctReferenceAxis aSourceAxis;
+            const OcctReferenceAxisReadState aSourceState =
+                _document->ReadReferenceAxisForLabel(
+                    _source->label, aSourceAxis);
+            isSourceAxisBefore =
+                aSourceState == _source->referenceAxisState
+                && aSourceState != OcctReferenceAxisReadState::Invalid
+                && !ReferenceAxisDiffers(aSourceAxis, _source->referenceAxis);
+            isSourceAxisAfter =
+                aSourceState == _stagedReference->state
+                && aSourceState != OcctReferenceAxisReadState::Invalid
+                && !ReferenceAxisDiffers(aSourceAxis, _stagedReference->axis);
+        }
         if (_pendingResults.empty()) {
-            return DocumentState::None;
+            return isSourceAxisBefore ? DocumentState::None
+                                      : DocumentState::PartialOrMismatched;
         }
         OcctObjectNameState aSourceProfileOwner;
         pattern_recipe_clone::Source aSourceSweepLoft;
@@ -1817,40 +1843,14 @@ RadialArrayOperationController::inspectPendingResults() noexcept
             }
             ++aCommittedCount;
         }
-        if (_stagedReference.has_value()) {
-            // The staged centre is written in the same command as the copies:
-            // all copies committed means it is stored, none means it is not.
-            OcctReferenceAxis aSourceAxis;
-            const OcctReferenceAxisReadState aSourceState =
-                _document->ReadReferenceAxisForLabel(
-                    _source->label, aSourceAxis);
-            const Standard_Boolean isBefore =
-                aSourceState == _source->referenceAxisState
-                && aSourceState != OcctReferenceAxisReadState::Invalid
-                && !ReferenceAxisDiffers(aSourceAxis, _source->referenceAxis);
-            const Standard_Boolean isAfter =
-                aSourceState == _stagedReference->state
-                && aSourceState != OcctReferenceAxisReadState::Invalid
-                && !ReferenceAxisDiffers(aSourceAxis, _stagedReference->axis);
-            if (_pendingResults.empty()) {
-                return isBefore ? DocumentState::None
-                                : DocumentState::PartialOrMismatched;
-            }
-            if (aCommittedCount == _pendingResults.size()) {
-                return isAfter ? DocumentState::AllCommitted
-                               : DocumentState::PartialOrMismatched;
-            }
-            if (aMissingCount == _pendingResults.size()) {
-                return isBefore ? DocumentState::None
-                                : DocumentState::PartialOrMismatched;
-            }
-            return DocumentState::PartialOrMismatched;
-        }
+        // Without a staged centre both centre answers stay true.
         if (aCommittedCount == _pendingResults.size()) {
-            return DocumentState::AllCommitted;
+            return isSourceAxisAfter ? DocumentState::AllCommitted
+                                     : DocumentState::PartialOrMismatched;
         }
         if (aMissingCount == _pendingResults.size()) {
-            return DocumentState::None;
+            return isSourceAxisBefore ? DocumentState::None
+                                      : DocumentState::PartialOrMismatched;
         }
         return DocumentState::PartialOrMismatched;
     } catch (...) {
@@ -2587,6 +2587,21 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
             _debugProfileCopyFault = 0;
             isWritten = Standard_False;
         }
+        // Fault 17 (Fable review 23, finding 3): as fault 16, the abort fails too, and then the
+        // still-open command is closed and KEPT by something other than this tool's abort
+        // (committed here). The part holds the chosen centre and an Undo step with no copy; the
+        // tool must not read that as "nothing happened" on the next tick.
+        if (_debugProfileCopyFault == 17) {
+            _debugProfileCopyFault = 0;
+            try {
+                (void)aDocument->CommitCommand();
+            } catch (...) {
+            }
+            _state = RadialArrayPreviewState::OutcomeUnknown;
+            ++_generation;
+            notifyStateChanged();
+            return RadialArrayApplyResult::NoChange;
+        }
 #endif
         if (!isWritten) {
             _state = abortOwnedCommand()
@@ -2962,7 +2977,7 @@ void RadialArrayOperationController::debugSetPostCommitInspectMode(
 void RadialArrayOperationController::debugSetProfileCopyFault(
     const Standard_Integer theMode) noexcept
 {
-    _debugProfileCopyFault = theMode >= 0 && theMode <= 16 ? theMode : 0;
+    _debugProfileCopyFault = theMode >= 0 && theMode <= 17 ? theMode : 0;
 }
 
 void RadialArrayOperationController::debugSetMaximumTopologyNodes(

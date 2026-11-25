@@ -155,6 +155,8 @@ public:
     void debugSetPostCommitInspectMode(Standard_Integer mode) noexcept;
     //! 16 (one tick, staged centre only): the centre read-back at Apply counts as differing,
     //! so Apply must abort its command and give the part its stored centre back.
+    //! 17 (one tick, staged centre only): as 16, the abort fails, and the open command is then
+    //! committed outside the tool's abort; the next tick must report the outcome unknown.
     void debugSetProfileCopyFault(Standard_Integer mode) noexcept;
     void debugSetMaximumTopologyNodes(Standard_Size limit) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
