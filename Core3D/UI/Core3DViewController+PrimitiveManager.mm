@@ -1129,12 +1129,9 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     }
     self.can_apply = status.canApply;
     [self viewDidChangeViewportPresentationState];
-    UIStateChanging changes = UIStateChangingApply;
-    if (result == Core3DRadialArrayReferenceEditResultApplied
-        || result == Core3DRadialArrayReferenceEditResultOutcomeUnknown) {
-        changes |= UIStateChangingHistory;
-    }
-    [self sendNotifyUIState:changes];
+    // The centre is only staged inside the open tool (Fable review 23, finding 6): it writes no
+    // Undo step, so only the tick's readiness changes. The tick announces its own history step.
+    [self sendNotifyUIState:UIStateChangingApply];
     return result;
 }
 
@@ -1161,12 +1158,9 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     }
     self.can_apply = status.canApply;
     [self viewDidChangeViewportPresentationState];
-    UIStateChanging changes = UIStateChangingApply;
-    if (result == Core3DRadialArrayReferenceEditResultApplied
-        || result == Core3DRadialArrayReferenceEditResultOutcomeUnknown) {
-        changes |= UIStateChangingHistory;
-    }
-    [self sendNotifyUIState:changes];
+    // The centre is only staged inside the open tool (Fable review 23, finding 6): it writes no
+    // Undo step, so only the tick's readiness changes. The tick announces its own history step.
+    [self sendNotifyUIState:UIStateChangingApply];
     return result;
 }
 
