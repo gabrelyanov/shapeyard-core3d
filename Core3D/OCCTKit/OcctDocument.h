@@ -1495,6 +1495,15 @@ public:
       const TDF_Label& label,
       const TopLoc_Location& occurrenceLocation,
       gp_Ax1& axis) const;
+  //! The world centre ResolveReferenceAxisInWorld would give after
+  //! SetReferenceAxisForLabel wrote this candidate (an OcctReferenceAxis{}
+  //! is the default a reset leaves): same checks, same stored values, same
+  //! persisted transform and world limits. Writes nothing.
+  Standard_EXPORT Standard_Boolean ResolveCandidateReferenceAxisInWorld(
+      const TDF_Label& label,
+      const OcctReferenceAxis& candidate,
+      const TopLoc_Location& occurrenceLocation,
+      gp_Ax1& axis) const;
   //! Write/reset/copy a complete reference record inside the caller's already
   //! open command. These methods never open, commit, or abort a command.
   Standard_EXPORT Standard_Boolean SetReferenceAxisForLabel(

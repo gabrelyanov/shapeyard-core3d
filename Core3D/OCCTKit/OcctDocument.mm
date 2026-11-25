@@ -7508,17 +7508,15 @@ bool TryReadObjectTransform(
     }
 }
 
-bool TryResolveReferenceAxis(
+bool TryResolveReferenceAxisValue(
     const Handle(TDocStd_Document)& theDocument,
     const Handle(XCAFDoc_ShapeTool)& theShapeTool,
     const TDF_Label& theLabel,
+    const OcctReferenceAxis& aReference,
     const TopLoc_Location& theOccurrenceLocation,
     gp_Ax1& theWorldAxis)
 {
-    OcctReferenceAxis aReference;
-    if (ReadReferenceAxisRecord(theLabel, aReference)
-            == OcctReferenceAxisReadState::Invalid
-        || !IsGeometryDefinitionLabel(
+    if (!IsGeometryDefinitionLabel(
             theDocument, theShapeTool, theLabel)) {
         return false;
     }
@@ -7573,6 +7571,22 @@ bool TryResolveReferenceAxis(
     } catch (...) {
         return false;
     }
+}
+
+bool TryResolveReferenceAxis(
+    const Handle(TDocStd_Document)& theDocument,
+    const Handle(XCAFDoc_ShapeTool)& theShapeTool,
+    const TDF_Label& theLabel,
+    const TopLoc_Location& theOccurrenceLocation,
+    gp_Ax1& theWorldAxis)
+{
+    OcctReferenceAxis aReference;
+    if (ReadReferenceAxisRecord(theLabel, aReference)
+            == OcctReferenceAxisReadState::Invalid) {
+        return false;
+    }
+    return TryResolveReferenceAxisValue(theDocument, theShapeTool, theLabel,
+        aReference, theOccurrenceLocation, theWorldAxis);
 }
 
 Standard_Boolean ValidateReferenceAxisDocument(
@@ -9328,6 +9342,51 @@ Standard_Boolean OcctDocument::ResolveReferenceAxisInWorld(
         }
         return TryResolveReferenceAxis(
             myOcafDoc, aShapeTool, label, occurrenceLocation, axis);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::ResolveCandidateReferenceAxisInWorld(
+    const TDF_Label& label,
+    const OcctReferenceAxis& candidate,
+    const TopLoc_Location& occurrenceLocation,
+    gp_Ax1& axis) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())
+            || !IsReferenceSpace(candidate.pivotSpace)
+            || !IsReferenceSpace(candidate.directionSpace)
+            || !IsFiniteBoundedReferencePoint(candidate.pivot)
+            || !IsFiniteReferenceDirection(candidate.direction)) {
+            return Standard_False;
+        }
+        // The values exactly as WriteReferenceAxisRecord stores them and
+        // ReadReferenceAxisRecord reads them back, so this answer is the one
+        // ResolveReferenceAxisInWorld gives once the candidate is written.
+        OcctReferenceAxis aReference;
+        aReference.pivotSpace = candidate.pivotSpace;
+        aReference.pivot = gp_Pnt(
+            CanonicalReferenceScalar(candidate.pivot.X()),
+            CanonicalReferenceScalar(candidate.pivot.Y()),
+            CanonicalReferenceScalar(candidate.pivot.Z()));
+        aReference.directionSpace = candidate.directionSpace;
+        aReference.direction = gp_Dir(
+            CanonicalReferenceScalar(candidate.direction.X()),
+            CanonicalReferenceScalar(candidate.direction.Y()),
+            CanonicalReferenceScalar(candidate.direction.Z()));
+        if (!IsFiniteReferenceDirection(aReference.direction)) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        return TryResolveReferenceAxisValue(myOcafDoc, aShapeTool, label,
+            aReference, occurrenceLocation, axis)
+            ? Standard_True : Standard_False;
     } catch (...) {
         return Standard_False;
     }

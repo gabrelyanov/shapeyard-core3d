@@ -1945,27 +1945,16 @@ RadialArrayOperationController::editReferenceAxis(
                 return RadialArrayReferenceEditResult::RetryableFailure;
             }
         }
-        // Same resolution as OcctDocument::ResolveReferenceAxisInWorld for
-        // a free definition: Object-bound parts go through the validated
-        // object transform, World-bound parts stay fixed.
-        gp_Pnt aWorldPivot = aWantedAxis.pivot;
-        if (aWantedAxis.pivotSpace == OcctReferenceSpace::Object) {
-            aWorldPivot.Transform(_source->transform);
-        }
-        gp_Vec aWorldDirection(aWantedAxis.direction);
-        if (aWantedAxis.directionSpace == OcctReferenceSpace::Object) {
-            aWorldDirection.Transform(_source->transform);
-        }
-        const Standard_Real aSquaredMagnitude =
-            aWorldDirection.SquareMagnitude();
-        if (!std::isfinite(aWorldPivot.X()) || !std::isfinite(aWorldPivot.Y())
-            || !std::isfinite(aWorldPivot.Z())
-            || !std::isfinite(aSquaredMagnitude)
-            || aSquaredMagnitude
-                <= std::numeric_limits<Standard_Real>::epsilon()) {
+        // The document's own answer for this candidate (Fable review 23,
+        // finding 4): the stored transform, the stored values and the world
+        // limit Apply's read-back uses, so a centre the part could not hold
+        // is refused here, at the choice, and never only at the tick.
+        gp_Ax1 aWorldAxis;
+        if (!_document->ResolveCandidateReferenceAxisInWorld(
+                _source->label, aWantedAxis, TopLoc_Location(), aWorldAxis)) {
             return RadialArrayReferenceEditResult::RetryableFailure;
         }
-        aStaged.worldAxis = gp_Ax1(aWorldPivot, gp_Dir(aWorldDirection));
+        aStaged.worldAxis = aWorldAxis;
     } catch (...) {
         return RadialArrayReferenceEditResult::RetryableFailure;
     }
