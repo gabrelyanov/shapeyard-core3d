@@ -2043,10 +2043,12 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is
                 // copied as a plain solid; the source keeps its record.
                 // R2-N02 (CTO 20 Nov 01:10): so is an ordinary joined part.
+                // R14F-3 (25 Nov): so is a Tube made along a Path.
                 const bool savedCutCopiedPlain = (retained_solid::HasRecord(label)
                         && myDoc->CanBakeSavedCutForFaceEdit(label))
                     || (composite_recipe::HasRecord(label)
-                        && myDoc->CanBakeBooleanResultForFaceEdit(label));
+                        && (myDoc->CanBakeBooleanResultForFaceEdit(label)
+                            || myDoc->CanCopySpatialSweepAsPlainSolid(label)));
 #if DEBUG
                 g_duplicatePlainBits = (retained_solid::HasRecord(label) ? 1 : 0)
                     | (myDoc->CanBakeSavedCutForFaceEdit(label) ? 2 : 0)
@@ -5927,7 +5929,9 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             const bool savedCutCopiedPlain = (retained_solid::HasRecord(source->second)
                     && myDoc->CanBakeSavedCutForFaceEdit(source->second))
                 || (composite_recipe::HasRecord(source->second)
-                    && myDoc->CanBakeBooleanResultForFaceEdit(source->second));
+                    && (myDoc->CanBakeBooleanResultForFaceEdit(source->second)
+                        // R14F-3 (25 Nov): and a Tube made along a Path.
+                        || myDoc->CanCopySpatialSweepAsPlainSolid(source->second)));
             profileRequests.push_back({source->second, 1, !profile.label.IsNull(),
                                        !enclosure.label.IsNull(), !enclosure.label.IsNull(),
                                        true, true, false, false, savedCutCopiedPlain});
@@ -6002,7 +6006,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             const bool savedCutCopiedPlain = (retained_solid::HasRecord(sourceLabel)
                     && myDoc->CanBakeSavedCutForFaceEdit(sourceLabel))
                 || (composite_recipe::HasRecord(sourceLabel)
-                    && myDoc->CanBakeBooleanResultForFaceEdit(sourceLabel));
+                    && (myDoc->CanBakeBooleanResultForFaceEdit(sourceLabel)
+                        || myDoc->CanCopySpatialSweepAsPlainSolid(sourceLabel)));
             if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)
                 || !pattern_recipe_clone::Capture(aSourceDocument, sourceLabel, sweepLoft,
                     savedCutCopiedPlain))
