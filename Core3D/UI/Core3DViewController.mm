@@ -18228,7 +18228,7 @@ namespace core3d::part_boolean::owner { int CommitReadbackFailureCount() noexcep
         const auto work = GLController.viewer->prepareStoredEnclosureRebuild(requested,
             originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)),
-            keepingMiddle == YES);
+            false /* RED-FIRST: repair off */);
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
