@@ -807,6 +807,9 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
         const int aFacesBefore = Core3DContext::DebugEdgeOnFacesTested();
 #endif
         const Standard_Integer aCount = std::min<Standard_Integer>(aSelector->NbPicked(), 256);
+#ifdef DEBUG
+        aWalk += "hits " + std::to_string(aSelector->NbPicked()) + "; ";
+#endif
         for (Standard_Integer aRank = 1; aRank <= aCount; ++aRank) {
             const Handle(SelectMgr_EntityOwner) anOwner = aSelector->Picked(aRank);
             if (anOwner.IsNull() || !anOwner->HasSelectable()) { continue; }
@@ -817,7 +820,7 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
             if (anOwner->IsSelected()) { aNote(aRank, "selected"); continue; }
             const Handle(AIS_InteractiveObject) aPart =
                 Handle(AIS_InteractiveObject)::DownCast(anOwner->Selectable());
-            if (aPart.IsNull() || myContext->IsSelected(aPart)) { continue; }
+            if (aPart.IsNull() || myContext->IsSelected(aPart)) { aNote(aRank, "skip-own-part"); continue; }
             // A part can answer a pick through more than one owner; with one
             // of them selected the others are not, and taking one of those
             // would select the same part a second time (seen as a third
@@ -829,13 +832,13 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
                 aPartIsSelected = !aSelected.IsNull() && aSelected->HasSelectable()
                     && aSelected->Selectable() == anOwner->Selectable();
             }
-            if (aPartIsSelected) { continue; }
+            if (aPartIsSelected) { aNote(aRank, "skip-part-selected"); continue; }
             // Only a part of the document: a normal tap never reaches the
             // helpers that can lie behind the nearest hit, this walk can.
             if (myDoc.IsNull() || myDoc->ShapeLabel(aPart).IsNull()
-                || !myDoc->IsPresentationEditable(aPart)) { continue; }
+                || !myDoc->IsPresentationEditable(aPart)) { aNote(aRank, "skip-not-document-part"); continue; }
             if (!myContext->GlobalFilter().IsNull()
-                && !myContext->GlobalFilter()->IsOk(anOwner)) { continue; }
+                && !myContext->GlobalFilter()->IsOk(anOwner)) { aNote(aRank, "skip-filtered"); continue; }
             // A face seen exactly edge-on gets a false depth near 0 in OCCT's
             // order (a covered cutter's side beside the tap): the same rule as
             // a plain tap decides whether the ray really reaches it (Fable
