@@ -4987,7 +4987,11 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     const Core3DRadialArrayReferenceEditResult result =
         PublicRadialReferenceEditResult(nativeResult);
     if (result != Core3DRadialArrayReferenceEditResultNoChange) {
-        [self checkSelections];
+        // The centre is only staged in the open tool (Fable review 23, finding 6): selection and
+        // history are unchanged. Keep checkSelections' fence and boundary refresh, but skip its
+        // delegate pass, which announces every UI state (History included); the editor announces Apply.
+        _committedBoundariesDirty = YES;
+        _viewer->observeNativePlanningInteraction(false);
         [self requestRender];
     }
     return result;
@@ -5008,7 +5012,11 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     const Core3DRadialArrayReferenceEditResult result =
         PublicRadialReferenceEditResult(nativeResult);
     if (result != Core3DRadialArrayReferenceEditResultNoChange) {
-        [self checkSelections];
+        // The centre is only staged in the open tool (Fable review 23, finding 6): selection and
+        // history are unchanged. Keep checkSelections' fence and boundary refresh, but skip its
+        // delegate pass, which announces every UI state (History included); the editor announces Apply.
+        _committedBoundariesDirty = YES;
+        _viewer->observeNativePlanningInteraction(false);
         [self requestRender];
     }
     return result;
