@@ -1218,11 +1218,22 @@ private:
         // A standalone saved Hole that Apply bakes inside its own command
         // (PrepareBooleanResultForFaceEdit); Undo restores the hole record.
         Standard_Boolean bakesSavedCut = Standard_False;
+        // An ordinary saved Join/Cut/Overlap (its two frozen originals, nothing
+        // else; CanBakeBooleanResultForFaceEdit) that Apply bakes the same way,
+        // as Bevel and Push-pull do; Undo restores the record.
+        Standard_Boolean bakesBooleanResult = Standard_False;
+        // The faces the person picked, as faces of the part as it is shown.
+        // The same as openingFaces except on such a joined part, where Shell
+        // hollows the tidied solid (flush sides as one face each).
+        std::vector<TopoDS_Face> pickedFaces;
     };
 
+    //! tidyJoined: begin and toggle only. Admission (canBegin) runs on every
+    //! selection refresh and must not pay for the tidy.
     Standard_Boolean tryPrepareSource(
         const ShellSourceSelection& selection,
-        std::unique_ptr<Source>& source) const noexcept;
+        std::unique_ptr<Source>& source,
+        Standard_Boolean tidyJoined = Standard_False) const noexcept;
 
     enum class DocumentState : std::uint8_t {
         Original = 0,
