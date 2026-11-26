@@ -268,6 +268,9 @@ struct Result final {
     int measuredHistoryDelta = 0;
     bool commandClosed = true;
     bool blocksOtherWork = false;
+    // R13P-4: the whole document was drawn again to settle the fence; the
+    // caller refreshes its selection and render state.
+    bool settledByRedraw = false;
 };
 
 inline bool SameCapture(const Capture& first, const Capture& second) noexcept {
@@ -360,6 +363,25 @@ inline bool Prepare(OcctDocument& document, const TDF_Label& label,
     } catch (...) { prepared = {}; return false; }
 }
 
+// R13P-4 (a): the shared fence may not outlive the Apply that armed it. After
+// an armed exit the whole document is drawn again from OCAF and proven by an
+// ordinary snapshot; only then is the fence released. True when it no longer
+// blocks other work. A document that is itself unsettled (open command,
+// unfinished history companion) refuses inside and stays fenced.
+inline bool SettleArmedFence(Prepared& prepared, bool& settledByRedraw) noexcept {
+    try {
+#if DEBUG
+        // The injected checkpoints keep their armed fence: their checks prove
+        // the exact Reconcile route on it.
+        if (prepared.fault != FaultPoint::None) return false;
+#endif
+        if (!prepared.context
+            || !prepared.context->settleRecoveryByDocumentRedraw()) return false;
+        settledByRedraw = true;
+        return true;
+    } catch (...) { return false; }
+}
+
 class SourceStage final : public dependent_replay::SourceMutation {
 public:
     explicit SourceStage(Prepared& prepared) noexcept : prepared_(prepared) {}
@@ -419,7 +441,7 @@ inline Result Apply(OcctDocument& document, Prepared& prepared,
             prepared.context->retainUnprovenEdit(prepared.publication);
             result.outcome = Outcome::OutcomeUnknown;
             result.commandClosed = false;
-            result.blocksOtherWork = true;
+            result.blocksOtherWork = !SettleArmedFence(prepared, result.settledByRedraw);
             return result;
         }
         Capture after;
@@ -431,7 +453,7 @@ inline Result Apply(OcctDocument& document, Prepared& prepared,
         if (!exact) {
             prepared.context->retainUnprovenEdit(prepared.publication);
             result.outcome = Outcome::RecoveryRequired;
-            result.blocksOtherWork = true;
+            result.blocksOtherWork = !SettleArmedFence(prepared, result.settledByRedraw);
             return result;
         }
         result.measuredHistoryDelta = native->GetAvailableUndos() - undoBefore;
@@ -444,9 +466,15 @@ inline Result Apply(OcctDocument& document, Prepared& prepared,
 #endif
         if (!published) {
             prepared.context->retainUnprovenEdit(prepared.publication);
-            result.outcome = Outcome::OutcomeUnknown;
-            result.blocksOtherWork = true;
-            return result;
+            if (!SettleArmedFence(prepared, result.settledByRedraw)) {
+                result.outcome = Outcome::OutcomeUnknown;
+                result.blocksOtherWork = true;
+                return result;
+            }
+            // R13P-4 (b): the commit was read back exactly above (owner bytes,
+            // dependents, history) and the whole document is now drawn from
+            // it and proven by a snapshot. That is a published commit: only
+            // the part-by-part redraw was refused, not the edit.
         }
         result.outcome = result.measuredHistoryDelta == 1
             ? Outcome::Committed : Outcome::RecoveryRequired;
@@ -456,12 +484,14 @@ inline Result Apply(OcctDocument& document, Prepared& prepared,
         prepared.context->retainUnprovenEdit(prepared.publication);
         result.outcome = Outcome::RecoveryRequired;
         result.commandClosed = false;
-        result.blocksOtherWork = true;
+        result.blocksOtherWork = !SettleArmedFence(prepared, result.settledByRedraw);
         return result;
     }
 }
 
-inline Outcome Reconcile(OcctDocument& document, Prepared& prepared) noexcept {
+inline Outcome Reconcile(OcctDocument& document, Prepared& prepared,
+                         bool* settledByRedraw = nullptr) noexcept {
+    if (settledByRedraw) *settledByRedraw = false;
     try {
         Capture actual;
         if (!document.CaptureVariableRadiusFilletOwner(
@@ -475,9 +505,15 @@ inline Outcome Reconcile(OcctDocument& document, Prepared& prepared) noexcept {
             ? document.FinalizeVariableRadiusFilletHistory()
             : observed == Outcome::Refused
                 && document.SettleVariableRadiusFilletHistoryOnPrior();
-        if (observed == Outcome::RecoveryRequired || !historySettled
-            || !prepared.context->reconcileRecovery(true))
+        if (observed == Outcome::RecoveryRequired || !historySettled)
             return Outcome::RecoveryRequired;
+        if (!prepared.context->reconcileRecovery(true)) {
+            // R13P-4: exact part-by-part recovery was refused. The document
+            // state is proven just above, so draw the whole of it again.
+            bool redrawn = false;
+            if (!SettleArmedFence(prepared, redrawn)) return Outcome::RecoveryRequired;
+            if (settledByRedraw) *settledByRedraw = redrawn;
+        }
         return observed;
     } catch (...) { return Outcome::RecoveryRequired; }
 }

@@ -132,6 +132,12 @@ public:
     std::shared_ptr<CommandLease> borrowCommandLease(
         OrdinaryEditCommandStamp&) noexcept;
     bool reconcileRecovery(bool exactStateKnown) noexcept;
+    //! R13P-4: settles this issuer's armed fence by drawing the whole document
+    //! again from OCAF when exact part-by-part recovery is not available or
+    //! was refused. True only when the document was drawn and an ordinary
+    //! snapshot could be captured; otherwise nothing changes and the fence
+    //! stays armed. Never runs an OCAF command or a geometry edit.
+    bool settleRecoveryByDocumentRedraw() noexcept;
     //! Post-commit publication of a known committed native result, after
     //! native readback and for the same live document/data and this issuing
     //! context. Reconciles the owning viewer's real AIS presentations through
