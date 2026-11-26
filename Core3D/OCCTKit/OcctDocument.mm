@@ -13487,6 +13487,30 @@ Standard_Boolean OcctDocument::JoinFaceLooks(const TDF_Label& target,
             look = XCAFDoc_VisMaterialPBR();
             look.BaseColor = Quantity_ColorRGBA(shape->Attributes()->ShadingAspect()->Color());
             look.Metallic = 0.0f; look.Roughness = 0.5f; look.IsDefined = Standard_True;
+            // R15F-2 (round 15, 25 Nov): a Material preset is kept on the part as a material
+            // NUMBER (child 11), not as PBR numbers, so the line above turned a Chrome part into
+            // its colour with Metallic 0 / Roughness 0.5: grey plastic on screen and in OBJ, USDZ
+            // and FBX. A metal preset keeps the two numbers the scene and the exports already read
+            // for the unjoined part (OcctSceneSnapshotBuilder ApplyPreset, BridgeMetalPresetMaterials;
+            // the same "metal" test as the latter). Colour, opacity and glow stay as before; every
+            // other part, the default plastic included, gets exactly the look it got before.
+            try {
+                Graphic3d_NameOfMaterial preset = Graphic3d_NameOfMaterial_DEFAULT;
+                if (TryMaterialNameForLabel(label, preset)
+                    && preset >= Graphic3d_NameOfMaterial_Brass
+                    && preset <= Graphic3d_NameOfMaterial_Transparent) {
+                    const Graphic3d_MaterialAspect aspect(preset);
+                    const Standard_ShortReal metallic = aspect.PBRMaterial().Metallic();
+                    const Standard_ShortReal roughness = aspect.PBRMaterial().NormalizedRoughness();
+                    if (aspect.MaterialType(Graphic3d_MATERIAL_PHYSIC)
+                        && metallic > 0.5f && metallic <= 1.0f
+                        && roughness >= 0.0f && roughness <= 1.0f) {
+                        look.Metallic = metallic; look.Roughness = roughness;
+                    }
+                }
+            } catch (...) {
+                look.Metallic = 0.0f; look.Roughness = 0.5f;
+            }
             return true;
         };
         const auto same = [](const XCAFDoc_VisMaterialPBR& a, const XCAFDoc_VisMaterialPBR& b) {
