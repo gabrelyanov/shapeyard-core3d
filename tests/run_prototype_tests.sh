@@ -100,7 +100,7 @@ if [[ "${3:-}" == "BevelAfterShellTests" ]]; then
         -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
         -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel -o "$output_dir/BevelAfterShellTests"
     failed=0
-    for number in 1 2 3 4 5 6; do
+    for number in 1 2 3 4 5 6 7 8 9 10 11; do
         "$output_dir/BevelAfterShellTests" "$number" || { echo "case $number: exit $?"; failed=1; }
     done
     exit "$failed"
