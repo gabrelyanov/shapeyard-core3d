@@ -7335,6 +7335,10 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
                 shape->Shape(), rootCustomAspects);
         Standard_Integer customMaterialOverrideCount = 0;
         Standard_Integer customColorOverrideCount = 0;
+        // R16F-2: a face look is DRAWN only while its key is a sub-shape of the shape the
+        // presentation holds now. An in-place SetShape (Scale repair) keeps the old faces'
+        // looks in the map: they count above but are drawn nowhere.
+        Standard_Integer customColorDrawnCount = 0;
         Standard_Integer customTextureMapOnCount = 0;
         Standard_Integer customDataMapShaderCount = 0;
         Standard_Integer customNonDefaultAlphaCount = 0;
@@ -7342,6 +7346,10 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
         // Live primitives and reloaded XCAF presentations both support face
         // drawers. Inspect the shared base instead of hiding live overrides.
         const auto coloredShape = Handle(AIS_ColoredShape)::DownCast(shape);
+        TopTools_IndexedMapOfShape drawnSubShapes;
+        if (!coloredShape.IsNull() && !coloredShape->Shape().IsNull()) {
+            TopExp::MapShapes(coloredShape->Shape(), drawnSubShapes);
+        }
         if (!coloredShape.IsNull()) {
             for (AIS_DataMapOfShapeDrawer::Iterator anOverride(
                      coloredShape->CustomAspectsMap());
@@ -7353,6 +7361,9 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
                 }
                 if (!drawer.IsNull() && drawer->HasOwnColor()) {
                     ++customColorOverrideCount;
+                    if (drawnSubShapes.Contains(anOverride.Key())) {
+                        ++customColorDrawnCount;
+                    }
                 }
                 if (!drawer.IsNull() && drawer->HasOwnShadingAspect()
                     && !drawer->ShadingAspect().IsNull()
@@ -7508,6 +7519,8 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
                 customMaterialOverrideCount),
             @"customColorOverrideCount": @(
                 customColorOverrideCount),
+            @"customColorDrawnCount": @(customColorDrawnCount),
+            @"isDocumentPresentation": @(!cafShape.IsNull()),
             @"customTextureMapOnCount": @(
                 customTextureMapOnCount),
             @"hasAppDataMapShader": @(hasAppDataMapShader),
