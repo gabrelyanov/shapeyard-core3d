@@ -3344,22 +3344,40 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
         // redraw (seen after a one-axis Scale handle). When this command carried face colours
         // onto a rebuilt shape, take the redraw below after the ordinary repair has retired
         // the gesture, as Bevel, Hole and Undo redraw the document.
-        if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)
-            || (candidate && ledger.faceLooksCarried)) {
+        const bool repairedInPlace = _host.repairTransform(ledger, candidate)
+            && presentationMatches(ledger, candidate);
+        // M14-1 part 1B2: when the in-place repair is already good and the redraw is taken only
+        // to show the carried face colours, a redraw that fails must not leave this committed
+        // edit unresolved (no Undo, no Add, saving refused). The redraw puts the kept drawings
+        // back when it fails; the in-place repair is then done once more on them and the edit
+        // is resolved as before part 1B: the file is right, the colours show at the next
+        // redraw. Every other use of the redraw (the in-place repair failed) is unchanged.
+        const bool redrawOnlyForFaceLooks = repairedInPlace && candidate && ledger.faceLooksCarried;
+        if (!repairedInPlace || redrawOnlyForFaceLooks) {
             std::vector<Handle(AIS_Shape)> replacements;
-            if (!_host.rebuildTransform(ledger, candidate, replacements)
-                || replacements.size() != ledger.records.size()) { return OrdinaryEditResult::OutcomeUnknown; }
+            bool redrawn = _host.rebuildTransform(ledger, candidate, replacements)
+                && replacements.size() == ledger.records.size();
             auto repaired = ledger;
             std::unordered_set<const AIS_Shape*> unique;
-            for (std::size_t index = 0; index < replacements.size(); ++index) {
+            for (std::size_t index = 0; redrawn && index < replacements.size(); ++index) {
                 if (replacements[index].IsNull() || !unique.insert(replacements[index].get()).second) {
+                    redrawn = false;
+                } else {
+                    repaired.records[index].requested.presentation = replacements[index];
+                }
+            }
+            redrawn = redrawn && presentationMatches(repaired, candidate);
+            if (redrawn) {
+                for (std::size_t index = 0; index < replacements.size(); ++index) {
+                    ledger.records[index].requested.presentation = replacements[index];
+                }
+            } else {
+                if (!redrawOnlyForFaceLooks) { return OrdinaryEditResult::OutcomeUnknown; }
+                // Do not ask for this redraw again on a later retry of the same edit.
+                ledger.faceLooksCarried = false;
+                if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)) {
                     return OrdinaryEditResult::OutcomeUnknown;
                 }
-                repaired.records[index].requested.presentation = replacements[index];
-            }
-            if (!presentationMatches(repaired, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
-            for (std::size_t index = 0; index < replacements.size(); ++index) {
-                ledger.records[index].requested.presentation = replacements[index];
             }
         }
 
