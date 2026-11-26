@@ -28007,8 +28007,16 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
             CORE3D_R16F1_PICK("select-issued-edge", "edge-closed");
             return NO;
         }
+        // R16F-1 (round 16): the part is already rounded, so the edge at the
+        // owner's issued index is an edge of the ROUNDED shape. After a Ramp
+        // with Start = End that edge is often a circular arc of the rounding,
+        // whose carrier curve is periodic though the edge itself is open; the
+        // old IsPeriodic() refusal ended every such read-back (and the Objects
+        // edit route) as "could not confirm". The capture that follows reads
+        // the retained owner's own anchor, not this edge's geometry, so only
+        // a closed, degenerate or empty edge is refused here.
         BRepAdaptor_Curve curve(canonicalEdge);
-        if (curve.IsClosed() || curve.IsPeriodic()
+        if (curve.IsClosed()
             || !std::isfinite(curve.FirstParameter())
             || !std::isfinite(curve.LastParameter())
             || curve.LastParameter() - curve.FirstParameter()
