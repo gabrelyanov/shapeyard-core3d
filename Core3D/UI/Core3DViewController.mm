@@ -22395,6 +22395,42 @@ static bool Core3DPublishCommittedSpatialSweep(
     return released ? values : nil;
 }
 
+#if DEBUG
+// R16F-1 (round 16, fix release): after a stored Ramp the app reads it back
+// through the two calls below (owner values, then the edge re-pick). Each of
+// their silent refusals names its guard on standard error, tag first like the
+// R179 traces, with the edit-readiness predicates this file can read, so the
+// native check's capture says which one refused. Debug only; no check, order
+// or result changes, and Release has none of it.
+static void Core3DR16F1PickRefused(const char *call, const char *guard,
+                                   const std::shared_ptr<core3d::Core3DViewer> &viewer) noexcept {
+    int canBegin = -1, unresolved = -1, rawR2 = -1, openCommand = -1, booleanBlocks = -1;
+    try {
+        if (viewer) {
+            canBegin = viewer->canBeginCommittedEdit() ? 1 : 0;
+            unresolved = viewer->hasUnresolvedOrdinaryEdit() ? 1 : 0;
+            rawR2 = viewer->hasActiveRawR2BevelPreview() ? 1 : 0;
+            const Handle(OcctDocument) document = viewer->getDocument();
+            if (!document.IsNull()) {
+                booleanBlocks = document->NativeBooleanOwnerBlocksOtherWork() ? 1 : 0;
+                if (!document->Document().IsNull())
+                    openCommand = document->Document()->HasOpenCommand() ? 1 : 0;
+            }
+        }
+    } catch (...) {
+    }
+    std::fprintf(stderr,
+        "R16F1_PICK refused call=%s guard=%s canBegin=%d unresolved=%d rawR2=%d"
+        " openCommand=%d booleanBlocks=%d\n",
+        call, guard, canBegin, unresolved, rawR2, openCommand, booleanBlocks);
+}
+#define CORE3D_R16F1_PICK(call, guard) \
+    Core3DR16F1PickRefused(call, guard, GLController == nil \
+        ? std::shared_ptr<core3d::Core3DViewer>() : GLController.viewer)
+#else
+#define CORE3D_R16F1_PICK(call, guard) ((void)0)
+#endif
+
 - (NSArray<Core3DVariableFilletOwnerValues *> *)
     variableFilletOwnerValuesForEntityIdentifier:(NSString *)entityIdentifier {
     if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
@@ -22402,14 +22438,23 @@ static bool Core3DPublishCommittedSpatialSweep(
         || entityIdentifier.length == 0 || entityIdentifier.length > 128
         || !entityIdentifier.UTF8String || GLController == nil
         || GLController.viewer == nullptr
-        || !GLController.viewer->canBeginCommittedEdit()) return @[];
+        || !GLController.viewer->canBeginCommittedEdit()) {
+        CORE3D_R16F1_PICK("owners", "entry");
+        return @[];
+    }
     try {
         const Handle(OcctDocument) document = GLController.viewer->getDocument();
         if (document.IsNull() || document->Document().IsNull()
-            || document->Document()->HasOpenCommand()) return @[];
+            || document->Document()->HasOpenCommand()) {
+            CORE3D_R16F1_PICK("owners", "document");
+            return @[];
+        }
         const auto shapes =
             XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
-        if (shapes.IsNull()) return @[];
+        if (shapes.IsNull()) {
+            CORE3D_R16F1_PICK("owners", "shape-tool");
+            return @[];
+        }
         TDF_LabelSequence roots;
         shapes->GetFreeShapes(roots);
         TDF_Label carrier;
@@ -22417,17 +22462,24 @@ static bool Core3DPublishCommittedSpatialSweep(
             [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
         for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
             if (document->EntityIdentifierForLabel(roots.Value(index)) == entity) {
-                if (!carrier.IsNull()) return @[];
+                if (!carrier.IsNull()) {
+                    CORE3D_R16F1_PICK("owners", "carrier-twice");
+                    return @[];
+                }
                 carrier = roots.Value(index);
             }
         }
         double metersPerUnit = 0;
         if (carrier.IsNull()
             || !XCAFDoc_DocumentTool::GetLengthUnit(
-                document->Document(), metersPerUnit)) return @[];
+                document->Document(), metersPerUnit)) {
+            CORE3D_R16F1_PICK("owners", carrier.IsNull() ? "carrier-missing" : "length-unit");
+            return @[];
+        }
         return Core3DVariableFilletOwnerValuesForDocument(
             document, carrier, entityIdentifier, metersPerUnit);
     } catch (...) {
+        CORE3D_R16F1_PICK("owners", "exception");
         return @[];
     }
 }
@@ -27777,17 +27829,26 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
         || ![featureIdentifier isKindOfClass:NSData.class]
         || featureIdentifier.length != 16 || GLController == nil
         || GLController.viewer == nullptr
-        || !GLController.viewer->canBeginCommittedEdit()) return NO;
+        || !GLController.viewer->canBeginCommittedEdit()) {
+        CORE3D_R16F1_PICK("select-issued-edge", "entry");
+        return NO;
+    }
     try {
         const auto viewer = GLController.viewer;
         const Handle(OcctDocument) document = viewer->getDocument();
         const Handle(TDocStd_Document) native =
             document.IsNull() ? Handle(TDocStd_Document)() : document->Document();
         if (document.IsNull() || native.IsNull() || native->HasOpenCommand()
-            || viewer->AisContext().IsNull()) return NO;
+            || viewer->AisContext().IsNull()) {
+            CORE3D_R16F1_PICK("select-issued-edge", "document");
+            return NO;
+        }
 
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(native->Main());
-        if (shapes.IsNull()) return NO;
+        if (shapes.IsNull()) {
+            CORE3D_R16F1_PICK("select-issued-edge", "shape-tool");
+            return NO;
+        }
         TDF_LabelSequence roots;
         shapes->GetFreeShapes(roots);
         TDF_Label carrier;
@@ -27795,25 +27856,37 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
             [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
         for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
             if (document->EntityIdentifierForLabel(roots.Value(index)) == entity) {
-                if (!carrier.IsNull()) return NO;
+                if (!carrier.IsNull()) {
+                    CORE3D_R16F1_PICK("select-issued-edge", "carrier-twice");
+                    return NO;
+                }
                 carrier = roots.Value(index);
             }
         }
         double metersPerUnit = 0;
         if (carrier.IsNull()
-            || !XCAFDoc_DocumentTool::GetLengthUnit(native, metersPerUnit))
+            || !XCAFDoc_DocumentTool::GetLengthUnit(native, metersPerUnit)) {
+            CORE3D_R16F1_PICK("select-issued-edge",
+                carrier.IsNull() ? "carrier-missing" : "length-unit");
             return NO;
+        }
         NSArray<Core3DVariableFilletOwnerValues *> *values =
             Core3DVariableFilletOwnerValuesForDocument(
                 document, carrier, entityIdentifier, metersPerUnit);
         Core3DVariableFilletOwnerValues *matched = nil;
         for (Core3DVariableFilletOwnerValues *value in values) {
             if ([value.featureIdentifier isEqualToData:featureIdentifier]) {
-                if (matched) return NO;
+                if (matched) {
+                    CORE3D_R16F1_PICK("select-issued-edge", "feature-twice");
+                    return NO;
+                }
                 matched = value;
             }
         }
-        if (!matched) return NO;
+        if (!matched) {
+            CORE3D_R16F1_PICK("select-issued-edge", "feature-missing");
+            return NO;
+        }
 
         Handle(AIS_Shape) presentation;
         AIS_ListOfInteractive displayed;
@@ -27831,37 +27904,61 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
                 || !document->IsPresentationEditable(candidate)
                 || (representation != OcctGeometryRepresentation::BRep
                     && representation
-                        != OcctGeometryRepresentation::LegacyUnknown)) return NO;
+                        != OcctGeometryRepresentation::LegacyUnknown)) {
+                CORE3D_R16F1_PICK("select-issued-edge", !presentation.IsNull()
+                    ? "presentation-twice" : candidate.IsNull() || candidate->Shape().IsNull()
+                    ? "presentation-shape" : !document->IsPresentationEditable(candidate)
+                    ? "presentation-not-editable" : "presentation-representation");
+                return NO;
+            }
             presentation = candidate;
         }
-        if (presentation.IsNull()) return NO;
+        if (presentation.IsNull()) {
+            CORE3D_R16F1_PICK("select-issued-edge", "presentation-missing");
+            return NO;
+        }
 
         TopTools_IndexedMapOfShape edges;
         TopExp::MapShapes(presentation->Shape(), TopAbs_EDGE, edges);
         const uint32_t topologyIndex = matched.issuedEdgeTopologyIndex;
-        if (topologyIndex >= static_cast<uint32_t>(edges.Extent())) return NO;
+        if (topologyIndex >= static_cast<uint32_t>(edges.Extent())) {
+            CORE3D_R16F1_PICK("select-issued-edge", "topology-index");
+            return NO;
+        }
         const TopoDS_Edge canonicalEdge =
             TopoDS::Edge(edges.FindKey(Standard_Integer(topologyIndex) + 1));
         if (canonicalEdge.IsNull() || canonicalEdge.Closed()
-            || BRep_Tool::Degenerated(canonicalEdge)) return NO;
+            || BRep_Tool::Degenerated(canonicalEdge)) {
+            CORE3D_R16F1_PICK("select-issued-edge", "edge-closed");
+            return NO;
+        }
         BRepAdaptor_Curve curve(canonicalEdge);
         if (curve.IsClosed() || curve.IsPeriodic()
             || !std::isfinite(curve.FirstParameter())
             || !std::isfinite(curve.LastParameter())
             || curve.LastParameter() - curve.FirstParameter()
-                <= Precision::PConfusion()) return NO;
+                <= Precision::PConfusion()) {
+            CORE3D_R16F1_PICK("select-issued-edge", "edge-curve");
+            return NO;
+        }
 
         const Handle(AIS_InteractiveContext) selection = viewer->AisContext();
         std::vector<Handle(SelectMgr_EntityOwner)> previousOwners;
         for (selection->InitSelected(); selection->MoreSelected();
              selection->NextSelected()) {
             const Handle(SelectMgr_EntityOwner) owner = selection->SelectedOwner();
-            if (owner.IsNull()) return NO;
+            if (owner.IsNull()) {
+                CORE3D_R16F1_PICK("select-issued-edge", "previous-owner");
+                return NO;
+            }
             previousOwners.push_back(owner);
         }
         const PrimitiveSelectionType previousMode = _currentSelectionType;
         if ([self trySetSelectionType:PrimitiveSelectionTypeEdge]
-                != Core3DSelectionTypeChangeResultSucceeded) return NO;
+                != Core3DSelectionTypeChangeResultSucceeded) {
+            CORE3D_R16F1_PICK("select-issued-edge", "edge-mode");
+            return NO;
+        }
 
         const auto restorePreviousSelection = [&]() noexcept {
             try {
@@ -27882,6 +27979,7 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
         if (!interactor
             || interactor->getSelectionMode() != core3d::ShapeSelectionMode::Edge
             || !interactor->selectionModeAuthorityIsExact()) {
+            CORE3D_R16F1_PICK("select-issued-edge", "edge-mode-authority");
             restorePreviousSelection();
             return NO;
         }
@@ -27893,6 +27991,7 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
                 canonicalEdge, presentation, 0, Standard_True);
         selection->AddOrRemoveSelected(owner, Standard_False);
         if (!owner->IsSelected()) {
+            CORE3D_R16F1_PICK("select-issued-edge", "edge-not-selected");
             restorePreviousSelection();
             return NO;
         }
@@ -27902,11 +28001,13 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
             ++selectedCount;
             if (selection->SelectedOwner() != owner
                 || selection->SelectedInteractive() != presentation) {
+                CORE3D_R16F1_PICK("select-issued-edge", "selection-other");
                 restorePreviousSelection();
                 return NO;
             }
         }
         if (selectedCount != 1) {
+            CORE3D_R16F1_PICK("select-issued-edge", "selection-count");
             restorePreviousSelection();
             return NO;
         }
@@ -27914,6 +28015,7 @@ static std::vector<Handle(TopoDS_TShape)> Core3DDebugDocumentFaceShapes(const Ha
         [GLController requestRender];
         return YES;
     } catch (...) {
+        CORE3D_R16F1_PICK("select-issued-edge", "exception");
         return NO;
     }
 }
