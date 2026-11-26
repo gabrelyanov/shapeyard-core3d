@@ -101,7 +101,11 @@ constexpr int kMaximumChainEdges = 1024;
 //! round on the outer rim of a cup whose inner rim is already round cannot run
 //! on over the round that falls away beside it, the dead end of M14-0. false =
 //! f842bf14: such a border is never measured.
-constexpr bool kRoundBeyondASmoothBorderIsAFarBorder = true;
+//! Off for build 13 (CTO 26 Nov 04:15 rule, Opus read finding 4): on iPad the
+//! store engine builds a plate's bottom round 4.96 under a top round 3, the
+//! lamp base's Bevel 3 above its push-pull step and a whole-part Bevel of a
+//! rounded body with eight holes, and this rule refused all three.
+constexpr bool kRoundBeyondASmoothBorderIsAFarBorder = false;
 
 namespace detail {
 
