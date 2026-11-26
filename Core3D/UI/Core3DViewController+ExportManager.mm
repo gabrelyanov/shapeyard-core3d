@@ -115,8 +115,20 @@ bool SameCommittedPublication(Core3DSceneSnapshot *expected,
 NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snapshot) {
     constexpr NSUInteger maximumItems = 50'000;
     constexpr NSUInteger maximumIdentifierBytes = 128;
-    if (snapshot == nil
-        || snapshot.selectionMode != Core3DSceneElementKindObject
+    // "Only selected objects" (CTO 18 Nov 09:23): Object mode takes the selected whole
+    // objects, exactly as before. Face, Edge or Vertex mode takes every part that owns a
+    // selected element, whole (several elements of one part name it once). A valid scene
+    // marks exactly those owners selected in every mode (IsValidSceneSnapshotImpl), so
+    // the owner must still be a visible, selected shaded model item. The app's
+    // GLB/USDZ/FBX writers keep the same rule (ModelEditorExportSelection).
+    if (snapshot == nil) {
+        return nil;
+    }
+    const Core3DSceneElementKind mode = snapshot.selectionMode;
+    const BOOL ownerMode = mode == Core3DSceneElementKindFace
+        || mode == Core3DSceneElementKindEdge
+        || mode == Core3DSceneElementKindVertex;
+    if ((mode != Core3DSceneElementKindObject && !ownerMode)
         || snapshot.selection.selectedElements.count == 0
         || snapshot.selection.selectedElements.count > maximumItems
         || snapshot.renderItems.count > maximumItems) {
@@ -128,12 +140,15 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
         NSString *identifier = element.entityIdentifier;
         NSData *bytes = [identifier dataUsingEncoding:NSUTF8StringEncoding
                                 allowLossyConversion:NO];
-        if (element.kind != Core3DSceneElementKindObject
-            || element.topologyIndex != 0
+        if (element.kind != mode
+            || (!ownerMode && element.topologyIndex != 0)
             || bytes.length == 0 || bytes.length > maximumIdentifierBytes
             || memchr(bytes.bytes, 0, bytes.length) != nullptr
-            || [selected containsObject:identifier]) {
+            || (!ownerMode && [selected containsObject:identifier])) {
             return nil;
+        }
+        if ([selected containsObject:identifier]) {
+            continue;
         }
         [selected addObject:identifier];
         [ordered addObject:identifier];
