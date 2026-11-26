@@ -787,6 +787,8 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
         // read without MoveTo: MoveTo would highlight the arrows and switch
         // their active mode on again.
         aSelector->Pick(theX, theY, myView);
+        // One face budget for the whole walk, however many edge-on hits it passes.
+        myContext->BeginEdgeOnTap();
         Handle(SelectMgr_EntityOwner) aBehind;
 #ifdef DEBUG
         std::string& aWalk = DebugLastBehindWalk();

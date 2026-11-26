@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
+#include <unordered_map>
 #include <cmath>
 Core3DContext::Core3DContext(const Handle(V3d_Viewer)& MainViewer)
 : AIS_InteractiveContext(MainViewer){
@@ -151,6 +152,21 @@ thread_local Standard_Integer tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
 thread_local Standard_Integer tEdgeOnFacesTested = 0;
 #endif
 
+// One tap's exact-ray answers per owner. Within one pick the ray and every
+// owner's shape and place are fixed, so a walk that asks about the same facing
+// face again (Move arrows' select behind, one question per edge-on hit) pays
+// for it once. A spent budget's Unknown is not kept.
+struct EdgeOnAnswer { RayMeets meets; Standard_Real along; };
+thread_local std::unordered_map<const Standard_Transient*, EdgeOnAnswer> tEdgeOnAnswers;
+thread_local gp_Pnt tEdgeOnOrigin;
+thread_local gp_Dir tEdgeOnRay;
+
+void BeginEdgeOnTapHere()
+{
+    tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+    tEdgeOnAnswers.clear();
+}
+
 // Takes `faces` from this tap's budget; false when it is spent.
 bool TakeEdgeOnFaces(Standard_Integer faces)
 {
@@ -194,7 +210,22 @@ RayMeets NearestRayHitAlong(const Handle(SelectMgr_EntityOwner)& entity,
 {
     const auto owner = Handle(StdSelect_BRepOwner)::DownCast(entity);
     if (owner.IsNull() || !owner->HasShape() || !owner->HasSelectable()) return RayMeets::Unknown;
-    return NearestRayHitAlongShape(owner->Shape(), owner->Selectable()->Transformation(), origin, ray, along);
+    // Another ray (a caller that did not begin a tap): the kept answers are not its own.
+    if (!tEdgeOnAnswers.empty() && (tEdgeOnOrigin.SquareDistance(origin) > 0.0 || !tEdgeOnRay.IsEqual(ray, 1.0e-12)))
+        tEdgeOnAnswers.clear();
+    tEdgeOnOrigin = origin;
+    tEdgeOnRay = ray;
+    const auto kept = tEdgeOnAnswers.find(owner.get());
+    if (kept != tEdgeOnAnswers.end()) {
+        if (kept->second.meets == RayMeets::Yes) along = kept->second.along;
+        return kept->second.meets;
+    }
+    Standard_Real found = along;
+    const RayMeets meets =
+        NearestRayHitAlongShape(owner->Shape(), owner->Selectable()->Transformation(), origin, ray, found);
+    if (meets != RayMeets::Unknown) tEdgeOnAnswers[owner.get()] = EdgeOnAnswer{meets, found};
+    if (meets == RayMeets::Yes) along = found;
+    return meets;
 }
 
 // The edge-on rule's verdict on the first hit (a face seen exactly edge-on)
@@ -264,7 +295,7 @@ int Core3DContext::DebugEdgeOnFacesTested() noexcept { return tEdgeOnFacesTested
 void Core3DContext::passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boolean redraw)
 {
     if (view.IsNull() || !HasDetected()) return;
-    tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+    BeginEdgeOnTapHere();
     try {
         OCC_CATCH_SIGNALS
         const Handle(StdSelect_ViewerSelector3d)& selector = MainSelector();
@@ -340,6 +371,8 @@ void Core3DContext::passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boo
     }
 }
 
+void Core3DContext::BeginEdgeOnTap() noexcept { BeginEdgeOnTapHere(); }
+
 // The same edge-on rule for a walk over the selector's raw hit list, which
 // reads OCCT's order without MoveTo (the Move arrows' "select behind" tap,
 // Fable review 20 finding 2). True: the hit at rank is a face seen exactly
@@ -349,7 +382,9 @@ void Core3DContext::passEdgeOnFaceHit(const Handle(V3d_View)& view, Standard_Boo
 bool Core3DContext::IsEdgeOnHitPassedBy(const Handle(V3d_View)& view, Standard_Integer rank)
 {
     if (view.IsNull()) return false;
-    tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+    // No budget reset here: the walk's caller begins the tap once
+    // (BeginEdgeOnTap), so a walk over many edge-on hits spends one tap's
+    // budget, not one per hit (CTO 24 Nov 11:12).
     try {
         OCC_CATCH_SIGNALS
         const Handle(StdSelect_ViewerSelector3d)& selector = MainSelector();
