@@ -2904,6 +2904,19 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     if (_viewer == nullptr) {
         return NO;
     }
+    const std::shared_ptr<ObjectInteractor> anInteractor = _viewer->getObjectInteractor();
+    const PrimitiveManipulatorType aType = anInteractor == nullptr
+        ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone : anInteractor->getManipulatorType();
+    // App Store 5.34 stored a handle drag whose touch was cancelled (its
+    // Core3DViewer::CancelInteraction called finishInteraction). Keep that for the
+    // Move and Scale handles only; _cancelTouches is the editor's own forwarded cancel.
+    if (!_cancelTouches && anInteractor != nullptr
+        && anInteractor->isManipulatorGestureActive()
+        && (aType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+            || aType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) {
+        _viewer->FinishInteraction((int)point.x, (int)point.y);
+        return YES;
+    }
     _viewer->CancelInteraction((int)point.x, (int)point.y);
     return NO;
 }
