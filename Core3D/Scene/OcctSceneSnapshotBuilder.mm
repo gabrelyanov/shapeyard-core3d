@@ -22643,6 +22643,12 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         TDF_LabelMap reliefConstructionOwners;
         if (!CaptureTextReliefConstructionOwners(
                 ocaf, reliefConstructionOwners)) return {};
+        // "Only selected objects" (CTO 18 Nov 09:23): in Face, Edge or Vertex mode
+        // the part that owns a selected element is exported whole. A valid scene
+        // marks exactly those owners selected in every mode (IsValidSceneSnapshotImpl),
+        // so `selected` names the parts to keep in each mode, here and in the saved-
+        // group captures below. The pick table and selection kept below are only
+        // compacted to the kept parts, never written into a file.
         std::unordered_map<std::string, std::size_t> wanted;
         for (std::size_t i = 0; i < source.instances.size(); ++i) {
             const auto& item = source.instances[i];
@@ -22651,8 +22657,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 wanted.emplace(item.entityIdentifier, i);
             }
         }
-        if (wanted.empty() || (selectedObjectsOnly
-            && source.selectionMode != ElementKind::Object)) { return {}; }
+        if (wanted.empty()) { return {}; }
         struct ExportOccurrence {
             std::size_t instance;
             std::size_t definition;
