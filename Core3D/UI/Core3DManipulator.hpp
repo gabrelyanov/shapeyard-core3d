@@ -884,6 +884,8 @@ protected: //! @name Fields for interactive transformation. Fields only for inte
   gp_Ax2 myStartPosition; //! Start position of manipulator.
   gp_Pnt myStartPick; //! 3d point corresponding to start mouse pick.
   Standard_Real myPrevState; //! Previous unsnapped, unwrapped rotation angle.
+  Standard_Boolean myHasAngularStep = Standard_False; //!< R14F-5: a snapped step was reached in this turn.
+  Standard_Real myAngularStep = 0.0; //!< R14F-5: that step (whole Angle steps, signed).
 #ifdef DEBUG
   std::map<std::string, double> myDebugRotationTrace;
   double myDebugLegacyPreviousAngle = 0.0;

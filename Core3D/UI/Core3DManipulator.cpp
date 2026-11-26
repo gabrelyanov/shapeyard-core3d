@@ -1141,6 +1141,8 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
                 // The start direction is identical to itself. Computing its
                 // angle can yield signed roundoff; the gesture seed is exact.
                 myPrevState = 0.0;
+                myHasAngularStep = Standard_False;
+                myAngularStep = 0.0;
 #ifdef DEBUG
                 const gp_Dir aStartAxis = gce_MakeDir(aPosLoc, myStartPick);
                 myDebugLegacyPreviousAngle = aStartAxis.AngleWithRef(
@@ -1188,13 +1190,34 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             {
                 theTrsf = gp_Trsf();
                 myPrevState = 0.0;
+                myHasAngularStep = Standard_False;
                 return Standard_True;
             }
             
             if(snapping_angular.has_value()) {
                 const auto radians_step = *snapping_angular * M_PI / 180.;
                 auto steps = anAngle / radians_step;
-                anAngle = floor(steps) * radians_step;
+                Standard_Real aStep = floor(steps);
+                // R14F-5: a finger shifts a point or two as it lifts. Once a step
+                // is reached, the turn drops one step back towards the start only
+                // after the finger has gone back a quarter of a step; floor alone
+                // dropped it on the first point back, and a turn of one step went
+                // back to nothing. (floor reaches the first step against the
+                // positive direction at once, so that step is not held.)
+                constexpr Standard_Real kStepHold = 0.25;
+                const bool aBackTowardsStart = myHasAngularStep
+                    && ((myAngularStep >= 1.0 && aStep == myAngularStep - 1.0
+                            && steps > myAngularStep - kStepHold)
+                        || (myAngularStep <= -2.0 && aStep == myAngularStep + 1.0
+                            && steps < myAngularStep + 1.0 + kStepHold));
+                if (aBackTowardsStart) {
+                    aStep = myAngularStep;
+                }
+                myAngularStep = aStep;
+                myHasAngularStep = Standard_True;
+                anAngle = aStep * radians_step;
+            } else {
+                myHasAngularStep = Standard_False;
             }
             
 #ifdef DEBUG
