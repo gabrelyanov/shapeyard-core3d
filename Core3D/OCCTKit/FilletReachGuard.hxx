@@ -43,8 +43,9 @@
 //    flat seam a Join left) is not a border: the builder may roll over it;
 //    (a2) a smooth border into a round is (kRoundBeyondASmoothBorderIsAFarBorder);
 //  - anything that cannot be measured is left to the builder, as before.
-//    (a2) Except the guard's own limits: past the measuring budget, a distance
-//    OCCT cannot give, or an exception, the amount is refused.
+//    (a2) Except an exception or more than kMaximumChainEdges chained edges:
+//    then the amount is refused. Past the measuring budget or a distance OCCT
+//    cannot give, it is left to the builder (Opus read 26 Nov).
 // It does not prove that a blend builds; the builder and every check after it
 // still judge the candidate.
 
@@ -90,8 +91,8 @@ constexpr double kSmoothTurn = 0.5 * kPi / 180.0;
 //! A blend must leave at least this share of the face's width standing, so a
 //! size probe never asks the builder for a sliver either.
 constexpr double kMargin = 0.01;
-//! Exact edge-to-edge distances measured per call; (a2) past it the amount is
-//! refused (it was left to the builder).
+//! Exact edge-to-edge distances measured per call; past it the amount is left
+//! to the builder (Opus read 26 Nov: back to f842bf14).
 constexpr int kMaximumMeasuredPairs = 1024;
 //! (a2) Edges measured after adding the tangent chains; past it, refused.
 constexpr int kMaximumChainEdges = 1024;
@@ -239,6 +240,26 @@ inline bool AddTangentChains(
                 || !TangentFrom(anEdge, aVertex, anInto)) {
                 continue;
             }
+            // (Opus read 26 Nov, finding 2) OCCT carries a round on only
+            // where the faces on both sides run on smoothly. A vertex with a
+            // third sharp edge (a split top edge over a vertical and a slanted
+            // face) is not chained through: counting an edge the kernel does
+            // not round as rounded would shorten its neighbours' strips and
+            // could let a size through.
+            int aSharpCount = 0;
+            for (TopTools_ListIteratorOfListOfShape anAt(
+                     anEdgesOfVertex.FindFromKey(aVertex));
+                 anAt.More(); anAt.Next()) {
+                const TopoDS_Edge anAtEdge = TopoDS::Edge(anAt.Value());
+                double anAtTurn = 0.0;
+                if (!BRep_Tool::Degenerated(anAtEdge)
+                    && theSharpTurnOf(anAtEdge, anAtTurn)) {
+                    ++aSharpCount;
+                }
+            }
+            if (aSharpCount != 2) {
+                continue;
+            }
             for (TopTools_ListIteratorOfListOfShape aNext(
                      anEdgesOfVertex.FindFromKey(aVertex));
                  aNext.More(); aNext.Next()) {
@@ -330,14 +351,17 @@ struct Strip {
         if (isRing) {
             return true;
         }
-        double anAngle = ElCLib::Parameter(circle, thePoint);
-        while (anAngle < first - 1.0e-9) {
-            anAngle += 2.0 * kPi;
+        // (Opus read 26 Nov, finding 7) One fmod instead of stepping by 2 pi,
+        // which never ends for a huge parameter.
+        double anOffset = std::fmod(
+            ElCLib::Parameter(circle, thePoint) - first, 2.0 * kPi);
+        if (!std::isfinite(anOffset)) {
+            return false;
         }
-        while (anAngle > first + 2.0 * kPi) {
-            anAngle -= 2.0 * kPi;
+        if (anOffset < -1.0e-9) {
+            anOffset += 2.0 * kPi;
         }
-        return anAngle <= last + 1.0e-9;
+        return first + anOffset <= last + 1.0e-9;
     }
 };
 
@@ -557,7 +581,7 @@ inline Landing StripOn(
 //! too large for the part and is never handed to OCCT's fillet or chamfer
 //! builder. False when every measured face is wide enough and whenever the
 //! part's own geometry cannot be measured; (a2) true past the guard's own
-//! limits (measuring budget, a distance OCCT cannot give, an exception).
+//! limits (more than kMaximumChainEdges chained edges, an exception).
 //! theShape must not be in use on another thread (the Bevel worker passes its
 //! own copy).
 inline bool ReachesFarBorder(
@@ -690,13 +714,18 @@ inline bool ReachesFarBorder(
                             BRep_Tool::Pnt(TopExp::FirstVertex(aBorder)))) {
                         return true;
                     }
+                    // (Opus read 26 Nov, finding 3) Past the budget, or when
+                    // OCCT cannot give one distance, the amount is left to
+                    // the builder as f842bf14 and the store version do: the
+                    // crash class (shelled cube, mug rim) is far under the
+                    // budget, and a plate with many holes must not be refused.
                     if (++aMeasuredPairs > kMaximumMeasuredPairs) {
-                        return true;
+                        return false;
                     }
                     BRepExtrema_DistShapeShape aDistance(aFrom, aBorder);
                     if (!aDistance.IsDone() || aDistance.NbSolution() == 0
                         || !std::isfinite(aDistance.Value())) {
-                        return true;
+                        continue;
                     }
                     const double aGap = aDistance.Value();
                     if (!fromStrip && !(aGap > Precision::Confusion())) {

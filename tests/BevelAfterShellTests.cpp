@@ -433,6 +433,24 @@ static void runCase(const int number) {
         std::cout << name(bevel(cubeWithTreatedUprights(5.0, false), 5.2, false, false)) << "\n";
         break;
     }
+    case 104: case 105: {
+        // (Opus read 26 Nov, finding 4: the earlier-round rule) Plate 50 x 50 x 8, its four top
+        // edges rounded 3 (5 mm of flat side left), then the four bottom edges rounded 4.96:
+        // 104 without the guard (the store version), 105 with it. Store builds it and 105 is
+        // refused = rule kRoundBeyondASmoothBorderIsAFarBorder goes off for build 13.
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(50.0, 50.0, 8.0).Shape();
+        const TopoDS_Shape plate = treated(box, edgesWhere(box, [](const gp_Pnt& a, const gp_Pnt& b) {
+            return same(a.Z(), 8.0) && same(b.Z(), 8.0);
+        }), 3.0, false);
+        const std::vector<TopoDS_Edge> bottom = edgesWhere(plate, [](const gp_Pnt& a, const gp_Pnt& b) {
+            return same(a.Z(), 0.0) && same(b.Z(), 0.0);
+        });
+        require(bottom.size() == 4, "four bottom edges");
+        std::cout << "KERNEL " << number << " plate 50 x 50 x 8, top rounded 3, bottom edges Bevel 4.96, "
+                  << (number == 104 ? "no guard" : "guarded") << ": " << std::flush;
+        std::cout << name(bevelOn(plate, bottom, 4.96, false, number == 105)) << "\n";
+        break;
+    }
     default:
         throw std::runtime_error("unknown case " + std::to_string(number));
     }
