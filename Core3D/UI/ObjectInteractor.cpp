@@ -3621,6 +3621,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 samples.push_back(sample);
                 _debugGestureTrace.push_back(std::move(trace));
             }
+            if (_debugReplayLeavesGestureHeld) {
+                // R14F-5 check: no lift here; the caller ends the held drag.
+                _debugReplayLeavesGestureHeld = false;
+                return true;
+            }
             if (cancel) cancelInteraction(); else finishInteraction();
             // Read authority after reconciliation, even if it aborted the batch.
             for (std::size_t index = 0; index < traceLabels.size(); ++index) {

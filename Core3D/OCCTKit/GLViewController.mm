@@ -1544,6 +1544,8 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     std::vector<Handle(AIS_Shape)> _boundaryPresentations;
     BOOL _rawTouchRendering;
     BOOL _rawTouchWasCancelled;
+    // R14F-5: this touch sequence was cancelled by UIKit and its held handle was resolved as a lift.
+    BOOL _rawCancelResolvedAsLift;
     NSMutableSet<UITouch *> *_rawViewportTouches;
     BOOL _pinchRendering;
     BOOL _panRendering;
@@ -2767,6 +2769,7 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
 	if (didBeginPrimaryInteraction) {
 		_cancelTouches = NO;
 		_rawTouchWasCancelled = NO;
+		_rawCancelResolvedAsLift = NO;
 		_rawTouchRendering = YES;
 		_suppressTapSelectionForManipulatorInteraction = NO;
 		_pendingTapBehindManipulator = NO;
@@ -2891,9 +2894,34 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     return;
 }
 
+/// R14F-5. A raw touch UIKit took away: a second finger that starts the pinch or the
+/// two-finger pan (both cancel the view's touches), the system, a window change.
+/// YES: a held Move/Scale handle was resolved as a lift (every commit check of
+/// finishInteraction still decides: stored as one Undo step, or put back).
+/// NO: cancelled as before (camera drag, Mirror squares, a forwarded cancel).
+- (BOOL)resolveCancelledRawTouchAtDrawablePoint:(CGPoint)point
+{
+    if (_viewer == nullptr) {
+        return NO;
+    }
+    _viewer->CancelInteraction((int)point.x, (int)point.y);
+    return NO;
+}
+
+#ifdef DEBUG
+- (BOOL)debugResolveCancelledRawTouch
+{
+    if (![NSThread isMainThread] || _isPreviewMode) {
+        return NO;
+    }
+    const BOOL storedAsLift = [self resolveCancelledRawTouchAtDrawablePoint:CGPointZero];
+    [self requestRender];
+    return storedAsLift;
+}
+#endif
+
 -(void) touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event{
     [super touchesCancelled:touches withEvent:event];
-	_rawTouchWasCancelled = YES;
 	_pendingTapBehindManipulator = NO;
 	if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr
 		&& _viewer->getObjectInteractor()->isManipulatorGestureActive()) {
@@ -2906,7 +2934,9 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
     UITouch *aTouch = [touches anyObject];
     if (!_isPreviewMode && aTouch != NULL) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
-        _viewer->CancelInteraction((int)point.x, (int)point.y);
+        if ([self resolveCancelledRawTouchAtDrawablePoint:point]) {
+            _rawCancelResolvedAsLift = YES;
+        }
 #ifdef DEBUG
         [self debugTraceNativeFaceTap:point stage:@"touch-cancel"];
 #endif
@@ -2918,8 +2948,12 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
         }
 #endif
 	}
+	// A drag that was resolved as a lift is reported to the editor as ended, not cancelled.
+	if (!_rawCancelResolvedAsLift) {
+		_rawTouchWasCancelled = YES;
+	}
 	[_rawViewportTouches minusSet:touches];
-	[self endRawPrimaryInteractionIfNeededCancelled:YES];
+	[self endRawPrimaryInteractionIfNeededCancelled:!_rawCancelResolvedAsLift];
 
     return;
 }

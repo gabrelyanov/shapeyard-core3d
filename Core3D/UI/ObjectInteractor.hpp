@@ -227,6 +227,9 @@ namespace core3d {
         const std::vector<std::map<std::string, double>>& debugGestureTrace() const {
             return _debugGestureTrace;
         }
+        //! R14F-5 check: the next replay stops before its lift, the handle still held,
+        //! so the check can end the drag itself (a touch UIKit cancels).
+        void debugSetReplayLeavesGestureHeld(bool held) noexcept { _debugReplayLeavesGestureHeld = held; }
 #endif
         void setManipulatorType(PrimitiveManipulatorType type);
         //! Per-editor guided placement policy; ordinary editors default to rotation.
@@ -728,6 +731,7 @@ namespace core3d {
 		bool _manipulatorGestureActive = false;
 #ifdef DEBUG
         bool _debugGestureTraceActive = false;
+        bool _debugReplayLeavesGestureHeld = false;
         std::vector<std::map<std::string, double>> _debugGestureTrace;
         std::unordered_map<const AIS_InteractiveObject*, Standard_Integer> _debugGestureTraceIndices;
 		Standard_Integer _debugDuplicateCommitMode = 0;
