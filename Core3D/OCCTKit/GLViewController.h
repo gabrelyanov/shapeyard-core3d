@@ -194,6 +194,8 @@ NS_ASSUME_NONNULL_BEGIN
 //! Test only: the colour (r, g, b) the engine highlight would draw the first selected part in.
 - (nullable NSArray<NSNumber *> *)debugSelectedPartHighlightRGB;
 - (void)debugRequestRender;
+//! R14F-5 check: ends a held handle drag the way touchesCancelled does. YES when it was resolved as a lift.
+- (BOOL)debugResolveCancelledRawTouch;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
 - (void)debugSetMaximumLeafPresentations:(NSUInteger)limit;

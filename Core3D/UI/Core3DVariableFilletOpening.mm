@@ -1442,6 +1442,7 @@ Core3DVariableFilletOwnerValuesForDocument(
         return Core3DVariableFilletApplyResultUnavailable;
     const vro::Result result = vro::Apply(*_document, *_prepared, *_cancelled);
     self.measuredHistoryDelta = result.measuredHistoryDelta;
+    if (result.settledByRedraw) [self refreshControllerAfterDocumentRedraw];
     switch (result.outcome) {
         case vro::Outcome::Refused: return Core3DVariableFilletApplyResultRefused;
         case vro::Outcome::Cancelled: return Core3DVariableFilletApplyResultCancelled;
@@ -1456,9 +1457,28 @@ Core3DVariableFilletOwnerValuesForDocument(
     return Core3DVariableFilletApplyResultRecoveryRequired;
 }
 
+// R13P-4: the engine drew the whole document again to settle its fence. That
+// clears the selection, so the controller reads it again and draws a frame,
+// as it does after Undo.
+- (void)refreshControllerAfterDocumentRedraw {
+    Core3DViewController *controller = _controller;
+    if (!NSThread.isMainThread || !controller) return;
+    @try {
+        GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)controller.glController : nil;
+        [gl refreshSelectionState];
+        [gl requestRender];
+        [controller viewDidInvalidateSceneSnapshot];
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 - (Core3DVariableFilletApplyResult)reconcile {
     if (!_prepared) return Core3DVariableFilletApplyResultUnavailable;
-    switch (vro::Reconcile(*_document, *_prepared)) {
+    bool settledByRedraw = false;
+    const vro::Outcome reconciled = vro::Reconcile(*_document, *_prepared, &settledByRedraw);
+    if (settledByRedraw) [self refreshControllerAfterDocumentRedraw];
+    switch (reconciled) {
         case vro::Outcome::Refused: return Core3DVariableFilletApplyResultRefused;
         case vro::Outcome::Cancelled: return Core3DVariableFilletApplyResultCancelled;
         case vro::Outcome::Committed: return Core3DVariableFilletApplyResultCommitted;

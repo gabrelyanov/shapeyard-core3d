@@ -6,6 +6,7 @@
 #include "BevelOperationController.hpp"
 #include "CheckedBitsGuard.hxx"
 #include "../OCCTKit/FilletFailureClassifier.hxx"
+#include "../OCCTKit/FilletReachGuard.hxx"
 #include "PlaneFrameSettle.hpp"
 
 #include <AIS_ColoredShape.hxx>
@@ -1128,6 +1129,12 @@ Standard_Boolean PlainBevelBuildsAt(
             || theCancellation->load(std::memory_order_relaxed)) {
             return Standard_False;
         }
+        // M14-0: a size probe never hands the builder an amount that reaches
+        // the far border of a face either (Bevel 8 probes 2 on a 2 mm wall).
+        if (fillet_reach::ReachesFarBorder(
+                theSource.shape, theSource.edges, theValue, theIsChamfer)) {
+            return Standard_False;
+        }
         Handle(BevelCancellationIndicator) aProgress =
             new BevelCancellationIndicator(theCancellation);
         TopoDS_Shape aShape;
@@ -1705,6 +1712,31 @@ private:
                             return aResult;
                         }
                     }
+                }
+                // M14-0 (build 12, 25 Nov): Bevel 2 on a cube with a 2 mm
+                // Shell closed the app inside OCCT's fillet builder: a
+                // segmentation fault, which no catch below can stop. An amount
+                // that reaches the far border of a face beside a selected edge
+                // (the rim of a shelled part, a step, a hole near an edge) is
+                // refused as too large before any builder is called. A round
+                // on one plain part also names the size that fits, exactly as
+                // after a refusal by the builder; its probes pass the same
+                // guard (PlainBevelBuildsAt).
+                if (fillet_reach::ReachesFarBorder(
+                        aSource.shape, aSource.edges, aDistance, isChamfer)) {
+                    if (!aSource.retainedInput && !isChamfer
+                        && theRequest.sources.size() == 1) {
+                        ClassifyFailedPlainBevel(
+                            aSource, aDistance, Standard_False,
+                            theRequest.cancellation,
+                            aNodesBefore, aSolidsBefore,
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultSolids,
+                            &aResult.largestFittingValue,
+                            theRequest.namedSizeStep);
+                    }
+                    aResult.failureKind = BevelFailureKind::RadiusRefused;
+                    return aResult;
                 }
                 if (aSource.retainedInput) {
                     retained_edge_treatment::Refusal aRefusal;

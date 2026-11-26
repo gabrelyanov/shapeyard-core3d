@@ -1073,8 +1073,8 @@ struct OcctGeometryDuplicationRequest
     // Repeat copies supported authored face finishes onto new subshape labels.
     // Charge those labels as well as the whole-part appearance before copying.
     bool preservesAuthoredFaceMaterials = false;
-    // Duplicate only: a part whose standalone saved Hole could be baked is
-    // copied as a plain solid; the source keeps its resizable Hole record.
+    // Duplicate, Mirror, In a row, In a circle: a part whose standalone saved
+    // Hole could be baked is copied as a plain solid; the source keeps its resizable Hole record.
     // Also an ordinary saved Join/Cut/Overlap (CanBakeBooleanResultForFaceEdit):
     // the copy is a plain solid of the same shape, the source keeps its recipe.
     bool copiesSavedCutAsPlainSolid = false;
@@ -1219,6 +1219,12 @@ public:
     //! Private export copies only: a joined / cut / overlap part becomes a plain part
     //! (its Join record is dropped) so a baked scale needs no record replay.
   Standard_EXPORT Standard_Boolean ForgetBooleanResultRecordForExport(const TDF_Label& label) noexcept;
+    //! Private export copies only, before a baked object scale: a part whose recipe record binds
+    //! its unscaled solid (Join/Cut/Overlap, Sweep and Tube, planar Sweep) becomes a plain part.
+    //! True when no such record is left (also when there was none). R16F-51: rewriting that
+    //! binding with ShapeTool::SetShape added an attribute its reader refuses, so a Sweep
+    //! resized by Uniform scale stopped every export ("Export isn't ready").
+  Standard_EXPORT Standard_Boolean ForgetRecipeRecordForScaledExport(const TDF_Label& label) noexcept;
   Standard_EXPORT OcctRetainedRecipeCoverage RetainedRecipeCoverageForLabel(
       const TDF_Label& label) const noexcept;
   //! Read-only eligibility and capture for the plain-profile compatibility
@@ -2635,6 +2641,12 @@ public:
     Standard_Boolean CanBakeRecordForFaceEdit(const TDF_Label& label) const noexcept {
         return CanBakeSavedCutForFaceEdit(label) || CanBakeBooleanResultForFaceEdit(label);
     }
+
+    //! R14F-3 (25 Nov): a Tube made along a Path (its one current spatial-sweep
+    //! record, nothing else) may be copied as a plain solid by Duplicate and
+    //! Mirror; the source keeps its record. Never a bake: no face tool may use
+    //! this to remove the record. Read-only.
+    Standard_Boolean CanCopySpatialSweepAsPlainSolid(const TDF_Label& label) const noexcept;
 
     //! Bake a saved Join/Cut/Overlap or standalone older cut before a face edit.
     //! Requires the face edit's open command: abort/undo restores the record.

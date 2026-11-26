@@ -2466,6 +2466,14 @@ __attribute__((objc_subclassing_restricted))
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel physicalScale:(BOOL)physicalScale
     NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:physicalScale:));
+//! R14F-5 check: the same projected samples, but the finger stays down (no lift, no cancel).
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGestureHeld:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values
+    NS_SWIFT_NAME(debugReplayGestureHeld(mode:axis:values:));
+//! R14F-5 check: UIKit cancels the touch of the held drag (GLViewController touchesCancelled's
+//! own route). YES when the drag was resolved as a lift, NO when it was cancelled.
+- (BOOL)debugCancelRawTouchOfHeldGesture;
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
 - (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity;

@@ -227,6 +227,9 @@ namespace core3d {
         const std::vector<std::map<std::string, double>>& debugGestureTrace() const {
             return _debugGestureTrace;
         }
+        //! R14F-5 check: the next replay stops before its lift, the handle still held,
+        //! so the check can end the drag itself (a touch UIKit cancels).
+        void debugSetReplayLeavesGestureHeld(bool held) noexcept { _debugReplayLeavesGestureHeld = held; }
 #endif
         void setManipulatorType(PrimitiveManipulatorType type);
         //! Per-editor guided placement policy; ordinary editors default to rotation.
@@ -670,6 +673,11 @@ namespace core3d {
             std::string enclosureIdentifier;
             pattern_recipe_clone::Source sweepLoft;
             pattern_recipe_clone::Prepared preparedSweepLoft;
+            // R13F-1: the source's face looks as the preview read them, and
+            // the same looks on the reflected faces of the copy (both empty
+            // for an unpainted part). Kept last: the snapshot is brace-built.
+            std::vector<LinearArrayFaceFinish> sourceFaceFinishes;
+            std::vector<LinearArrayFaceFinish> resultFaceFinishes;
 		};
 		struct MirrorPendingResult {
 			TDF_Label label;
@@ -726,6 +734,7 @@ namespace core3d {
 		bool _manipulatorGestureActive = false;
 #ifdef DEBUG
         bool _debugGestureTraceActive = false;
+        bool _debugReplayLeavesGestureHeld = false;
         std::vector<std::map<std::string, double>> _debugGestureTrace;
         std::unordered_map<const AIS_InteractiveObject*, Standard_Integer> _debugGestureTraceIndices;
 		Standard_Integer _debugDuplicateCommitMode = 0;

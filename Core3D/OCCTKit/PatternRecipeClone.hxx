@@ -197,7 +197,7 @@ inline bool SameLocalIDs(const rectangular_loft::Definition& left,
 // A present-but-stale, malformed, composite, or retained-cut owner refuses.
 // plainSavedCutCopy: the caller has proven (CanBakeSavedCutForFaceEdit) that
 // the owner is a plain BRep whose only record is a standalone saved Hole, or
-// (CanBakeBooleanResultForFaceEdit, Duplicate only) an ordinary saved
+// (CanBakeBooleanResultForFaceEdit; Duplicate, Mirror, In a row, In a circle) an ordinary saved
 // Join/Cut/Overlap; the copy is then a plain solid (Family::None) and the
 // source keeps its record.
 // The legacy readers already require their binding and document units to be
