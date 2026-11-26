@@ -13145,6 +13145,26 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return result;
 }
 
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGestureHeld:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values {
+    if (![NSThread isMainThread] || GLController.viewer == nullptr) { return nil; }
+    // The replay sets the tool first; set it here too so the flag reaches the interactor it uses.
+    [self setGizmoType:mode >= 2 ? PrimitiveGizmoTypeScale : PrimitiveGizmoTypeMoveRotate];
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr) { return nil; }
+    interactor->debugSetReplayLeavesGestureHeld(true);
+    NSArray<NSDictionary<NSString *, NSNumber *> *> *samples =
+        [self debugReplayGesture:mode axis:axis values:values cancel:NO];
+    interactor->debugSetReplayLeavesGestureHeld(false);
+    return samples;
+}
+
+- (BOOL)debugCancelRawTouchOfHeldGesture {
+    return [NSThread isMainThread] && GLController != nil
+        && [GLController debugResolveCancelledRawTouch];
+}
+
 - (NSNumber *_Nullable)debugDocumentMetersPerUnit {
     auto document = GLController.viewer->getDocument()->ChangeDocument();
     Standard_Real metersPerUnit = 0.0;
