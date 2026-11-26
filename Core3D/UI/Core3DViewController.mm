@@ -8225,6 +8225,8 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
                     change.shape = before.resolvedRepresentation == OcctGeometryRepresentation::TriangleMesh
                         ? BRepBuilderAPI_Copy(before.shape, Standard_True, Standard_True).Shape()
                         : BRepBuilderAPI_Transform(before.shape, scale, Standard_True).Shape();
+                    // As the Scale handle and typed sizes send it (M14-1 1A): painted faces follow the rebuild.
+                    change.faceColourMap = gp_GTrsf(scale);
                 } else {
                     change.transform.SetScaleFactor(2.0);
                     if (mode == 4) {
