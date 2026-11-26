@@ -622,7 +622,9 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
                 (retained_solid::HasRecord(aLabel)
                         && _document->CanBakeSavedCutForFaceEdit(aLabel))
                     || (composite_recipe::HasRecord(aLabel)
-                        && _document->CanBakeBooleanResultForFaceEdit(aLabel)))) {
+                        && (_document->CanBakeBooleanResultForFaceEdit(aLabel)
+                            // R14F-3 follow-up: and a Tube made along a Path.
+                            || _document->CanCopySpatialSweepAsPlainSolid(aLabel))))) {
             return Standard_False;
         }
         // Treatment replay builds different topology from BRepBuilderAPI_Copy.

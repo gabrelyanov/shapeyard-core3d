@@ -2628,8 +2628,8 @@ public:
     }
 
     //! R14F-3 (25 Nov): a Tube made along a Path (its one current spatial-sweep
-    //! record, nothing else) may be copied as a plain solid by Duplicate and
-    //! Mirror; the source keeps its record. Never a bake: no face tool may use
+    //! record, nothing else) may be copied as a plain solid by Duplicate,
+    //! Mirror, In a row and In a circle; the source keeps its record. Never a bake: no face tool may use
     //! this to remove the record. Read-only.
     Standard_Boolean CanCopySpatialSweepAsPlainSolid(const TDF_Label& label) const noexcept;
 
