@@ -6,6 +6,7 @@
 //
 
 #include "ObjectInteractor.hpp"
+#include <os/log.h>
 #include "OrdinaryEditController.hpp"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
@@ -51,6 +52,7 @@
 #include <TDF_Attribute.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TDF_TagSource.hxx>
 #include <TDataStd_Integer.hxx>
 #include <TDataStd_Real.hxx>
 #include <TDataStd_Name.hxx>
@@ -788,6 +790,49 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 				return Standard_False;
 			} catch (...) {
 				return Standard_True;
+			}
+		}
+
+		// R13F-1 (25 Nov): Mirror carries plain face looks onto its copy. A part
+		// with no styled sub-shape is admitted as before, with no looks. A styled
+		// part is admitted only when every styled sub-shape is a face in the one
+		// scalar look form that Duplicate and Repeat copy; a colour, a layer, a
+		// hidden sub-shape, an edge look or a picture on a face still refuses.
+		Standard_Boolean CaptureMirrorFaceFinishes(
+			const Handle(OcctDocument)& theOwner,
+			const TDF_Label& theDefinition,
+			const Standard_Size theMaximumLabels,
+			std::vector<LinearArrayFaceFinish>& theFinishes) noexcept {
+			theFinishes.clear();
+			try {
+				const Handle(TDocStd_Document) aDocument = theOwner.IsNull()
+					? Handle(TDocStd_Document)() : theOwner->Document();
+				if (!HasStyledMirrorSubshape(
+						aDocument, theDefinition, theMaximumLabels)) {
+					return Standard_True;
+				}
+				return CaptureDuplicateFaceFinishes(
+						theOwner, theDefinition, theMaximumLabels, theFinishes)
+					&& !theFinishes.empty();
+			} catch (...) {
+				theFinishes.clear();
+				return Standard_False;
+			}
+		}
+
+		// The source's face looks are still exactly the ones the preview read.
+		Standard_Boolean MirrorFaceFinishesAreCurrent(
+			const Handle(OcctDocument)& theOwner,
+			const TDF_Label& theDefinition,
+			const Standard_Size theMaximumLabels,
+			const std::vector<LinearArrayFaceFinish>& theExpected) noexcept {
+			try {
+				std::vector<LinearArrayFaceFinish> aCurrent;
+				return CaptureMirrorFaceFinishes(
+						theOwner, theDefinition, theMaximumLabels, aCurrent)
+					&& DuplicateFaceFinishesMatch(theExpected, aCurrent);
+			} catch (...) {
+				return Standard_False;
 			}
 		}
 
@@ -1999,10 +2044,12 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is
                 // copied as a plain solid; the source keeps its record.
                 // R2-N02 (CTO 20 Nov 01:10): so is an ordinary joined part.
+                // R14F-3 (25 Nov): so is a Tube made along a Path.
                 const bool savedCutCopiedPlain = (retained_solid::HasRecord(label)
                         && myDoc->CanBakeSavedCutForFaceEdit(label))
                     || (composite_recipe::HasRecord(label)
-                        && myDoc->CanBakeBooleanResultForFaceEdit(label));
+                        && (myDoc->CanBakeBooleanResultForFaceEdit(label)
+                            || myDoc->CanCopySpatialSweepAsPlainSolid(label)));
 #if DEBUG
                 g_duplicatePlainBits = (retained_solid::HasRecord(label) ? 1 : 0)
                     | (myDoc->CanBakeSavedCutForFaceEdit(label) ? 2 : 0)
@@ -3620,6 +3667,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 samples.push_back(sample);
                 _debugGestureTrace.push_back(std::move(trace));
             }
+            if (_debugReplayLeavesGestureHeld) {
+                // R14F-5 check: no lift here; the caller ends the held drag.
+                _debugReplayLeavesGestureHeld = false;
+                return true;
+            }
             if (cancel) cancelInteraction(); else finishInteraction();
             // Read authority after reconciliation, even if it aborted the batch.
             for (std::size_t index = 0; index < traceLabels.size(); ++index) {
@@ -3639,17 +3691,59 @@ Standard_Boolean DuplicateFaceFinishesMatch(
     }
 #endif
 
+    // R14F-5 probe (25 Nov 2026): one log line whenever a handle drag is thrown
+    // away, naming the exit. Main thread only. No behaviour change.
+    // mode: 1 arrow, 2 turn ring, 3 side square, 4 Scale ball
+    // (AIS_ManipulatorMode). stage: 0 = cancelled from outside the touch-up,
+    // 1 = before the change check, 2 = before the per-part checks,
+    // 3 = before the request is built, 4 = handed to the edit controller.
+    static int sGestureFinishStage = 0;
+    // The newest handle-drag outcomes, "site:mMODE:sSTAGE:dDETAIL" joined by
+    // "+", read by the app's UI-test telemetry (no "-" in it). Main thread only.
+    static char sGestureDropTrace[320] = "";
+    static void NoteGestureTrace(const char* site, int mode, int detail) noexcept {
+        char entry[48];
+        snprintf(entry, sizeof entry, "%s:m%d:s%d:d%d", site, mode < 0 ? 99 : mode,
+                 sGestureFinishStage, detail < 0 ? 99 : detail);
+        while (strlen(sGestureDropTrace) + strlen(entry) + 2 > sizeof sGestureDropTrace) {
+            char* next = strchr(sGestureDropTrace, '+');
+            if (next == nullptr) { sGestureDropTrace[0] = 0; break; }
+            memmove(sGestureDropTrace, next + 1, strlen(next + 1) + 1);
+        }
+        if (sGestureDropTrace[0] != 0) { strcat(sGestureDropTrace, "+"); }
+        strcat(sGestureDropTrace, entry);
+    }
+    static void NoteGestureDropped(const char* site, int mode, int detail) noexcept {
+        os_log(OS_LOG_DEFAULT,
+               "SHAPEYARD_GESTURE_DROPPED site=%{public}s mode=%d stage=%d detail=%d",
+               site, mode, sGestureFinishStage, detail);
+        NoteGestureTrace(site, mode, detail);
+    }
+    extern "C" __attribute__((visibility("default"), used))
+    void ShapeyardDebugNoteGestureTrace(const char* site, int mode, int detail) {
+        NoteGestureTrace(site, mode, detail);
+    }
+    extern "C" __attribute__((visibility("default"), used))
+    const char* ShapeyardDebugGestureDropTrace(void) {
+        return sGestureDropTrace[0] != 0 ? sGestureDropTrace : "none";
+    }
+
     void ObjectInteractor::finishInteraction() {
         // Declared before GestureStateReset: notification follows both the
         // history reconciliation and the active-gesture flag reset on exit.
         GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
+        sGestureFinishStage = 1;
+        struct StageReset final { ~StageReset() noexcept { sGestureFinishStage = 0; } } aStageReset;
+        NoteGestureTrace("fin", _manipulator.IsNull() ? 99 : int(_manipulator->ActiveMode()),
+                         _manipulatorGestureActive ? 1 : 0);
         if (!_manipulatorRotationAllowed && !_manipulator.IsNull()
             && _manipulator->ActiveMode() == AIS_MM_Rotation) {
             cancelInteraction();
             return;
         }
 		if (hasUnresolvedEdit()) {
+			NoteGestureTrace("unresolved", 99, 0);
 			_manipulatorGestureActive = false;
 			return;
 		}
@@ -3727,6 +3821,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 				return;
 			}
 
+            sGestureFinishStage = 2;
             auto doc = myDoc->ChangeDocument();
 			if (doc.IsNull() || doc->HasOpenCommand()) {
 				cancelInteraction();
@@ -3788,6 +3883,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 
             // The viewer-owned typed controller owns staging, reconciliation,
             // selection/gizmo repair and exactly-once publication.
+            sGestureFinishStage = 3;
             const auto controller = _ordinaryEditController.lock();
             if (!controller) { cancelInteraction(); return; }
             OrdinaryTransformOperation operation;
@@ -3839,6 +3935,17 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                         rotation.delta = _manipulator->GestureTransformation();
                         request.rotationAroundPivot = rotation;
                         request.transform = rotation.delta * before.transform;
+                    } else if (activeMode == AIS_MM_Scaling) {
+                        // M14-1 (build 12 matrix): a one-axis Scale handle rebuilds the solid,
+                        // as a size typed in By numbers does, but sent no map of old geometry
+                        // onto new. The commit then kept a face's own colour only on faces
+                        // that did not move: the orange cylinder of a joined part turned
+                        // blue, a red top turned grey. Send the map the preview was built
+                        // with. No map (nothing rebuilt): exactly as before.
+                        const auto& maps = _manipulator->axisScaleMaps();
+                        const auto map = maps.find(Handle(AIS_InteractiveObject)(change.first));
+                        if (map != maps.end() && !request.shape.IsEqual(before.shape))
+                            request.faceColourMap = map->second;
                     }
 #ifdef DEBUG
                     if (_debugGestureTraceActive && !_debugGestureTrace.empty()) {
@@ -3851,18 +3958,26 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 #endif
                     requests.push_back(std::move(request));
                 }
+                sGestureFinishStage = 4;
                 OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
                 auto lease = controller->beginTransform(requests, &failure);
                 if (!lease) {
+                    NoteGestureDropped("controller-begin", int(activeMode), int(failure));
                     // An uncertain begin retains authority; only a definitive
                     // rejection/no-op permits cancelling the transient preview.
                     if (!controller->blocksNormalWork()) { cancelInteraction(); }
                     return;
                 }
-                (void)lease.stageAndCommit();
+                const OrdinaryEditResult aCommitted = lease.stageAndCommit();
+                if (aCommitted != OrdinaryEditResult::Committed) {
+                    NoteGestureDropped("controller-commit", int(activeMode), int(aCommitted));
+                } else {
+                    NoteGestureTrace("stored", int(activeMode), 1);
+                }
                 // Do not roll back from a commit Boolean/exception or publish
                 // here. The retained controller resolves the durable outcome.
             } catch (...) {
+                NoteGestureDropped("exception", int(activeMode), -1);
                 if (!controller->blocksNormalWork()) { cancelInteraction(); }
             }
         }
@@ -3871,6 +3986,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
     void ObjectInteractor::cancelInteraction() {
         GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
+        if (_manipulatorGestureActive && !_manipulator.IsNull()) {
+            NoteGestureDropped("cancel", int(_manipulator->ActiveMode()),
+                               _manipulator->HasActiveTransformation() ? 1 : 0);
+        }
 		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
 			return;
@@ -5878,8 +5997,14 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             }
             // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is mirrored
             // as a plain solid; the source keeps its record.
-            const bool savedCutCopiedPlain = retained_solid::HasRecord(source->second)
-                && myDoc->CanBakeSavedCutForFaceEdit(source->second);
+            // R13F-1 (25 Nov): so is an ordinary joined part (a Join that keeps
+            // its two parts), by the rule Duplicate has used since R2-N02.
+            const bool savedCutCopiedPlain = (retained_solid::HasRecord(source->second)
+                    && myDoc->CanBakeSavedCutForFaceEdit(source->second))
+                || (composite_recipe::HasRecord(source->second)
+                    && (myDoc->CanBakeBooleanResultForFaceEdit(source->second)
+                        // R14F-3 (25 Nov): and a Tube made along a Path.
+                        || myDoc->CanCopySpatialSweepAsPlainSolid(source->second)));
             profileRequests.push_back({source->second, 1, !profile.label.IsNull(),
                                        !enclosure.label.IsNull(), !enclosure.label.IsNull(),
                                        true, true, false, false, savedCutCopiedPlain});
@@ -5922,6 +6047,9 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				myDoc->ReadReferenceAxisForLabel(
 					sourceLabel, aSourceReferenceAxis);
 			Standard_Size sourceNodeCount = 0;
+			// R13F-1: face looks of the source (empty for an unpainted part).
+			std::vector<LinearArrayFaceFinish> sourceFaceFinishes;
+			std::vector<LinearArrayFaceFinish> resultFaceFinishes;
 			if (sourceStoredShape.IsNull()
 				|| !sourceStoredShape.IsEqual(shape->Shape())
 				|| sourceEntityIdentifier.empty()
@@ -5931,10 +6059,11 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				|| TransformDiffers(
 					myDoc->ObjectTransformForLabel(sourceLabel),
 					aTrsfSelected)
-				|| HasStyledMirrorSubshape(
-					aSourceDocument,
+				|| !CaptureMirrorFaceFinishes(
+					myDoc,
 					sourceLabel,
-					kMaxMirrorSourceTopologyNodes)
+					kMaxMirrorSourceTopologyNodes,
+					sourceFaceFinishes)
 				|| !CountBoundedMirrorTopology(
 					sourceStoredShape,
 					aPerSourceLimit,
@@ -5947,8 +6076,11 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			anAggregateTopologyNodes += sourceNodeCount;
             OcctObjectNameState profileOwner;
             pattern_recipe_clone::Source sweepLoft;
-            const bool savedCutCopiedPlain = retained_solid::HasRecord(sourceLabel)
-                && myDoc->CanBakeSavedCutForFaceEdit(sourceLabel);
+            const bool savedCutCopiedPlain = (retained_solid::HasRecord(sourceLabel)
+                    && myDoc->CanBakeSavedCutForFaceEdit(sourceLabel))
+                || (composite_recipe::HasRecord(sourceLabel)
+                    && (myDoc->CanBakeBooleanResultForFaceEdit(sourceLabel)
+                        || myDoc->CanCopySpatialSweepAsPlainSolid(sourceLabel)));
             if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)
                 || !pattern_recipe_clone::Capture(aSourceDocument, sourceLabel, sweepLoft,
                     savedCutCopiedPlain))
@@ -5958,6 +6090,13 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             const bool sourceHasTreatment = !originalProfile.label.IsNull()
                 && originalProfile.label.IsAttribute(
                     retained_edge_treatment::AttributeID());
+            // R13F-1: face looks are carried only onto the copy of a plain body,
+            // whose faces map one to one through the reflection. A painted part
+            // with a recipe of its own stays refused, as before.
+            if (!sourceFaceFinishes.empty()
+                && (!originalProfile.label.IsNull() || !originalEnclosure.label.IsNull()
+                    || sweepLoft.family != pattern_recipe_clone::Family::None))
+                return Standard_False;
             double documentMetersPerUnit = 0;
             bool documentLengthUnitPresent = false;
             if (!ReadMirrorDocumentUnits(aSourceDocument, documentMetersPerUnit,
@@ -6033,6 +6172,22 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         ? Standard_False : Standard_True,
 				    Standard_False);
                 TopoDS_Shape mirrored = aBRepTrsf.Shape();
+                // R13F-1: where each painted face lands in the reflected solid,
+                // by its place in the face order (the probe below may rebuild
+                // the solid from bytes; that keeps the order, as Duplicate's
+                // own round trip relies on).
+                TopTools_IndexedMapOfShape reflectedFaces;
+                std::vector<Standard_Integer> finishFaceIndices;
+                if (!sourceFaceFinishes.empty()) {
+                    if (!aBRepTrsf.IsDone() || mirrored.IsNull()) return Standard_False;
+                    TopExp::MapShapes(mirrored, TopAbs_FACE, reflectedFaces);
+                    for (const auto& finish : sourceFaceFinishes) {
+                        const Standard_Integer index = reflectedFaces.FindIndex(
+                            aBRepTrsf.ModifiedShape(finish.face));
+                        if (index <= 0) return Standard_False;
+                        finishFaceIndices.push_back(index);
+                    }
+                }
                 if (originalProfile.label.IsNull() && originalEnclosure.label.IsNull()
                     && sweepLoft.family == pattern_recipe_clone::Family::None) {
                     // Retain existing rotated Mirror behavior if the bounded
@@ -6041,8 +6196,26 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     (void)StabilizeOrdinaryMirrorResult(mirrored,
                         anAggregateLimit - anAggregateTopologyNodes);
                 }
-                aShapePrs = new AIS_Shape(mirrored);
+                if (sourceFaceFinishes.empty()) {
+                    aShapePrs = new AIS_Shape(mirrored);
+                } else {
+                    TopTools_IndexedMapOfShape finalFaces;
+                    TopExp::MapShapes(mirrored, TopAbs_FACE, finalFaces);
+                    if (finalFaces.Extent() != reflectedFaces.Extent()) return Standard_False;
+                    for (std::size_t index = 0; index < sourceFaceFinishes.size(); ++index) {
+                        const TopoDS_Shape& face = finalFaces(finishFaceIndices[index]);
+                        if (face.IsNull() || face.ShapeType() != TopAbs_FACE
+                            || face.IsPartner(sourceFaceFinishes[index].face)) return Standard_False;
+                        for (const auto& previous : resultFaceFinishes)
+                            if (previous.face.IsSame(face)) return Standard_False;
+                        resultFaceFinishes.push_back({face, sourceFaceFinishes[index].material});
+                    }
+                    // Faces are drawn in their own look only on a coloured shape.
+                    aShapePrs = new AIS_ColoredShape(mirrored);
+                }
             }
+            // A painted part reaches this point only as a plain body (no treatment).
+            if (resultFaceFinishes.size() != sourceFaceFinishes.size()) return Standard_False;
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
             std::shared_ptr<const retained_edge_treatment::Payload>
@@ -6182,6 +6355,16 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     && preparedSweepLoft.featureIdentifier
                         == previous.preparedSweepLoft.featureIdentifier) return Standard_False;
 			myDoc->LoadObjectMeterial(sourceLabel, aShapePrs);
+            if (!resultFaceFinishes.empty()) {
+                // The source's face looks name the source's faces. Show each
+                // colour on its reflected face; the tick writes the full look.
+                const Handle(AIS_ColoredShape) colored =
+                    Handle(AIS_ColoredShape)::DownCast(aShapePrs);
+                if (colored.IsNull()) return Standard_False;
+                colored->ClearCustomAspects();
+                for (const auto& finish : resultFaceFinishes)
+                    colored->SetCustomColor(finish.face, finish.material.BaseColor.GetRGB());
+            }
 			replacementObjects.push_back(aShapePrs);
 			replacementSources.push_back({
 				shape,
@@ -6209,6 +6392,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 sweepLoft,
                 preparedSweepLoft,
 			});
+            replacementSources.back().sourceFaceFinishes = std::move(sourceFaceFinishes);
+            replacementSources.back().resultFaceFinishes = std::move(resultFaceFinishes);
 		}
 		std::vector<OcctGeometryDuplicationRequest> aSourceLabels;
 		aSourceLabels.reserve(replacementSources.size());
@@ -6216,7 +6401,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
-                                        true, true, false, false, aSource.sweepLoft.plainSavedCutCopy});
+                                        true, true, false, !aSource.sourceFaceFinishes.empty(),
+                                        aSource.sweepLoft.plainSavedCutCopy});
 		}
 		if (!myDoc->CanDuplicateGeometryDefinitions(aSourceLabels)) {
 			return Standard_False;
@@ -7544,10 +7730,11 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 					|| TransformDiffers(
 						myDoc->ObjectTransformForLabel(aSource.label),
 						aSource.transform)
-					|| HasStyledMirrorSubshape(
-						aDocument,
+					|| !MirrorFaceFinishesAreCurrent(
+						myDoc,
 						aSource.label,
-						kMaxMirrorSourceTopologyNodes)
+						kMaxMirrorSourceTopologyNodes,
+						aSource.sourceFaceFinishes)
 					|| !myDoc->ShapeLabel(aSource.presentation).IsEqual(
 						aSource.label)
 					|| !myDoc->IsPresentationEditable(aSource.presentation)
@@ -7897,7 +8084,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
-                                        true, true, false, false, aSource.sweepLoft.plainSavedCutCopy});
+                                        true, true, false, !aSource.sourceFaceFinishes.empty(),
+                                        aSource.sweepLoft.plainSavedCutCopy});
 			}
 		} catch (...) {
 			return MirrorApplyResult::NoChange;
@@ -8006,6 +8194,34 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 						aStoredReferenceAxis,
 						aPending.expectedReferenceAxis)) {
 					return retainRetryableOrUnknown();
+                }
+                // R13F-1: the copy's faces take the source's face looks inside
+                // this same command, so one Undo removes the copy with them.
+                if (!aSource.resultFaceFinishes.empty()) {
+                    const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDocument->Main());
+                    if (shapeTool.IsNull()) return retainRetryableOrUnknown();
+                    // Never let AddSubShape reuse the placement children (1...8)
+                    // or a record tag: the same reservation CarryFaceColours makes.
+                    const Handle(TDF_TagSource) tags = TDF_TagSource::Set(aLabel);
+                    if (tags.IsNull()) return retainRetryableOrUnknown();
+                    Standard_Integer highWater = std::max<Standard_Integer>(12, tags->Get());
+                    for (TDF_ChildIterator child(aLabel, Standard_False); child.More(); child.Next())
+                        highWater = std::max<Standard_Integer>(highWater, child.Value().Tag());
+                    tags->Set(highWater);
+                    std::vector<OcctPBRMaterialUpdate> faceUpdates;
+                    for (const auto& finish : aSource.resultFaceFinishes) {
+                        const TDF_Label faceLabel = shapeTool->AddSubShape(aLabel, finish.face);
+                        if (faceLabel.IsNull()
+                            || !XCAFDoc_ShapeTool::GetShape(faceLabel).IsEqual(finish.face))
+                            return retainRetryableOrUnknown();
+                        faceUpdates.push_back({faceLabel, finish.material});
+                    }
+                    std::vector<LinearArrayFaceFinish> storedFinishes;
+                    if (!myDoc->SaveObjectPBRMaterials(faceUpdates)
+                        || !CaptureDuplicateFaceFinishes(myDoc, aLabel,
+                            kMaxMirrorSourceTopologyNodes, storedFinishes)
+                        || !DuplicateFaceFinishesMatch(aSource.resultFaceFinishes, storedFinishes))
+                        return retainRetryableOrUnknown();
                 }
                 profile::Record candidateProfile;
                 auto stageAuthority = aSource.profileOwner.object.profile;
