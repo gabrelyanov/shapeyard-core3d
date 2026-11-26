@@ -4197,6 +4197,19 @@ bool Context::reconcileRecovery(bool exactStateKnown) noexcept {
     return true;
 }
 
+bool Context::settleRecoveryByDocumentRedraw() noexcept {
+    try {
+        const auto state = state_.lock();
+        if (!state || state->owner == nullptr
+            || state->contexts.count(identifier_) != 1) return false;
+        const auto document = openingFence_.document();
+        const auto owner = state->owner->getDocument();
+        if (document.IsNull() || owner.IsNull() || owner->Document() != document
+            || document->GetData() != openingFence_.data()) return false;
+        return state->owner->settleNativeOpeningFenceByDocumentRedraw(identifier_);
+    } catch (...) { return false; }
+}
+
 bool Context::publishCommittedEdit(
     const CommittedEditPublication& publication) noexcept {
     const auto state = state_.lock();
@@ -5027,6 +5040,58 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
         const auto snapshot = captureSceneSnapshot(64, 64);
         return !traceRefusal("snapshot-proof",
             !snapshot || snapshot->publicationSourceIdentifier.empty());
+    } catch (...) { return false; }
+}
+
+// R13P-4 (see Core3DViewer.h). Fail closed: every refusal returns false with
+// the fence slots exactly as they were.
+bool Core3DViewer::settleNativeOpeningFenceByDocumentRedraw(
+    const std::uint64_t ownerContext) noexcept {
+    if (![NSThread isMainThread] || !_nativeOpeningState) return false;
+    try {
+        OCC_CATCH_SIGNALS
+        const auto state = _nativeOpeningState;
+        if (state->owner != this || state->activeMarker != 0
+            || state->loftRollbackUnproven
+            || (state->recoveryMarker == 0 && !state->pendingPublication
+                && state->activeContext == 0)) return false;
+        // One issuer holds every armed slot, and it is the one named (or, for
+        // 0, one that no longer exists and so can never settle its own fence).
+        std::uint64_t holder = 0;
+        const std::uint64_t slots[3] = {state->activeContext,
+            state->recoveryContext, state->publicationContext};
+        for (const std::uint64_t slot : slots) {
+            if (slot == 0) continue;
+            if (holder != 0 && holder != slot) return false;
+            holder = slot;
+        }
+        if (holder == 0
+            || (ownerContext != 0 ? holder != ownerContext
+                                  : state->contexts.count(holder) != 0)) return false;
+        // An unsettled document (open command, unfinished history companion,
+        // another tool's own recovery) is never drawn over: the fence stays.
+        if (myDoc.IsNull() || myContext.IsNull() || hasUnresolvedEdit()) return false;
+        const Handle(TDocStd_Document) document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        {
+            // Drawing must not change a stored byte: meshing a face can clear
+            // its Checked bit, which is part of the saved BRep stream.
+            const core3d::CommittedFaceCheckedBits keepFaceBits(document);
+            if (_objectInteractor != nullptr) _objectInteractor->detachManipulator(false);
+            myContext->ClearDetected(Standard_False);
+            myContext->ClearSelected(Standard_False);
+            if (!redrawDocument()) return false;
+        }
+        const auto snapshot = captureSceneSnapshot(64, 64);
+        if (!snapshot || snapshot->publicationSourceIdentifier.empty()
+            || _nativeOpeningState != state || myDoc.IsNull()
+            || myDoc->Document() != document || document->HasOpenCommand()) return false;
+        state->pendingPublication.reset();
+        state->publicationContext = 0;
+        state->recoveryMarker = 0;
+        state->recoveryContext = 0;
+        state->activeContext = 0;
+        return true;
     } catch (...) { return false; }
 }
 

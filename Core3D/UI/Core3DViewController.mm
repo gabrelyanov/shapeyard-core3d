@@ -6503,13 +6503,30 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     // authority. Multiselection keeps the unchanged legacy batch path below.
     auto selectedContext=GLController.viewer->AisContext();
     bool preserveLegacyStamping=false;
+    // R15F-4 (round 15, 25 Nov; the row R11P-6 left open): a PBR look for the whole part is the
+    // whole part's look, as the swatch and the preset tile are since R11P-6. A picked part that
+    // draws at least one face in its own look takes the ordinary batch route below, where those
+    // looks are replaced inside the same command; the prepared route writes the part's own look
+    // only and checks that no face changed, so the painted faces stayed as they were. A selection
+    // with no such face goes exactly as before.
+    bool selectionHasFaceLooks=false;
+    if(!selectedContext.IsNull()){
+        const auto looksDoc=GLController.viewer->getDocument();
+        for(selectedContext->InitSelected();!looksDoc.IsNull()&&!selectionHasFaceLooks&&selectedContext->MoreSelected();selectedContext->NextSelected()){
+            const TDF_Label looksLabel=looksDoc->ShapeLabel(selectedContext->SelectedInteractive());
+            std::vector<TDF_Label> faceLabels;
+            std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> faceLooks;
+            selectionHasFaceLooks=!looksLabel.IsNull()
+                &&looksDoc->CaptureFaceColours(looksLabel,1.0,faceLabels,faceLooks)&&!faceLooks.empty();
+        }
+    }
     if(!selectedContext.IsNull()&&selectedContext->NbSelected()==1){
         selectedContext->InitSelected();const auto doc=GLController.viewer->getDocument();
         if(!doc.IsNull())preserveLegacyStamping=doc->StoredGeometryRepresentationForLabel(doc->ShapeLabel(selectedContext->SelectedInteractive()))==OcctGeometryRepresentation::LegacyUnknown;
     }
     // The existing legacy-touch contract stamps BRep inside its ordinary color
     // command. Choose that contract before any prepared admission, never as a retry.
-    if(!selectedContext.IsNull()&&selectedContext->NbSelected()==1&&!preserveLegacyStamping){
+    if(!selectedContext.IsNull()&&selectedContext->NbSelected()==1&&!preserveLegacyStamping&&!selectionHasFaceLooks){
         CGFloat r=0,g=0,b=0,a=0;
         if(![material.baseColor getRed:&r green:&g blue:&b alpha:&a]||!std::isfinite(r)||!std::isfinite(g)||!std::isfinite(b)
             ||!std::isfinite(a)||a<0||a>1)return;
@@ -6534,6 +6551,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         XCAFDoc_VisMaterialPBR material;
         Handle(Image_Texture) prevalidatedBaseColorTexture;
         Handle(Image_Texture) prevalidatedEmissiveTexture;
+        bool replacesFaceLooks = false;
     };
     std::vector<PendingPBRStyle> pendingStyles;
     std::unordered_set<std::string> validatedTextureIdentifiers;
@@ -6590,9 +6608,16 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
             }
             validatedEmissiveTexture = nativeMaterial.EmissiveTexture;
         }
+        // The same question the swatch route and the drawing ask: a face label of this
+        // part with its own PBR look.
+        std::vector<TDF_Label> ownFaceLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> ownFaceLooks;
+        const bool replacesFaceLooks =
+            doc->CaptureFaceColours(label, 1.0, ownFaceLabels, ownFaceLooks)
+            && !ownFaceLooks.empty();
         pendingStyles.push_back({
             shape, label, nativeMaterial, validatedBaseColorTexture,
-            validatedEmissiveTexture});
+            validatedEmissiveTexture, replacesFaceLooks});
     }
     if (pendingStyles.empty()) {
         return;
@@ -6602,6 +6627,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         transaction->NewCommand();
         if (!transaction->HasOpenCommand()) {
             return;
+        }
+        // A part whose face looks cannot be replaced (the refusal comes before any look
+        // is changed) still takes its own look, as before: never "nothing at all".
+        for (PendingPBRStyle& style : pendingStyles) {
+            if (style.replacesFaceLooks
+                && !doc->ClearPartSubshapeAppearance(style.label)) {
+                style.replacesFaceLooks = false;
+            }
         }
         std::vector<OcctPBRMaterialUpdate> materialUpdates;
         materialUpdates.reserve(pendingStyles.size());
@@ -6627,8 +6660,22 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 
     doc->NotifyChanges();
     for (const PendingPBRStyle& style : pendingStyles) {
+        if (style.replacesFaceLooks) {
+            // As the swatch route does: the drawing drops the looks its faces held.
+            const auto colored = Handle(AIS_ColoredShape)::DownCast(style.shape);
+            if (!colored.IsNull()) {
+                for (AIS_DataMapOfShapeDrawer::Iterator entry(colored->CustomAspectsMap()); entry.More(); entry.Next()) {
+                    const auto& drawer = entry.Value();
+                    if (drawer.IsNull()) continue;
+                    drawer->UnsetOwnMaterial();
+                    drawer->UnsetOwnColor();
+                    drawer->SetShadingAspect(Handle(Prs3d_ShadingAspect)());
+                }
+            }
+        }
         style.shape->UnsetColor();
         doc->LoadObjectMeterial(style.label, style.shape);
+        if (style.replacesFaceLooks) context->Redisplay(style.shape, Standard_False);
     }
 
     NSMutableArray<Core3DPBRMaterial*>* selectedPBR =
@@ -13098,6 +13145,26 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         [result addObject:row];
     }
     return result;
+}
+
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGestureHeld:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values {
+    if (![NSThread isMainThread] || GLController.viewer == nullptr) { return nil; }
+    // The replay sets the tool first; set it here too so the flag reaches the interactor it uses.
+    [self setGizmoType:mode >= 2 ? PrimitiveGizmoTypeScale : PrimitiveGizmoTypeMoveRotate];
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr) { return nil; }
+    interactor->debugSetReplayLeavesGestureHeld(true);
+    NSArray<NSDictionary<NSString *, NSNumber *> *> *samples =
+        [self debugReplayGesture:mode axis:axis values:values cancel:NO];
+    interactor->debugSetReplayLeavesGestureHeld(false);
+    return samples;
+}
+
+- (BOOL)debugCancelRawTouchOfHeldGesture {
+    return [NSThread isMainThread] && GLController != nil
+        && [GLController debugResolveCancelledRawTouch];
 }
 
 - (NSNumber *_Nullable)debugDocumentMetersPerUnit {

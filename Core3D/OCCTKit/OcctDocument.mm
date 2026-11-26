@@ -13005,6 +13005,24 @@ Standard_Boolean OcctDocument::ForgetBooleanResultRecordForExport(const TDF_Labe
     } catch (...) { return Standard_False; }
 }
 
+Standard_Boolean OcctDocument::ForgetRecipeRecordForScaledExport(const TDF_Label& label) noexcept {
+    try {
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand() || label.IsNull())
+            return Standard_False;
+        core3d::composite_recipe::Record composite;
+        core3d::sweep_persistence::Record sweep;
+        if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep))
+            return Standard_False;
+        if (composite.label.IsNull() && sweep.label.IsNull())
+            return Standard_True;
+        if (!composite.label.IsNull()) composite.label.ForgetAllAttributes(Standard_True);
+        if (!sweep.label.IsNull()) sweep.label.ForgetAllAttributes(Standard_True);
+        ForgetInspectorPrimitiveRecord(label);
+        return RetainedRecipeCoverageForLabel(label) == OcctRetainedRecipeCoverage::Absent;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) const noexcept {
     try {
         if (myOcafDoc.IsNull() || label.IsNull()
@@ -13487,6 +13505,30 @@ Standard_Boolean OcctDocument::JoinFaceLooks(const TDF_Label& target,
             look = XCAFDoc_VisMaterialPBR();
             look.BaseColor = Quantity_ColorRGBA(shape->Attributes()->ShadingAspect()->Color());
             look.Metallic = 0.0f; look.Roughness = 0.5f; look.IsDefined = Standard_True;
+            // R15F-2 (round 15, 25 Nov): a Material preset is kept on the part as a material
+            // NUMBER (child 11), not as PBR numbers, so the line above turned a Chrome part into
+            // its colour with Metallic 0 / Roughness 0.5: grey plastic on screen and in OBJ, USDZ
+            // and FBX. A metal preset keeps the two numbers the scene and the exports already read
+            // for the unjoined part (OcctSceneSnapshotBuilder ApplyPreset, BridgeMetalPresetMaterials;
+            // the same "metal" test as the latter). Colour, opacity and glow stay as before; every
+            // other part, the default plastic included, gets exactly the look it got before.
+            try {
+                Graphic3d_NameOfMaterial preset = Graphic3d_NameOfMaterial_DEFAULT;
+                if (TryMaterialNameForLabel(label, preset)
+                    && preset >= Graphic3d_NameOfMaterial_Brass
+                    && preset <= Graphic3d_NameOfMaterial_Transparent) {
+                    const Graphic3d_MaterialAspect aspect(preset);
+                    const Standard_ShortReal metallic = aspect.PBRMaterial().Metallic();
+                    const Standard_ShortReal roughness = aspect.PBRMaterial().NormalizedRoughness();
+                    if (aspect.MaterialType(Graphic3d_MATERIAL_PHYSIC)
+                        && metallic > 0.5f && metallic <= 1.0f
+                        && roughness >= 0.0f && roughness <= 1.0f) {
+                        look.Metallic = metallic; look.Roughness = roughness;
+                    }
+                }
+            } catch (...) {
+                look.Metallic = 0.0f; look.Roughness = 0.5f;
+            }
             return true;
         };
         const auto same = [](const XCAFDoc_VisMaterialPBR& a, const XCAFDoc_VisMaterialPBR& b) {
@@ -17945,6 +17987,47 @@ Standard_Boolean OcctDocument::PrepareBooleanResultForFaceEdit(
     }
 }
 
+Standard_Boolean OcctDocument::CanCopySpatialSweepAsPlainSolid(
+    const TDF_Label& label) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        // The same owner rules as CanBakeBooleanResultForFaceEdit: a free,
+        // editable part with no dependent, no saved Hole and no edge treatment.
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()
+            || myOcafDoc->HasOpenCommand()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)
+            || core3d::retained_solid::HasRecord(label)
+            || label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            || !core3d::composite_recipe::HasRecord(label))
+            return Standard_False;
+        // Only the Tube's record may be present: a Profile, enclosure, sweep
+        // or loft keeps its own copy contract.
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;
+        core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(myOcafDoc, label, profile) || !profile.label.IsNull()
+            || !core3d::enclosure::Read(myOcafDoc, label, enclosure) || !enclosure.label.IsNull()
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep) || !sweep.label.IsNull()
+            || !core3d::loft_persistence::Read(myOcafDoc, label, loft) || !loft.label.IsNull())
+            return Standard_False;
+        // The engine's own reading of a Tube record: exactly one Path source
+        // and one circle-sweep feature, canonical bytes, current units, bound
+        // to the part's stored solid (composite_recipe::Read requires that).
+        const core3d::composite_recipe::spatial_g0::CaptureResult captured =
+            core3d::composite_recipe::spatial_g0::Capture(myOcafDoc, label);
+        return captured.admitted()
+            && captured.fence.ownerLabel.IsEqual(label)
+            && !captured.fence.recordLabel.IsNull()
+            && !captured.fence.recordLabel.IsAttribute(
+                core3d::retained_edge_treatment::AttributeID());
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
     const std::vector<OcctGeometryDuplicationRequest>& requests) const
 {
@@ -18018,7 +18101,9 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                 && ((core3d::retained_solid::HasRecord(source)
                         && CanBakeSavedCutForFaceEdit(source))
                     || (core3d::composite_recipe::HasRecord(source)
-                        && CanBakeBooleanResultForFaceEdit(source)));
+                        && (CanBakeBooleanResultForFaceEdit(source)
+                            // R14F-3: a Tube made along a Path is copied plain too.
+                            || CanCopySpatialSweepAsPlainSolid(source))));
             if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe,
                     plainSavedCutCopy)
                 || ((sourceRecipe.family == core3d::pattern_recipe_clone::Family::Sweep
