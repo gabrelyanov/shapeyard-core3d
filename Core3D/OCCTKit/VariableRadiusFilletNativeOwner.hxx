@@ -466,9 +466,15 @@ inline Result Apply(OcctDocument& document, Prepared& prepared,
 #endif
         if (!published) {
             prepared.context->retainUnprovenEdit(prepared.publication);
-            result.outcome = Outcome::OutcomeUnknown;
-            result.blocksOtherWork = !SettleArmedFence(prepared, result.settledByRedraw);
-            return result;
+            if (!SettleArmedFence(prepared, result.settledByRedraw)) {
+                result.outcome = Outcome::OutcomeUnknown;
+                result.blocksOtherWork = true;
+                return result;
+            }
+            // R13P-4 (b): the commit was read back exactly above (owner bytes,
+            // dependents, history) and the whole document is now drawn from
+            // it and proven by a snapshot. That is a published commit: only
+            // the part-by-part redraw was refused, not the edit.
         }
         result.outcome = result.measuredHistoryDelta == 1
             ? Outcome::Committed : Outcome::RecoveryRequired;
