@@ -2883,6 +2883,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if (carriesFaceColours && record.requested.faceColourMap)
                 paintedFaces = _document->ResizedFaceColours(record.requested.shape,
                     *record.requested.faceColourMap, paintedFaces);
+            if (carriesFaceColours) ledger.faceLooksCarried = true; // M14-1, read only for a committed candidate
             // A joined or cut part keeps the recipe of the two parts it was made of; a new size
             // makes it a plain part of that size, in this same step (Undo brings the recipe back).
             // Before, the recipe still named the old shape and the next save was refused: lost work
@@ -3337,7 +3338,14 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
 #endif // Cut475 phase diagnostics only
         _committed = candidate;
         _state = OrdinaryEditState::RepairPending;
-        if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)) {
+        // M14-1: a part's drawing is given its face colours once, when it is made from the
+        // document; setting a rebuilt shape on it in place leaves those colours bound to the
+        // faces that are gone, so every face shows the part's own colour until the next
+        // redraw (seen after a one-axis Scale handle). When this command carried face colours
+        // onto a rebuilt shape, take the redraw below after the ordinary repair has retired
+        // the gesture, as Bevel, Hole and Undo redraw the document.
+        if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)
+            || (candidate && ledger.faceLooksCarried)) {
             std::vector<Handle(AIS_Shape)> replacements;
             if (!_host.rebuildTransform(ledger, candidate, replacements)
                 || replacements.size() != ledger.records.size()) { return OrdinaryEditResult::OutcomeUnknown; }
