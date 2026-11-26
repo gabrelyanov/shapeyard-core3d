@@ -13005,6 +13005,24 @@ Standard_Boolean OcctDocument::ForgetBooleanResultRecordForExport(const TDF_Labe
     } catch (...) { return Standard_False; }
 }
 
+Standard_Boolean OcctDocument::ForgetRecipeRecordForScaledExport(const TDF_Label& label) noexcept {
+    try {
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand() || label.IsNull())
+            return Standard_False;
+        core3d::composite_recipe::Record composite;
+        core3d::sweep_persistence::Record sweep;
+        if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep))
+            return Standard_False;
+        if (composite.label.IsNull() && sweep.label.IsNull())
+            return Standard_True;
+        if (!composite.label.IsNull()) composite.label.ForgetAllAttributes(Standard_True);
+        if (!sweep.label.IsNull()) sweep.label.ForgetAllAttributes(Standard_True);
+        ForgetInspectorPrimitiveRecord(label);
+        return RetainedRecipeCoverageForLabel(label) == OcctRetainedRecipeCoverage::Absent;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) const noexcept {
     try {
         if (myOcafDoc.IsNull() || label.IsNull()
