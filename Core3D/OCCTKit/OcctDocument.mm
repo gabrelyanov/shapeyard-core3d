@@ -17945,6 +17945,47 @@ Standard_Boolean OcctDocument::PrepareBooleanResultForFaceEdit(
     }
 }
 
+Standard_Boolean OcctDocument::CanCopySpatialSweepAsPlainSolid(
+    const TDF_Label& label) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        // The same owner rules as CanBakeBooleanResultForFaceEdit: a free,
+        // editable part with no dependent, no saved Hole and no edge treatment.
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()
+            || myOcafDoc->HasOpenCommand()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)
+            || core3d::retained_solid::HasRecord(label)
+            || label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            || !core3d::composite_recipe::HasRecord(label))
+            return Standard_False;
+        // Only the Tube's record may be present: a Profile, enclosure, sweep
+        // or loft keeps its own copy contract.
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;
+        core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(myOcafDoc, label, profile) || !profile.label.IsNull()
+            || !core3d::enclosure::Read(myOcafDoc, label, enclosure) || !enclosure.label.IsNull()
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep) || !sweep.label.IsNull()
+            || !core3d::loft_persistence::Read(myOcafDoc, label, loft) || !loft.label.IsNull())
+            return Standard_False;
+        // The engine's own reading of a Tube record: exactly one Path source
+        // and one circle-sweep feature, canonical bytes, current units, bound
+        // to the part's stored solid (composite_recipe::Read requires that).
+        const core3d::composite_recipe::spatial_g0::CaptureResult captured =
+            core3d::composite_recipe::spatial_g0::Capture(myOcafDoc, label);
+        return captured.admitted()
+            && captured.fence.ownerLabel.IsEqual(label)
+            && !captured.fence.recordLabel.IsNull()
+            && !captured.fence.recordLabel.IsAttribute(
+                core3d::retained_edge_treatment::AttributeID());
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
     const std::vector<OcctGeometryDuplicationRequest>& requests) const
 {
@@ -18018,7 +18059,9 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                 && ((core3d::retained_solid::HasRecord(source)
                         && CanBakeSavedCutForFaceEdit(source))
                     || (core3d::composite_recipe::HasRecord(source)
-                        && CanBakeBooleanResultForFaceEdit(source)));
+                        && (CanBakeBooleanResultForFaceEdit(source)
+                            // R14F-3: a Tube made along a Path is copied plain too.
+                            || CanCopySpatialSweepAsPlainSolid(source))));
             if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe,
                     plainSavedCutCopy)
                 || ((sourceRecipe.family == core3d::pattern_recipe_clone::Family::Sweep
