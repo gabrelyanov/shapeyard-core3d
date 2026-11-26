@@ -1234,6 +1234,16 @@ namespace core3d {
         bool reconcileNativeOpeningEdit(
             const native_opening::Fence& fence,
             const native_opening::CommittedEditPublication& publication) noexcept;
+        //! R13P-4: last-resort settlement of the shared native-opening fence
+        //! after a committed edit whose part-by-part publication could not be
+        //! proven. Draws the whole document again from OCAF (the path Undo,
+        //! Redo and project open use) and requires an ordinary scene snapshot;
+        //! only then are the fence slots cleared. Runs no OCAF command, keeps
+        //! every stored byte, and leaves the fence exactly as it was on any
+        //! refusal. `ownerContext` names the issuer that must hold the fence;
+        //! 0 settles only a fence whose issuer no longer exists.
+        bool settleNativeOpeningFenceByDocumentRedraw(
+            std::uint64_t ownerContext) noexcept;
         // document traversal
         bool traverseDocument (const Handle(TDocStd_Document)& theDoc);
         bool traverseLabel (const Handle(TDocStd_Document)& theDoc,

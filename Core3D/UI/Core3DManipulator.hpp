@@ -12,6 +12,7 @@
 #include <AIS_ManipulatorMode.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
+#include <gp_GTrsf.hxx>
 #include <gp_Pnt.hxx>
 #include <Graphic3d_ArrayOfTriangles.hxx>
 #include <Graphic3d_Group.hxx>
@@ -415,6 +416,11 @@ public: //! @name Presentation computation
                                                       const Handle(SelectMgr_EntityOwner)& theOwner) Standard_OVERRIDE;
 	
 	const std::map<Handle(AIS_InteractiveObject), TopoDS_Shape>& cachedShapes() const { return mySourceShapes; }
+	//! M14-1. For each attached object whose shape the running one-axis Scale drag has rebuilt:
+	//! how its cached source shape maps onto the shape now shown (the same general transform
+	//! the preview was built with). Empty before a drag, after a drag came back to its start,
+	//! and whenever the cached shapes are refreshed.
+	const std::map<Handle(AIS_InteractiveObject), gp_GTrsf>& axisScaleMaps() const { return myAxisScaleMaps; }
 
 protected:
 
@@ -868,6 +874,7 @@ protected:
   Standard_Real myOldScaleFactor;
   Standard_Integer myOldIndexScale;
   std::map<Handle(AIS_InteractiveObject), TopoDS_Shape> mySourceShapes;
+  std::map<Handle(AIS_InteractiveObject), gp_GTrsf> myAxisScaleMaps; //!< M14-1, see axisScaleMaps().
 
 protected: //! @name Fields for interactive transformation. Fields only for internal needs. They do not have public interface.
 
