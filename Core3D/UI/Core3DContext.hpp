@@ -48,9 +48,6 @@ public:
     //! edge-on that the exact ray does not meet before the next face that
     //! faces the camera, so the walk goes past it.
     Standard_EXPORT bool IsEdgeOnHitPassedBy(const Handle(V3d_View)& view, Standard_Integer rank);
-    //! Starts one tap for IsEdgeOnHitPassedBy: a fresh face budget (4,096 in
-    //! all) and no kept answers. Call once after the Pick, before the walk.
-    Standard_EXPORT void BeginEdgeOnTap() noexcept;
 #ifdef DEBUG
     //! Deterministic test-only preselection publication. Production hover
     //! continues to be owned exclusively by AIS_InteractiveContext::MoveTo().
