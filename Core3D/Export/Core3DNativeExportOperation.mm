@@ -28,7 +28,6 @@
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepTools_ShapeSet.hxx>
-#include <TopoDS_Iterator.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #endif
@@ -70,6 +69,7 @@
 #include <TopAbs_Orientation.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS.hxx>
 #include <UnitsMethods.hxx>
 #include <UnitsMethods_LengthUnit.hxx>
@@ -1378,9 +1378,10 @@ bool ApplyPrivateExportTransforms(
             // A joined / cut part keeps its original pieces under a record that
             // only matches the unscaled result: this private copy needs geometry
             // only, so it becomes a plain part first (Astra 11 Nov 12:22: a Join
-            // on a ring scaled to 0.8 could never export).
-            if (document->IsBooleanResultLabel(root)
-                && !document->ForgetBooleanResultRecordForExport(root)) { return false; }
+            // on a ring scaled to 0.8 could never export). The same holds for a
+            // Sweep, a Tube and a planar Sweep (R16F-51: a Sweep resized by
+            // Uniform scale stopped every export with "Export isn't ready").
+            if (!document->ForgetRecipeRecordForScaledExport(root)) { return false; }
             const TopoDS_Shape original = shapeTool->GetShape(root);
             if (original.IsNull()) { return false; }
             const auto budgetCopiedMesh = [&](const TopoDS_Shape& shape) {
