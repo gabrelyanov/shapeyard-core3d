@@ -240,6 +240,10 @@ struct OrdinaryTransformChange {
     std::shared_ptr<const profile_d4::CurrentCapture> profileD4Capture;
     std::shared_ptr<const profile_d4::PreparedHostEdit> profileD4Result;
     std::optional<enclosure::Parameters> enclosureRebuild;
+    // Case sheet only (R10P-S5): this EnclosureRebuild also carries the one move that keeps the Case
+    // where the person put it (enclosure::SheetEditShift). Admission works the move out again from the
+    // stored recipe and refuses any other placement; without the flag the placement must not change.
+    bool enclosureKeepsMiddle = false;
     std::optional<planar_sweep::Definition> sweepRebuild;
     std::optional<rectangular_loft::Definition> loftRebuild;
     std::optional<rectangular_loft::StationDimensionEdit> loftStationEdit;

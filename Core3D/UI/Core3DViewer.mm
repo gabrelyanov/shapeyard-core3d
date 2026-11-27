@@ -10075,7 +10075,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCompleteProfileRebuild(
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
     const enclosure::Parameters& parameters, const StoredEnclosureSnapshot& original,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
-    std::uint32_t width, std::uint32_t height) noexcept {
+    std::uint32_t width, std::uint32_t height, bool keepMiddle) noexcept {
     if (!original.current || identity.entityIdentifier != original.identity.entityIdentifier
         || identity.publicationSourceIdentifier != original.identity.publicationSourceIdentifier
         || identity.documentGeneration != original.identity.documentGeneration
@@ -10116,6 +10116,23 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
         }
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
+        // Round 10 R10P-S5: the Case is built from its corner, so a typed Width or Depth kept the corner and
+        // the part slid (Depth 34 -> 30 moved the middle 2 mm). When the caller asks for it (the person's
+        // Case sheet), Width and Depth keep the middle, Height keeps the bottom, and a Case standing on the
+        // floor keeps the floor (enclosure::SheetEditShift). Every other caller keeps the placement, as the
+        // bridge header promises. A bevelled Case (paired treatment) keeps today's placement: its paired
+        // staging does not write a placement.
+        // A current Case always carries a treatment capture; only a real Round or Bevel has a definition.
+        record.requested.enclosureKeepsMiddle = keepMiddle;
+        if (keepMiddle && !(original.edgeTreatment && original.edgeTreatment->definition_)) {
+            // The ordinary admission works the same move out again from the stored recipe and refuses any other.
+            gp_Vec shift;
+            if (!enclosure::SheetEditShift(original.parameters, parameters, record.previous.transform, shift)) return {};
+            if (shift.SquareMagnitude() > 0) {
+                gp_Trsf move; move.SetTranslation(shift);
+                record.requested.transform = record.previous.transform.Multiplied(move);
+            }
+        }
         record.requested.operation = OrdinaryTransformOperation::EnclosureRebuild;
         record.requested.enclosureRebuild = parameters;
         work->rebuildAuthority.emplace();
