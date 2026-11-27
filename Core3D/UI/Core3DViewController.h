@@ -1784,6 +1784,14 @@ typedef NS_ENUM(NSInteger, Core3DImportRefusal) { Core3DImportRefusalOpenSurface
 //! surface has a gap, so the app can say why they are not solids. 0 when nothing was added.
 - (NSInteger)insertSolidPartsFromImportedDocumentAtURL:(NSURL *)url partsWithGaps:(nullable NSInteger *)partsWithGaps
     NS_SWIFT_NAME(insertSolidParts(fromImportedDocumentAt:partsWithGaps:));
+//! CTO 27 Nov 04:10 item (1): as above, but the file is read and its closed parts are made solid on a
+//! background queue, so a large STL or OBJ does not freeze the editor (19200 triangles held the main thread
+//! 2.94 s on iPad). The parts are then added on the main thread as one creation (one Undo). `completion` is
+//! called once, always later on the main queue, with how many parts were added (0: the model is unchanged)
+//! and how many of them stayed meshes because their surface has a gap.
+- (void)insertSolidPartsOffTheMainThreadFromImportedDocumentAtURL:(NSURL *)url
+                                                       completion:(void (^)(NSInteger inserted, NSInteger partsWithGaps))completion
+    NS_SWIFT_NAME(insertSolidPartsOffTheMainThread(fromImportedDocumentAt:completion:));
 
 #ifdef DEBUG
 //! Re-run the production selection callback without changing AIS owners.

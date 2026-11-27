@@ -248,6 +248,9 @@ namespace core3d {
     struct QueuedAssetLoadWork;
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
+    //! CTO 27 Nov 04:10 item (1): the parts of an import document read and (for STL/OBJ) made solid, off the
+    //! main thread; published on the main thread by Core3DViewer::publishPreparedImport (Core3DViewer.mm).
+    struct PreparedImportedDocument;
     enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps, CenterGround, GroupBaseOrigin };
 
     class Core3DViewer: public OcctViewer, private OrdinaryEditPresentationHost {
@@ -975,6 +978,18 @@ namespace core3d {
         //! (CTO 27 Nov 04:10; until then it refused the whole file). *partsWithGaps is set only on Committed.
         OrdinaryEditResult insertPartsFromImportedDocument(const std::string& path, int& inserted,
             bool solidify = false, int* partsWithGaps = nullptr) noexcept;
+        //! CTO 27 Nov 04:10 item (1): insertPartsFromImportedDocument in two halves, so a large STL or OBJ does
+        //! not hold the main thread while its parts are made solid (2.94 s for 19200 triangles on iPad).
+        //! prepareImportedDocument touches no viewer state and may run on any thread: it opens the document
+        //! privately, makes every closed triangle part solid (with `solidify`) and scales the parts from the
+        //! document's unit to `targetMeters` (importTargetLengthMeters(), read on the main thread first).
+        //! nullptr when the document cannot be read. publishPreparedImport (main thread) adds the parts as one
+        //! creation (one Undo), with the same "as before Job 4" fallback; *partsWithGaps only on Committed.
+        static std::shared_ptr<const PreparedImportedDocument> prepareImportedDocument(const std::string& path,
+            double targetMeters, bool solidify) noexcept;
+        double importTargetLengthMeters() const noexcept;
+        OrdinaryEditResult publishPreparedImport(const std::shared_ptr<const PreparedImportedDocument>& prepared,
+            int& inserted, int* partsWithGaps = nullptr) noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
         //! Change projection while retaining target, direction and apparent

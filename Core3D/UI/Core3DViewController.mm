@@ -5640,6 +5640,42 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return inserted;
 }
 
+// CTO 27 Nov 04:10 item (1): the slow half (reading the document and making closed parts solid) runs on a
+// background queue with no viewer state; the parts are added on the main thread as one creation.
+- (NSInteger)core3d_publishPreparedImport:(const std::shared_ptr<const core3d::PreparedImportedDocument> &)prepared
+                            partsWithGaps:(NSInteger *)partsWithGaps {
+    if (partsWithGaps) *partsWithGaps = 0;
+    if (!NSThread.isMainThread || !prepared || !GLController.viewer) return 0;
+    int inserted = 0, gaps = 0;
+    const auto result = GLController.viewer->publishPreparedImport(prepared, inserted, &gaps);
+    if (result != core3d::OrdinaryEditResult::Committed || inserted <= 0) return 0;
+    if (partsWithGaps) *partsWithGaps = gaps;
+    [self sendNotifyUIState:UIStateChangingHistory];
+    return inserted;
+}
+
+- (void)insertSolidPartsOffTheMainThreadFromImportedDocumentAtURL:(NSURL *)url
+                                                       completion:(void (^)(NSInteger, NSInteger))completion {
+    if (!completion) return;
+    if (!NSThread.isMainThread || !url.isFileURL || !url.path.UTF8String || !GLController.viewer) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(0, 0); });
+        return;
+    }
+    const std::string path(url.path.UTF8String);
+    const double targetMeters = GLController.viewer->importTargetLengthMeters();
+    __weak __typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        const auto prepared = core3d::Core3DViewer::prepareImportedDocument(path, targetMeters, /*solidify*/ true);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong __typeof(weakSelf) strongSelf = weakSelf;
+            NSInteger gaps = 0;
+            const NSInteger inserted = strongSelf && prepared
+                ? [strongSelf core3d_publishPreparedImport:prepared partsWithGaps:&gaps] : 0;
+            completion(inserted, inserted > 0 ? gaps : 0);
+        });
+    });
+}
+
 -(void)core3d_updateSelectedFacesWithPBR:(Core3DPBRMaterial*)pbr
                                 preset:(Core3DMaterial*)preset
                                  color:(Core3DColor*)color {

@@ -11965,117 +11965,159 @@ ImportedSolidResult MakeImportedMeshSolid(const TopoDS_Shape& shape, TopoDS_Shap
 }
 }
 
-OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::string& path,
-    int& inserted, bool solidify, int* partsWithGaps) noexcept {
-    inserted = 0;
-    if (partsWithGaps) *partsWithGaps = 0;
-    int gaps = 0;
-    if (![NSThread isMainThread] || path.empty() || myDoc.IsNull() || !canBeginCommittedEdit())
-        return OrdinaryEditResult::Busy;
-    Handle(OcctDocument) source = new OcctDocument();
-    std::vector<OrdinaryCreationRequest> requests;
-    // Job 4: the same parts as they were before the one-solid step (meshes stay meshes), used when a part made
-    // solid cannot be added (the app's own Fine Sweep band STL, R2-O03, measure-20261123-002308-17936): the file
-    // then comes in as it did before Job 4 instead of not at all.
-    std::vector<OrdinaryCreationRequest> asBefore;
+struct PreparedImportedDocument {
+    struct Part {
+        TopoDS_Shape shape;  // what is added: the solid made from a closed triangle part, or the part as read
+        OcctGeometryRepresentation representation = OcctGeometryRepresentation::BRep;
+        TopoDS_Shape asBeforeShape;  // the part as read (meshes stay meshes), for the "as before" fallback
+        OcctGeometryRepresentation asBeforeRepresentation = OcctGeometryRepresentation::BRep;
+        std::optional<Quantity_NameOfColor> color;
+        std::optional<TCollection_ExtendedString> name;
+    };
+    std::vector<Part> parts;
+    int partsWithGaps = 0;
+    bool solidify = false;
     bool anySolidified = false;
+};
+
+std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDocument(const std::string& path,
+    double targetMeters, bool solidify) noexcept {
+    if (path.empty()) return nullptr;
     try {
-        if (!source->OpenPrivateExportSnapshot(path, Message_ProgressRange()))
-            return OrdinaryEditResult::Invalid;
+        auto prepared = std::make_shared<PreparedImportedDocument>();
+        prepared->solidify = solidify;
+        // A private document of its own (as the native import and export operations open theirs off the main
+        // thread): nothing here reads or changes the open model, its viewer or its AIS context.
+        Handle(OcctDocument) source = new OcctDocument();
+        if (!source->OpenPrivateExportSnapshot(path, Message_ProgressRange())) return nullptr;
         struct Close { Handle(OcctDocument) doc; ~Close() { if (!doc.IsNull()) doc->ClosePrivateExportSnapshot(); } } close{source};
         const auto document = source->Document();
-        if (document.IsNull()) return OrdinaryEditResult::Invalid;
+        if (document.IsNull()) return nullptr;
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
         const auto colors = XCAFDoc_DocumentTool::ColorTool(document->Main());
-        if (shapes.IsNull()) return OrdinaryEditResult::Invalid;
+        if (shapes.IsNull()) return nullptr;
         // XCAF length units in metres; a document without one (legacy) is in millimetres.
-        double sourceMeters = 0.001, targetMeters = 0.001;
+        double sourceMeters = 0.001;
         if (!XCAFDoc_DocumentTool::GetLengthUnit(document, sourceMeters) || !(sourceMeters > 0)) sourceMeters = 0.001;
-        if (myDoc->Document().IsNull() || !XCAFDoc_DocumentTool::GetLengthUnit(myDoc->Document(), targetMeters)
-            || !(targetMeters > 0)) targetMeters = 0.001;
-        const double scale = sourceMeters > 0 && targetMeters > 0 && std::isfinite(sourceMeters / targetMeters)
-            ? sourceMeters / targetMeters : 1.0;
+        if (!(targetMeters > 0) || !std::isfinite(targetMeters)) targetMeters = 0.001;
+        const double scale = std::isfinite(sourceMeters / targetMeters) ? sourceMeters / targetMeters : 1.0;
+        const auto scaled = [&](const TopoDS_Shape& part, TopoDS_Shape& out) {
+            out = part;
+            if (std::abs(scale - 1.0) <= 1e-12) return true;
+            gp_Trsf scaling;
+            scaling.SetScale(gp::Origin(), scale);
+            // Copy the triangles too: a triangle-only part (STL, OBJ) is otherwise left at its
+            // file size in an inch or metre project (Fable review 17 Nov, K18).
+            BRepBuilderAPI_Transform transformed(part, scaling, Standard_True, Standard_True);
+            if (!transformed.IsDone() || transformed.Shape().IsNull()) return false;
+            out = transformed.Shape();
+            return true;
+        };
         TDF_LabelSequence roots;
         shapes->GetFreeShapes(roots);
-        if (roots.IsEmpty() || roots.Length() > 256) return OrdinaryEditResult::Invalid;
+        if (roots.IsEmpty() || roots.Length() > 256) return nullptr;
         for (int index = 1; index <= roots.Length(); ++index) {
             const TDF_Label label = roots.Value(index);
-            TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
             if (shape.IsNull()) continue;
             auto representation = source->StoredGeometryRepresentationForLabel(label);
             if (representation != OcctGeometryRepresentation::TriangleMesh)
                 representation = OcctGeometryRepresentation::BRep;
-            const auto makeRequest = [&](TopoDS_Shape part, OcctGeometryRepresentation kind, bool& ok) {
-                OrdinaryCreationRequest request;
-                ok = false;
-                if (std::abs(scale - 1.0) > 1e-12) {
-                    gp_Trsf scaling;
-                    scaling.SetScale(gp::Origin(), scale);
-                    // Copy the triangles too: a triangle-only part (STL, OBJ) is otherwise left at its
-                    // file size in an inch or metre project (Fable review 17 Nov, K18).
-                    BRepBuilderAPI_Transform scaled(part, scaling, Standard_True, Standard_True);
-                    if (!scaled.IsDone() || scaled.Shape().IsNull()) return request;
-                    part = scaled.Shape();
-                }
-                request.presentation = new AIS_ColoredShape(part);
-                myContext->ApplyDefaultMaterial(request.presentation);
-                request.representation = kind;
-                Quantity_Color color;
-                if (!colors.IsNull() && (colors->GetColor(label, XCAFDoc_ColorSurf, color)
-                                         || colors->GetColor(label, XCAFDoc_ColorGen, color)))
-                    request.color = color.Name();
-                Handle(TDataStd_Name) named;
-                if (label.FindAttribute(TDataStd_Name::GetID(), named) && !named.IsNull()
-                    && named->Get().Length() > 0 && named->Get().Length() <= 128)
-                    request.name = named->Get();
-                ok = true;
-                return request;
-            };
-            bool ok = false;
+            PreparedImportedDocument::Part part;
+            Quantity_Color color;
+            if (!colors.IsNull() && (colors->GetColor(label, XCAFDoc_ColorSurf, color)
+                                     || colors->GetColor(label, XCAFDoc_ColorGen, color)))
+                part.color = color.Name();
+            Handle(TDataStd_Name) named;
+            if (label.FindAttribute(TDataStd_Name::GetID(), named) && !named.IsNull()
+                && named->Get().Length() > 0 && named->Get().Length() <= 128)
+                part.name = named->Get();
+            if (!scaled(shape, part.asBeforeShape)) return nullptr;
+            part.asBeforeRepresentation = representation;
+            part.shape = part.asBeforeShape;
+            part.representation = representation;
             if (solidify && representation == OcctGeometryRepresentation::TriangleMesh) {
                 TopoDS_Shape solid;
                 const auto made = MakeImportedMeshSolid(shape, solid);
                 // CTO 27 Nov 04:10: a part whose surface has a gap comes in as a mesh, as it did before Job 4
                 // (it used to refuse the whole file); the closed parts of the same file still become solids.
-                if (made == ImportedSolidResult::Open) ++gaps;
+                if (made == ImportedSolidResult::Open) ++prepared->partsWithGaps;
                 // Too many triangles, or several bodies in one part: it comes in as a mesh, as before.
                 if (made == ImportedSolidResult::Made) {
-                    auto request = makeRequest(solid, OcctGeometryRepresentation::BRep, ok);
-                    if (!ok) return OrdinaryEditResult::Invalid;
-                    requests.push_back(std::move(request));
-                    anySolidified = true;
-                    auto previous = makeRequest(shape, representation, ok);
-                    if (!ok) return OrdinaryEditResult::Invalid;
-                    asBefore.push_back(std::move(previous));
-                    continue;
+                    if (!scaled(solid, part.shape)) return nullptr;
+                    part.representation = OcctGeometryRepresentation::BRep;
+                    prepared->anySolidified = true;
                 }
             }
-            auto request = makeRequest(shape, representation, ok);
-            if (!ok) return OrdinaryEditResult::Invalid;
-            requests.push_back(std::move(request));
-            if (solidify) {
-                // Its own presentation: a refused first attempt must not leave anything shared behind.
-                auto previous = makeRequest(shape, representation, ok);
-                if (!ok) return OrdinaryEditResult::Invalid;
-                asBefore.push_back(std::move(previous));
-            }
+            prepared->parts.push_back(std::move(part));
         }
-    } catch (...) { return OrdinaryEditResult::Invalid; }
-    if (requests.empty()) return OrdinaryEditResult::Invalid;
+        if (prepared->parts.empty()) return nullptr;
+        return prepared;
+    } catch (...) { return nullptr; }
+}
+
+double Core3DViewer::importTargetLengthMeters() const noexcept {
+    double targetMeters = 0.001;
+    try {
+        if (myDoc.IsNull() || myDoc->Document().IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(myDoc->Document(), targetMeters) || !(targetMeters > 0))
+            targetMeters = 0.001;
+    } catch (...) { targetMeters = 0.001; }
+    return targetMeters;
+}
+
+OrdinaryEditResult Core3DViewer::publishPreparedImport(const std::shared_ptr<const PreparedImportedDocument>& prepared,
+    int& inserted, int* partsWithGaps) noexcept {
+    inserted = 0;
+    if (partsWithGaps) *partsWithGaps = 0;
+    if (![NSThread isMainThread] || myDoc.IsNull() || !canBeginCommittedEdit()) return OrdinaryEditResult::Busy;
+    if (!prepared || prepared->parts.empty()) return OrdinaryEditResult::Invalid;
+    // Each request gets its own presentation: a refused first attempt must not leave anything shared behind.
+    const auto requestsFor = [&](bool asBefore, std::vector<OrdinaryCreationRequest>& requests) {
+        requests.clear();
+        try {
+            for (const auto& part : prepared->parts) {
+                OrdinaryCreationRequest request;
+                request.presentation = new AIS_ColoredShape(asBefore ? part.asBeforeShape : part.shape);
+                myContext->ApplyDefaultMaterial(request.presentation);
+                request.representation = asBefore ? part.asBeforeRepresentation : part.representation;
+                if (part.color) request.color = *part.color;
+                if (part.name) request.name = *part.name;
+                requests.push_back(std::move(request));
+            }
+        } catch (...) { requests.clear(); return false; }
+        return !requests.empty();
+    };
+    std::vector<OrdinaryCreationRequest> requests;
+    if (!requestsFor(false, requests)) return OrdinaryEditResult::Invalid;
     auto result = publishCreatedPrimitives(requests);
 #if DEBUG
-    if (anySolidified)
+    if (prepared->anySolidified)
         std::fprintf(stderr, "Job4 import solid publish=%d parts=%zu\n", int(result), requests.size());
 #endif
-    if (result != OrdinaryEditResult::Committed && anySolidified) {
-        requests = std::move(asBefore);
+    // Job 4: the same parts as they were before the one-solid step (meshes stay meshes), used when a part made
+    // solid cannot be added (the app's own Fine Sweep band STL, R2-O03, measure-20261123-002308-17936): the file
+    // then comes in as it did before Job 4 instead of not at all.
+    if (result != OrdinaryEditResult::Committed && prepared->anySolidified) {
+        if (!requestsFor(true, requests)) return OrdinaryEditResult::Invalid;
         result = publishCreatedPrimitives(requests);
     }
     if (result == OrdinaryEditResult::Committed) {
         inserted = int(requests.size());
-        if (partsWithGaps) *partsWithGaps = gaps;
+        if (partsWithGaps) *partsWithGaps = prepared->partsWithGaps;
     }
     return result;
+}
+
+OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::string& path,
+    int& inserted, bool solidify, int* partsWithGaps) noexcept {
+    inserted = 0;
+    if (partsWithGaps) *partsWithGaps = 0;
+    if (![NSThread isMainThread] || path.empty() || myDoc.IsNull() || !canBeginCommittedEdit())
+        return OrdinaryEditResult::Busy;
+    const auto prepared = prepareImportedDocument(path, importTargetLengthMeters(), solidify);
+    if (!prepared) return OrdinaryEditResult::Invalid;
+    return publishPreparedImport(prepared, inserted, partsWithGaps);
 }
 
 namespace {
