@@ -11998,6 +11998,7 @@ struct PreparedImportedDocument {
     int partsTooLarge = 0;  // over the per-part or the whole-file triangle limit: they stay meshes
     bool solidify = false;
     bool anySolidified = false;
+    double targetMeters = 0.001;  // the open model's unit the parts were scaled to
 };
 
 std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDocument(const std::string& path,
@@ -12021,6 +12022,7 @@ std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDoc
         if (!XCAFDoc_DocumentTool::GetLengthUnit(document, sourceMeters) || !(sourceMeters > 0)) sourceMeters = 0.001;
         if (!(targetMeters > 0) || !std::isfinite(targetMeters)) targetMeters = 0.001;
         const double scale = std::isfinite(sourceMeters / targetMeters) ? sourceMeters / targetMeters : 1.0;
+        prepared->targetMeters = targetMeters;
         const auto scaled = [&](const TopoDS_Shape& part, TopoDS_Shape& out) {
             out = part;
             if (std::abs(scale - 1.0) <= 1e-12) return true;
@@ -12119,6 +12121,10 @@ OrdinaryEditResult Core3DViewer::publishPreparedImport(const std::shared_ptr<con
     if (partsTooLarge) *partsTooLarge = 0;
     if (![NSThread isMainThread] || myDoc.IsNull() || !canBeginCommittedEdit()) return OrdinaryEditResult::Busy;
     if (!prepared || prepared->parts.empty()) return OrdinaryEditResult::Invalid;
+    // The parts were scaled to the unit of the model open when the import began; since they may wait for a tool
+    // to close, a model in another unit opened meanwhile must not get them at the wrong size.
+    const double targetMeters = importTargetLengthMeters();
+    if (!(std::abs(targetMeters - prepared->targetMeters) <= 1e-9 * targetMeters)) return OrdinaryEditResult::Invalid;
     // Each request gets its own presentation: a refused first attempt must not leave anything shared behind.
     const auto requestsFor = [&](bool asBefore, std::vector<OrdinaryCreationRequest>& requests) {
         requests.clear();
