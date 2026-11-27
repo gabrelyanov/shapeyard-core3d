@@ -1219,6 +1219,12 @@ public:
     //! Private export copies only: a joined / cut / overlap part becomes a plain part
     //! (its Join record is dropped) so a baked scale needs no record replay.
   Standard_EXPORT Standard_Boolean ForgetBooleanResultRecordForExport(const TDF_Label& label) noexcept;
+    //! Private export copies only, before a baked object scale: a part whose recipe record binds
+    //! its unscaled solid (Join/Cut/Overlap, Sweep and Tube, planar Sweep) becomes a plain part.
+    //! True when no such record is left (also when there was none). R16F-51: rewriting that
+    //! binding with ShapeTool::SetShape added an attribute its reader refuses, so a Sweep
+    //! resized by Uniform scale stopped every export ("Export isn't ready").
+  Standard_EXPORT Standard_Boolean ForgetRecipeRecordForScaledExport(const TDF_Label& label) noexcept;
   Standard_EXPORT OcctRetainedRecipeCoverage RetainedRecipeCoverageForLabel(
       const TDF_Label& label) const noexcept;
   //! Read-only eligibility and capture for the plain-profile compatibility

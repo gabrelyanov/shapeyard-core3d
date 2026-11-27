@@ -127,6 +127,10 @@ public:
 #ifdef DEBUG
     // The last SelectBehind walk, one entry per hit it looked at (checks only).
     static std::string& DebugLastBehindWalk() { static std::string walk; return walk; }
+    // The last SelectBehind walk's time over the hit list, milliseconds (-1: none).
+    static double& DebugLastBehindWalkMilliseconds() { static double time = -1; return time; }
+    // Faces the edge-on rule's exact ray tested during that walk (repeats count again).
+    static int& DebugLastBehindWalkFacesTested() { static int faces = -1; return faces; }
     const auto& DebugNativeFrameFailure() const { return myDebugNativeFrameFailure; }
     std::uint64_t DebugNativeFrameFailures() const { return myDebugNativeFrameFailures; }
     std::uint64_t DebugNativeFrameSuccesses() const { return myDebugNativeFrameSuccesses; }

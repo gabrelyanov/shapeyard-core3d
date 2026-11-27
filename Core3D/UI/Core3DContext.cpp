@@ -145,6 +145,11 @@ enum class RayMeets { Unknown, No, Yes };
 // 4,096 faces each). Above it the rule answers Unknown and OCCT's order stays.
 constexpr Standard_Integer kEdgeOnFacesPerTap = 4096;
 thread_local Standard_Integer tEdgeOnFacesLeft = kEdgeOnFacesPerTap;
+#ifdef DEBUG
+// Faces handed to the exact ray since the last DebugResetEdgeOnFacesTested
+// (a check reads it around one tap; repeats count again).
+thread_local Standard_Integer tEdgeOnFacesTested = 0;
+#endif
 
 // Takes `faces` from this tap's budget; false when it is spent.
 bool TakeEdgeOnFaces(Standard_Integer faces)
@@ -165,6 +170,9 @@ RayMeets NearestRayHitAlongShape(const TopoDS_Shape& shape, const gp_Trsf& toWor
     for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next())
         if (++faces > kEdgeOnFacesPerTap) return RayMeets::Unknown;
     if (faces == 0 || !TakeEdgeOnFaces(faces)) return RayMeets::Unknown;
+#ifdef DEBUG
+    tEdgeOnFacesTested += faces;
+#endif
     const gp_Trsf toPart = toWorld.Inverted();
     IntCurvesFace_ShapeIntersector intersector;
     intersector.Load(shape, 1.0e-7);
@@ -240,6 +248,9 @@ double Core3DContext::DebugEdgeOnRayMilliseconds(int faceCount) noexcept
         return -1;
     }
 }
+
+void Core3DContext::DebugResetEdgeOnFacesTested() noexcept { tEdgeOnFacesTested = 0; }
+int Core3DContext::DebugEdgeOnFacesTested() noexcept { return tEdgeOnFacesTested; }
 #endif
 
 // OCCT ranks a triangle seen exactly edge-on (its plane holds the view ray) at

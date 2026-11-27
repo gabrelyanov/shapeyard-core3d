@@ -13145,6 +13145,26 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return result;
 }
 
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGestureHeld:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values {
+    if (![NSThread isMainThread] || GLController.viewer == nullptr) { return nil; }
+    // The replay sets the tool first; set it here too so the flag reaches the interactor it uses.
+    [self setGizmoType:mode >= 2 ? PrimitiveGizmoTypeScale : PrimitiveGizmoTypeMoveRotate];
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr) { return nil; }
+    interactor->debugSetReplayLeavesGestureHeld(true);
+    NSArray<NSDictionary<NSString *, NSNumber *> *> *samples =
+        [self debugReplayGesture:mode axis:axis values:values cancel:NO];
+    interactor->debugSetReplayLeavesGestureHeld(false);
+    return samples;
+}
+
+- (BOOL)debugCancelRawTouchOfHeldGesture {
+    return [NSThread isMainThread] && GLController != nil
+        && [GLController debugResolveCancelledRawTouch];
+}
+
 - (NSNumber *_Nullable)debugDocumentMetersPerUnit {
     auto document = GLController.viewer->getDocument()->ChangeDocument();
     Standard_Real metersPerUnit = 0.0;
@@ -15323,12 +15343,20 @@ static BOOL sDebugTapBehindMoveArrows = NO;
     sDebugTapBehindMoveArrows = YES;
 #ifdef DEBUG
     OcctViewer::DebugLastBehindWalk().clear();
+    OcctViewer::DebugLastBehindWalkMilliseconds() = -1;
+    OcctViewer::DebugLastBehindWalkFacesTested() = -1;
+    Core3DContext::DebugResetEdgeOnFacesTested();
 #endif
     NSMutableDictionary<NSString *, id> *answer =
         [[self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES] mutableCopy];
     sDebugTapBehindMoveArrows = NO;
 #ifdef DEBUG
     answer[@"walk"] = [NSString stringWithUTF8String:OcctViewer::DebugLastBehindWalk().c_str()];
+    // Face budget once per tap (CTO 24 Nov 11:12): the exact ray's face tests over
+    // the whole tap (repeats count again) and the time of the walk itself.
+    answer[@"edgeOnFacesTested"] = @(Core3DContext::DebugEdgeOnFacesTested());
+    answer[@"walkMilliseconds"] = @(OcctViewer::DebugLastBehindWalkMilliseconds());
+    answer[@"walkFacesTested"] = @(OcctViewer::DebugLastBehindWalkFacesTested());
 #endif
     return answer;
 }

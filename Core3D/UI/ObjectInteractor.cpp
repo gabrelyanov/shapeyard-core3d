@@ -6,6 +6,7 @@
 //
 
 #include "ObjectInteractor.hpp"
+#include <os/log.h>
 #include "OrdinaryEditController.hpp"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
@@ -3666,6 +3667,11 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 samples.push_back(sample);
                 _debugGestureTrace.push_back(std::move(trace));
             }
+            if (_debugReplayLeavesGestureHeld) {
+                // R14F-5 check: no lift here; the caller ends the held drag.
+                _debugReplayLeavesGestureHeld = false;
+                return true;
+            }
             if (cancel) cancelInteraction(); else finishInteraction();
             // Read authority after reconciliation, even if it aborted the batch.
             for (std::size_t index = 0; index < traceLabels.size(); ++index) {
@@ -3685,17 +3691,59 @@ Standard_Boolean DuplicateFaceFinishesMatch(
     }
 #endif
 
+    // R14F-5 probe (25 Nov 2026): one log line whenever a handle drag is thrown
+    // away, naming the exit. Main thread only. No behaviour change.
+    // mode: 1 arrow, 2 turn ring, 3 side square, 4 Scale ball
+    // (AIS_ManipulatorMode). stage: 0 = cancelled from outside the touch-up,
+    // 1 = before the change check, 2 = before the per-part checks,
+    // 3 = before the request is built, 4 = handed to the edit controller.
+    static int sGestureFinishStage = 0;
+    // The newest handle-drag outcomes, "site:mMODE:sSTAGE:dDETAIL" joined by
+    // "+", read by the app's UI-test telemetry (no "-" in it). Main thread only.
+    static char sGestureDropTrace[320] = "";
+    static void NoteGestureTrace(const char* site, int mode, int detail) noexcept {
+        char entry[48];
+        snprintf(entry, sizeof entry, "%s:m%d:s%d:d%d", site, mode < 0 ? 99 : mode,
+                 sGestureFinishStage, detail < 0 ? 99 : detail);
+        while (strlen(sGestureDropTrace) + strlen(entry) + 2 > sizeof sGestureDropTrace) {
+            char* next = strchr(sGestureDropTrace, '+');
+            if (next == nullptr) { sGestureDropTrace[0] = 0; break; }
+            memmove(sGestureDropTrace, next + 1, strlen(next + 1) + 1);
+        }
+        if (sGestureDropTrace[0] != 0) { strcat(sGestureDropTrace, "+"); }
+        strcat(sGestureDropTrace, entry);
+    }
+    static void NoteGestureDropped(const char* site, int mode, int detail) noexcept {
+        os_log(OS_LOG_DEFAULT,
+               "SHAPEYARD_GESTURE_DROPPED site=%{public}s mode=%d stage=%d detail=%d",
+               site, mode, sGestureFinishStage, detail);
+        NoteGestureTrace(site, mode, detail);
+    }
+    extern "C" __attribute__((visibility("default"), used))
+    void ShapeyardDebugNoteGestureTrace(const char* site, int mode, int detail) {
+        NoteGestureTrace(site, mode, detail);
+    }
+    extern "C" __attribute__((visibility("default"), used))
+    const char* ShapeyardDebugGestureDropTrace(void) {
+        return sGestureDropTrace[0] != 0 ? sGestureDropTrace : "none";
+    }
+
     void ObjectInteractor::finishInteraction() {
         // Declared before GestureStateReset: notification follows both the
         // history reconciliation and the active-gesture flag reset on exit.
         GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
+        sGestureFinishStage = 1;
+        struct StageReset final { ~StageReset() noexcept { sGestureFinishStage = 0; } } aStageReset;
+        NoteGestureTrace("fin", _manipulator.IsNull() ? 99 : int(_manipulator->ActiveMode()),
+                         _manipulatorGestureActive ? 1 : 0);
         if (!_manipulatorRotationAllowed && !_manipulator.IsNull()
             && _manipulator->ActiveMode() == AIS_MM_Rotation) {
             cancelInteraction();
             return;
         }
 		if (hasUnresolvedEdit()) {
+			NoteGestureTrace("unresolved", 99, 0);
 			_manipulatorGestureActive = false;
 			return;
 		}
@@ -3773,6 +3821,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 				return;
 			}
 
+            sGestureFinishStage = 2;
             auto doc = myDoc->ChangeDocument();
 			if (doc.IsNull() || doc->HasOpenCommand()) {
 				cancelInteraction();
@@ -3834,6 +3883,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 
             // The viewer-owned typed controller owns staging, reconciliation,
             // selection/gizmo repair and exactly-once publication.
+            sGestureFinishStage = 3;
             const auto controller = _ordinaryEditController.lock();
             if (!controller) { cancelInteraction(); return; }
             OrdinaryTransformOperation operation;
@@ -3885,6 +3935,17 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                         rotation.delta = _manipulator->GestureTransformation();
                         request.rotationAroundPivot = rotation;
                         request.transform = rotation.delta * before.transform;
+                    } else if (activeMode == AIS_MM_Scaling) {
+                        // M14-1 (build 12 matrix): a one-axis Scale handle rebuilds the solid,
+                        // as a size typed in By numbers does, but sent no map of old geometry
+                        // onto new. The commit then kept a face's own colour only on faces
+                        // that did not move: the orange cylinder of a joined part turned
+                        // blue, a red top turned grey. Send the map the preview was built
+                        // with. No map (nothing rebuilt): exactly as before.
+                        const auto& maps = _manipulator->axisScaleMaps();
+                        const auto map = maps.find(Handle(AIS_InteractiveObject)(change.first));
+                        if (map != maps.end() && !request.shape.IsEqual(before.shape))
+                            request.faceColourMap = map->second;
                     }
 #ifdef DEBUG
                     if (_debugGestureTraceActive && !_debugGestureTrace.empty()) {
@@ -3897,18 +3958,26 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 #endif
                     requests.push_back(std::move(request));
                 }
+                sGestureFinishStage = 4;
                 OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
                 auto lease = controller->beginTransform(requests, &failure);
                 if (!lease) {
+                    NoteGestureDropped("controller-begin", int(activeMode), int(failure));
                     // An uncertain begin retains authority; only a definitive
                     // rejection/no-op permits cancelling the transient preview.
                     if (!controller->blocksNormalWork()) { cancelInteraction(); }
                     return;
                 }
-                (void)lease.stageAndCommit();
+                const OrdinaryEditResult aCommitted = lease.stageAndCommit();
+                if (aCommitted != OrdinaryEditResult::Committed) {
+                    NoteGestureDropped("controller-commit", int(activeMode), int(aCommitted));
+                } else {
+                    NoteGestureTrace("stored", int(activeMode), 1);
+                }
                 // Do not roll back from a commit Boolean/exception or publish
                 // here. The retained controller resolves the durable outcome.
             } catch (...) {
+                NoteGestureDropped("exception", int(activeMode), -1);
                 if (!controller->blocksNormalWork()) { cancelInteraction(); }
             }
         }
@@ -3917,6 +3986,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
     void ObjectInteractor::cancelInteraction() {
         GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
+        if (_manipulatorGestureActive && !_manipulator.IsNull()) {
+            NoteGestureDropped("cancel", int(_manipulator->ActiveMode()),
+                               _manipulator->HasActiveTransformation() ? 1 : 0);
+        }
 		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
 			return;
