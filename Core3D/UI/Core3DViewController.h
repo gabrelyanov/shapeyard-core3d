@@ -1790,6 +1790,8 @@ typedef NS_ENUM(NSInteger, Core3DImportRefusal) { Core3DImportRefusalOpenSurface
 //! called once, always later on the main queue, with how many parts were added (0: the model is unchanged)
 //! and how many of them stayed meshes because their surface has a gap, or because they were over the triangle
 //! limit (20000 per part, 60000 for the whole file: the later parts stay meshes, the file is not refused).
+//! When the parts are ready while another tool is open (the editor is busy), they wait and are added as soon
+//! as it closes (up to 5 minutes), and `completion` is called then.
 - (void)insertSolidPartsOffTheMainThreadFromImportedDocumentAtURL:(NSURL *)url
                                                        completion:(void (^)(NSInteger inserted, NSInteger partsWithGaps,
                                                                             NSInteger partsTooLarge))completion

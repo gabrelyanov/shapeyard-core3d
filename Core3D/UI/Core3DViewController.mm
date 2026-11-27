@@ -5640,16 +5640,22 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return inserted;
 }
 
+// How long ready parts wait for a tool the user opened meanwhile to close (then the file is not added).
+static const CFAbsoluteTime kCore3DImportPublishWaitSeconds = 300;
+
 // CTO 27 Nov 04:10 item (1): the slow half (reading the document and making closed parts solid) runs on a
 // background queue with no viewer state; the parts are added on the main thread as one creation.
 - (NSInteger)core3d_publishPreparedImport:(const std::shared_ptr<const core3d::PreparedImportedDocument> &)prepared
                             partsWithGaps:(NSInteger *)partsWithGaps
-                            partsTooLarge:(NSInteger *)partsTooLarge {
+                            partsTooLarge:(NSInteger *)partsTooLarge
+                                     busy:(BOOL *)busy {
     if (partsWithGaps) *partsWithGaps = 0;
     if (partsTooLarge) *partsTooLarge = 0;
+    if (busy) *busy = NO;
     if (!NSThread.isMainThread || !prepared || !GLController.viewer) return 0;
     int inserted = 0, gaps = 0, tooLarge = 0;
     const auto result = GLController.viewer->publishPreparedImport(prepared, inserted, &gaps, &tooLarge);
+    if (busy) *busy = result == core3d::OrdinaryEditResult::Busy;
     if (result != core3d::OrdinaryEditResult::Committed || inserted <= 0) return 0;
     if (partsWithGaps) *partsWithGaps = gaps;
     if (partsTooLarge) *partsTooLarge = tooLarge;
@@ -5671,12 +5677,34 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         const auto prepared = core3d::Core3DViewer::prepareImportedDocument(path, targetMeters, /*solidify*/ true);
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong __typeof(weakSelf) strongSelf = weakSelf;
-            NSInteger gaps = 0, tooLarge = 0;
-            const NSInteger inserted = strongSelf && prepared
-                ? [strongSelf core3d_publishPreparedImport:prepared partsWithGaps:&gaps partsTooLarge:&tooLarge] : 0;
-            completion(inserted, inserted > 0 ? gaps : 0, inserted > 0 ? tooLarge : 0);
+            if (!strongSelf || !prepared) { completion(0, 0, 0); return; }
+            [strongSelf core3d_publishPreparedImportWhenTheEditorIsFree:prepared
+                deadline:CFAbsoluteTimeGetCurrent() + kCore3DImportPublishWaitSeconds completion:completion];
         });
     });
+}
+
+// The import runs in the background, so the user may open another tool (Push-pull, Hole, a Move) before the parts
+// are ready; the engine then answers Busy. The parts wait and are added as soon as that tool closes (tried every
+// 0.2 s on the main queue) instead of being dropped. Past the wait, or when the editor is gone, the app hears 0
+// (its sentence "The file could not be added. Nothing changed.").
+- (void)core3d_publishPreparedImportWhenTheEditorIsFree:(std::shared_ptr<const core3d::PreparedImportedDocument>)prepared
+                                               deadline:(CFAbsoluteTime)deadline
+                                             completion:(void (^)(NSInteger, NSInteger, NSInteger))completion {
+    NSInteger gaps = 0, tooLarge = 0;
+    BOOL busy = NO;
+    const NSInteger inserted = [self core3d_publishPreparedImport:prepared partsWithGaps:&gaps
+                                                    partsTooLarge:&tooLarge busy:&busy];
+    if (inserted <= 0 && busy && CFAbsoluteTimeGetCurrent() < deadline) {
+        __weak __typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            __strong __typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) { completion(0, 0, 0); return; }
+            [strongSelf core3d_publishPreparedImportWhenTheEditorIsFree:prepared deadline:deadline completion:completion];
+        });
+        return;
+    }
+    completion(inserted, inserted > 0 ? gaps : 0, inserted > 0 ? tooLarge : 0);
 }
 
 -(void)core3d_updateSelectedFacesWithPBR:(Core3DPBRMaterial*)pbr
