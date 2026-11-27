@@ -12774,6 +12774,23 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
     using namespace core3d::authored_parameter;
     try {
         if (![NSThread isMainThread]) return PairCaptureRefused(PairRefusal::WrongThread);
+        // A project made by 5.34 or earlier stores no length unit (5.34 never wrote one, and
+        // opening or saving it here adds none). No opening context can be made for such a
+        // document (Core3DViewer::recaptureNativeOpeningFence needs the unit), so the caller
+        // passes none and the answer below was "foreign document", which the editor takes as a
+        // failure: every Join of two parts of one colour in an old project said "Couldn't join
+        // these parts" (build 14 blocker, 27 Nov 2026). The Boolean that keeps its two parts
+        // cannot be saved in such a project; say so in the word the editor already acts on,
+        // "unsupported", as CaptureToolInput answers for the same parts: the editor then makes
+        // the plain Join or Overlap, the one it makes for parts of different colours.
+        if (!myOcafDoc.IsNull() && !target.IsNull() && !tool.IsNull()
+            && target.Data() == myOcafDoc->GetData() && tool.Data() == myOcafDoc->GetData()) {
+            Standard_Real storedUnit = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, storedUnit)) {
+                BooleanCaptureDebugRefusal(0, "document-stores-no-length-unit");
+                return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
+        }
         if (myOcafDoc.IsNull() || !context || target.IsNull() || tool.IsNull()
             || target.Data() != myOcafDoc->GetData() || tool.Data() != myOcafDoc->GetData()
             || context->openingFence().document() != myOcafDoc
