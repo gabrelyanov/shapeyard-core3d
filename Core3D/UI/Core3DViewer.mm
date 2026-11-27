@@ -11966,9 +11966,10 @@ ImportedSolidResult MakeImportedMeshSolid(const TopoDS_Shape& shape, TopoDS_Shap
 }
 
 OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::string& path,
-    int& inserted, bool solidify, bool* openSurface) noexcept {
+    int& inserted, bool solidify, int* partsWithGaps) noexcept {
     inserted = 0;
-    if (openSurface) *openSurface = false;
+    if (partsWithGaps) *partsWithGaps = 0;
+    int gaps = 0;
     if (![NSThread isMainThread] || path.empty() || myDoc.IsNull() || !canBeginCommittedEdit())
         return OrdinaryEditResult::Busy;
     Handle(OcctDocument) source = new OcctDocument();
@@ -12034,10 +12035,9 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
             if (solidify && representation == OcctGeometryRepresentation::TriangleMesh) {
                 TopoDS_Shape solid;
                 const auto made = MakeImportedMeshSolid(shape, solid);
-                if (made == ImportedSolidResult::Open) {
-                    if (openSurface) *openSurface = true;
-                    return OrdinaryEditResult::Invalid;
-                }
+                // CTO 27 Nov 04:10: a part whose surface has a gap comes in as a mesh, as it did before Job 4
+                // (it used to refuse the whole file); the closed parts of the same file still become solids.
+                if (made == ImportedSolidResult::Open) ++gaps;
                 // Too many triangles, or several bodies in one part: it comes in as a mesh, as before.
                 if (made == ImportedSolidResult::Made) {
                     auto request = makeRequest(solid, OcctGeometryRepresentation::BRep, ok);
@@ -12071,7 +12071,10 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
         requests = std::move(asBefore);
         result = publishCreatedPrimitives(requests);
     }
-    if (result == OrdinaryEditResult::Committed) inserted = int(requests.size());
+    if (result == OrdinaryEditResult::Committed) {
+        inserted = int(requests.size());
+        if (partsWithGaps) *partsWithGaps = gaps;
+    }
     return result;
 }
 

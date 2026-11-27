@@ -971,9 +971,10 @@ namespace core3d {
             transformInspectorMeasurementPerformanceState() const noexcept;
         //! Adds every part of an app-created import document at `path` as one creation (fault 3).
         //! Job 4 (22 Nov): with `solidify`, every closed triangle part (STL, OBJ) becomes one solid in the same
-        //! creation; a part whose surface is not closed sets *openSurface and adds nothing.
+        //! creation; a part whose surface is not closed comes in as a mesh and is counted in *partsWithGaps
+        //! (CTO 27 Nov 04:10; until then it refused the whole file). *partsWithGaps is set only on Committed.
         OrdinaryEditResult insertPartsFromImportedDocument(const std::string& path, int& inserted,
-            bool solidify = false, bool* openSurface = nullptr) noexcept;
+            bool solidify = false, int* partsWithGaps = nullptr) noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
         //! Change projection while retaining target, direction and apparent

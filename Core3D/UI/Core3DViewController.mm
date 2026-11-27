@@ -5625,13 +5625,17 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 }
 
 - (NSInteger)insertSolidPartsFromImportedDocumentAtURL:(NSURL *)url {
+    return [self insertSolidPartsFromImportedDocumentAtURL:url partsWithGaps:NULL];
+}
+
+- (NSInteger)insertSolidPartsFromImportedDocumentAtURL:(NSURL *)url partsWithGaps:(NSInteger *)partsWithGaps {
+    if (partsWithGaps) *partsWithGaps = 0;
     if (!NSThread.isMainThread || !url.isFileURL || !GLController.viewer) return 0;
-    int inserted = 0;
-    bool openSurface = false;
+    int inserted = 0, gaps = 0;
     const auto result = GLController.viewer->insertPartsFromImportedDocument(
-        std::string(url.path.UTF8String ?: ""), inserted, /*solidify*/ true, &openSurface);
-    if (openSurface) return Core3DImportRefusalOpenSurface;
+        std::string(url.path.UTF8String ?: ""), inserted, /*solidify*/ true, &gaps);
     if (result != core3d::OrdinaryEditResult::Committed || inserted <= 0) return 0;
+    if (partsWithGaps) *partsWithGaps = gaps;
     [self sendNotifyUIState:UIStateChangingHistory];
     return inserted;
 }

@@ -1774,12 +1774,16 @@ __attribute__((objc_subclassing_restricted))
 
 //! Job 4 (22 Nov): "+" Import of an STL or OBJ. As insertPartsFromImportedDocumentAtURL, but every closed
 //! triangle part becomes one solid in the same single step, so Hole, Cut, Measure and Push-pull work on it.
-//! Returns how many parts were added; 0 when nothing could be added; Core3DImportRefusalOpenSurface when a
-//! part's surface is not closed (it cannot be a solid; nothing is added). A part over the triangle budget or
-//! of several bodies comes in as a mesh, as before.
+//! Returns how many parts were added; 0 when nothing could be added. A part whose surface is not closed (CTO
+//! 27 Nov 04:10), over the triangle budget or of several bodies comes in as a mesh, as before Job 4.
+//! Core3DImportRefusalOpenSurface is no longer returned (until 27 Nov an open part refused the whole file).
 typedef NS_ENUM(NSInteger, Core3DImportRefusal) { Core3DImportRefusalOpenSurface = -1 };
 - (NSInteger)insertSolidPartsFromImportedDocumentAtURL:(NSURL *)url
     NS_SWIFT_NAME(insertSolidParts(fromImportedDocumentAt:));
+//! As above; `partsWithGaps` (may be NULL) is set to how many added parts stayed meshes because their
+//! surface has a gap, so the app can say why they are not solids. 0 when nothing was added.
+- (NSInteger)insertSolidPartsFromImportedDocumentAtURL:(NSURL *)url partsWithGaps:(nullable NSInteger *)partsWithGaps
+    NS_SWIFT_NAME(insertSolidParts(fromImportedDocumentAt:partsWithGaps:));
 
 #ifdef DEBUG
 //! Re-run the production selection callback without changing AIS owners.
