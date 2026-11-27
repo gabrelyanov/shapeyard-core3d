@@ -106,6 +106,7 @@ namespace core3d {
         Standard_Size candidateSubshapeCount = 0;
         Standard_Size candidateSolidCount = 0;
         Standard_Integer lastFailureStage = 0;
+        Standard_Integer lastApplyFailureStage = 0;
         Standard_Integer lastFeatureStatus = 0;
         Standard_Integer lastCandidateShapeType = -1;
         Standard_Size rawDirectChildCount = 0;
@@ -175,6 +176,8 @@ namespace core3d {
         Standard_Size _lastExtrusionResultSubshapeCount = 0;
         Standard_Size _lastExtrusionResultSolidCount = 0;
         Standard_Integer _lastExtrusionFailureStage = 0;
+        // Which step of applyExtrusion refused last (0 none; see applyExtrusion).
+        Standard_Integer _lastExtrusionApplyFailureStage = 0;
         Standard_Integer _lastExtrusionFeatureStatus = 0;
         Standard_Integer _lastExtrusionCandidateShapeType = -1;
         Standard_Size _lastExtrusionRawDirectChildCount = 0;

@@ -2607,6 +2607,15 @@ namespace core3d {
 	}
 
 	Standard_Boolean ShapeInteractor::applyExtrusion() noexcept {
+		// Debug readout only: which step refused (lastApplyFailureStage). 0 = applied.
+		Standard_Integer applyStage = 0;
+#ifdef DEBUG
+		const auto noteStage = [this, &applyStage]() noexcept {
+			_lastExtrusionApplyFailureStage = applyStage;
+		};
+#else
+		const auto noteStage = []() noexcept {};
+#endif
 		const Standard_Size resultSubshapeCount =
 			_extrusion.candidateSubshapeCount;
 		const Standard_Size resultSolidCount =
@@ -2673,10 +2682,12 @@ namespace core3d {
 			if (_extrusion.commitOutcomeUnknown
 				&& (state == ExtrusionDocumentState::Unavailable
 					|| state == ExtrusionDocumentState::OtherClosedShape)) {
+				applyStage = 14; noteStage();
 				return Standard_False;
 			}
 			if (!canApplyExtrusion()
 				|| state != ExtrusionDocumentState::OpenCommand) {
+				applyStage = canApplyExtrusion() ? 12 : 11; noteStage();
 				(void)discardExtrusionPreview(Standard_True);
 				return Standard_False;
 			}
@@ -2692,12 +2703,17 @@ namespace core3d {
 				std::vector<TDF_Label> faceLabels;
 				std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>
 					colouredFaces;
-				if (!myDoc->PrepareBooleanResultForFaceEdit(_extrusion.label)
+				applyStage = 2;
+				const Standard_Boolean prepared =
+					myDoc->PrepareBooleanResultForFaceEdit(_extrusion.label);
+				if (prepared) applyStage = 3;
+				if (!prepared
 					|| !myDoc->CaptureFaceColours(
 						_extrusion.label, 1.0, faceLabels, colouredFaces)) {
 					throw Standard_Failure(
 						"Unable to read the face colours before extrusion");
 				}
+				applyStage = 8;
 				gp_Pln pickedPlane;
 				const TopoDS_Face& picked = _extrusion.selectedFace;
 				if (_extrusion.splitReferenceEdge < 0 && !colouredFaces.empty()
@@ -2727,7 +2743,11 @@ namespace core3d {
 					colouredFaces.insert(
 						colouredFaces.end(), grown.begin(), grown.end());
 				}
-				if (!myDoc->ReplaceShape(_extrusion.label, candidate)
+				applyStage = 4;
+				const Standard_Boolean replaced =
+					myDoc->ReplaceShape(_extrusion.label, candidate);
+				if (replaced) applyStage = 5;
+				if (!replaced
 					|| !myDoc->CarryFaceColours(_extrusion.label,
 						candidateShape, faceLabels, colouredFaces,
 						Standard_True)) {
@@ -2736,6 +2756,7 @@ namespace core3d {
 				}
 				// Lamp S6-F3 (20 Nov): an unnamed Case is shown as "Case 1" only while it holds its
 				// Case record, which this edit replaces; the shown name is stored in the same step.
+				applyStage = 6;
 				if (!_extrusion.keptName.IsEmpty()) {
 					OcctObjectNameState named;
 					if (!myDoc->CaptureObjectNameStateForLabel(_extrusion.label, named)) {
@@ -2748,11 +2769,13 @@ namespace core3d {
 						throw Standard_Failure("Unable to keep the part's name");
 					}
 				}
+				applyStage = 7;
 				if (myDoc->GeometryRepresentationForLabel(_extrusion.label)
 					!= OcctGeometryRepresentation::BRep) {
 					throw Standard_Failure(
 						"Extrusion result is not persisted as BRep");
 				}
+				applyStage = 9;
 				Standard_Boolean commitReported =
 					document->CommitCommand();
 #ifdef DEBUG
@@ -2787,14 +2810,17 @@ namespace core3d {
 			if (state == ExtrusionDocumentState::CandidateShape
 				&& myDoc->GeometryRepresentationForLabel(
 					_extrusion.label) == OcctGeometryRepresentation::BRep) {
+				applyStage = 0; noteStage();
 				finishCommitted();
 				return Standard_True;
 			}
 			if (state == ExtrusionDocumentState::OpenCommand
 				|| state == ExtrusionDocumentState::OriginalShape) {
+				noteStage();
 				(void)discardExtrusionPreview(Standard_True);
 				return Standard_False;
 			}
+			applyStage = 10; noteStage();
 			// Unknown state must not be visually rewritten as the old shape or
 			// committed a second time while closed. Keep Apply enabled solely as
 			// a retryable state-inspection action.
@@ -2802,6 +2828,7 @@ namespace core3d {
 			_extrusion.commitOutcomeUnknown = Standard_True;
 			return Standard_False;
 		} catch (...) {
+			applyStage = 100 + applyStage; noteStage();
 			(void)discardExtrusionPreview(Standard_True);
 			return Standard_False;
 		}
@@ -2979,6 +3006,7 @@ namespace core3d {
 				? _extrusion.candidateSolidCount
 				: _lastExtrusionResultSolidCount;
 			state.lastFailureStage = _lastExtrusionFailureStage;
+			state.lastApplyFailureStage = _lastExtrusionApplyFailureStage;
 			state.lastFeatureStatus = _lastExtrusionFeatureStatus;
 			state.lastCandidateShapeType =
 				_lastExtrusionCandidateShapeType;

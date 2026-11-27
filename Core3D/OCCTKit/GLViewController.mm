@@ -6706,6 +6706,7 @@ static std::array<double, 4> SelectedContourProjectionKey(const Handle(Graphic3d
         @"candidateSubshapeCount": @(state.candidateSubshapeCount),
         @"candidateSolidCount": @(state.candidateSolidCount),
         @"lastFailureStage": @(state.lastFailureStage),
+        @"lastApplyFailureStage": @(state.lastApplyFailureStage),
         @"lastFeatureStatus": @(state.lastFeatureStatus),
         @"lastCandidateShapeType": @(state.lastCandidateShapeType),
         @"rawDirectChildCount": @(state.rawDirectChildCount),
