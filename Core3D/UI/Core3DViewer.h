@@ -338,10 +338,13 @@ namespace core3d {
         std::optional<StoredEnclosureSnapshot> storedEnclosureDefinition(
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
+        // keepMiddle (the person's Case sheet, R10P-S5): a new Width or Depth keeps the Case's middle, and a
+        // Case standing on the floor keeps the floor, by moving the part in the same step
+        // (enclosure::SheetEditShift). Off (every other caller): the placement is kept.
         std::shared_ptr<NativeSolidWork> prepareStoredEnclosureRebuild(
             const enclosure::Parameters& parameters, const StoredEnclosureSnapshot& original,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
-            std::uint32_t width, std::uint32_t height) noexcept;
+            std::uint32_t width, std::uint32_t height, bool keepMiddle = false) noexcept;
         std::shared_ptr<NativeSolidWork> prepareAssemblySolid(
             const std::vector<AssemblyPartDefinition>& parts, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
