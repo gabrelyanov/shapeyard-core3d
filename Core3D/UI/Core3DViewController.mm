@@ -13144,6 +13144,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return [self core3d_documentUndoCount];
 }
 
+- (double)debugImportSolidTimeCapSeconds {
+    return core3d::Core3DViewer::importSolidTimeCapSeconds();
+}
+
+- (void)debugSetImportSolidTimeCapSeconds:(double)seconds {
+    core3d::Core3DViewer::setImportSolidTimeCapSeconds(seconds);
+}
+
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values {

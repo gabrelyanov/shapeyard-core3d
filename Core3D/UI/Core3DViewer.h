@@ -989,6 +989,12 @@ namespace core3d {
         //! part); the parts over either limit come in as meshes and are counted in *partsTooLarge (on Committed).
         static std::shared_ptr<const PreparedImportedDocument> prepareImportedDocument(const std::string& path,
             double targetMeters, bool solidify) noexcept;
+        //! Step 3 (time cap): once making parts solid has taken longer than this (4 s by default), the file's
+        //! remaining closed parts come in as meshes and are counted in *partsTooLarge, as a part over the limits
+        //! is. The part being made when the cap passes is finished (it is inside the 20000 per-part limit).
+        //! Any thread; the setter is for tests (a negative or non-finite value restores 4 s).
+        static double importSolidTimeCapSeconds() noexcept;
+        static void setImportSolidTimeCapSeconds(double seconds) noexcept;
         double importTargetLengthMeters() const noexcept;
         OrdinaryEditResult publishPreparedImport(const std::shared_ptr<const PreparedImportedDocument>& prepared,
             int& inserted, int* partsWithGaps = nullptr, int* partsTooLarge = nullptr) noexcept;

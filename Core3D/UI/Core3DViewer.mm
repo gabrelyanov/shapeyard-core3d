@@ -11894,6 +11894,9 @@ constexpr std::size_t kImportedSolidTriangleBudget = 20000;
 // made solid in file order while the running total stays inside it; every later part comes in as a mesh, as a part
 // over the per-part limit does, and both are counted so the app can say why (CTO 07:05: not a refusal).
 constexpr std::size_t kImportedSolidTotalTriangleBudget = 60000;
+// Step 3: a time cap across the whole file as a backstop (a slow device, many parts just inside the limits).
+constexpr double kImportedSolidDefaultTimeCapSeconds = 4.0;
+std::atomic<double> gImportedSolidTimeCapSeconds{kImportedSolidDefaultTimeCapSeconds};
 std::size_t ImportedMeshTriangleCount(const TopoDS_Shape& shape) noexcept {
     std::size_t count = 0;
     try {
@@ -12079,6 +12082,15 @@ std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDoc
         if (prepared->parts.empty()) return nullptr;
         return prepared;
     } catch (...) { return nullptr; }
+}
+
+double Core3DViewer::importSolidTimeCapSeconds() noexcept {
+    return gImportedSolidTimeCapSeconds.load(std::memory_order_relaxed);
+}
+
+void Core3DViewer::setImportSolidTimeCapSeconds(double seconds) noexcept {
+    gImportedSolidTimeCapSeconds.store(std::isfinite(seconds) && seconds >= 0 ? seconds
+        : kImportedSolidDefaultTimeCapSeconds, std::memory_order_relaxed);
 }
 
 double Core3DViewer::importTargetLengthMeters() const noexcept {
