@@ -8131,6 +8131,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			}
 #endif
 			_pendingMirrorResults.reserve(_trialMirrorObjects.size());
+			// Round 12 row 5: names already given to copies in this Mirror.
+			std::vector<TCollection_ExtendedString> aReservedCopyNames;
 			for (std::size_t anIndex = 0;
 				 anIndex < _trialMirrorObjects.size(); ++anIndex) {
 				const Handle(AIS_Shape)& aShape =
@@ -8275,7 +8277,14 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     throw Standard_Failure("Injected invalid mirror enclosure unexpectedly read back");
                 }
 #endif
-                if (aSource.profileOwner.namePresent) TDataStd_Name::Set(aLabel, aSource.profileOwner.name);
+                // Round 12 row 5: a mirrored copy of a named part takes the next free
+                // number, as Duplicate and the arrays do (F11): "Box 1" -> "Box 2".
+                TCollection_ExtendedString aCopyName;
+                if (aSource.profileOwner.namePresent) {
+                    aCopyName = myDoc->NextFreeCopyName(aSource.profileOwner.name, aReservedCopyNames);
+                    aReservedCopyNames.push_back(aCopyName);
+                    TDataStd_Name::Set(aLabel, aCopyName);
+                }
                 else aLabel.ForgetAttribute(TDataStd_Name::GetID());
                 if (!pattern_recipe_clone::Stage(aDocument, aSource.sweepLoft,
                         aLabel, aSource.entityIdentifier,
@@ -8288,7 +8297,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || !aPending.expectedProfileOwner.object.enclosure.IsEqual(candidateEnclosure)
                     || aPending.expectedProfileOwner.namePresent != aSource.profileOwner.namePresent
                     || (aSource.profileOwner.namePresent
-                        && !aPending.expectedProfileOwner.name.IsEqual(aSource.profileOwner.name))) return retainRetryableOrUnknown();
+                        && !aPending.expectedProfileOwner.name.IsEqual(aCopyName))) return retainRetryableOrUnknown();
                 aPending.expectedProfileCurrent = candidateProfile.IsCurrent(aDocument, aLabel);
                 if (aPending.expectedProfileCurrent != aSource.profileCurrent) return retainRetryableOrUnknown();
                 aPending.expectedEnclosureCurrent = candidateEnclosure.IsCurrent(aDocument, aLabel);
