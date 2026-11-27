@@ -2883,7 +2883,6 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if (carriesFaceColours && record.requested.faceColourMap)
                 paintedFaces = _document->ResizedFaceColours(record.requested.shape,
                     *record.requested.faceColourMap, paintedFaces);
-            if (carriesFaceColours) ledger.faceLooksCarried = true; // M14-1, read only for a committed candidate
             // A joined or cut part keeps the recipe of the two parts it was made of; a new size
             // makes it a plain part of that size, in this same step (Undo brings the recipe back).
             // Before, the recipe still named the old shape and the next save was refused: lost work
@@ -3338,46 +3337,21 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
 #endif // Cut475 phase diagnostics only
         _committed = candidate;
         _state = OrdinaryEditState::RepairPending;
-        // M14-1: a part's drawing is given its face colours once, when it is made from the
-        // document; setting a rebuilt shape on it in place leaves those colours bound to the
-        // faces that are gone, so every face shows the part's own colour until the next
-        // redraw (seen after a one-axis Scale handle). When this command carried face colours
-        // onto a rebuilt shape, take the redraw below after the ordinary repair has retired
-        // the gesture, as Bevel, Hole and Undo redraw the document.
-        const bool repairedInPlace = _host.repairTransform(ledger, candidate)
-            && presentationMatches(ledger, candidate);
-        // M14-1 part 1B2: when the in-place repair is already good and the redraw is taken only
-        // to show the carried face colours, a redraw that fails must not leave this committed
-        // edit unresolved (no Undo, no Add, saving refused). The redraw puts the kept drawings
-        // back when it fails; the in-place repair is then done once more on them and the edit
-        // is resolved as before part 1B: the file is right, the colours show at the next
-        // redraw. Every other use of the redraw (the in-place repair failed) is unchanged.
-        const bool redrawOnlyForFaceLooks = repairedInPlace && candidate && ledger.faceLooksCarried;
-        if (!repairedInPlace || redrawOnlyForFaceLooks) {
+        if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)) {
             std::vector<Handle(AIS_Shape)> replacements;
-            bool redrawn = _host.rebuildTransform(ledger, candidate, replacements)
-                && replacements.size() == ledger.records.size();
+            if (!_host.rebuildTransform(ledger, candidate, replacements)
+                || replacements.size() != ledger.records.size()) { return OrdinaryEditResult::OutcomeUnknown; }
             auto repaired = ledger;
             std::unordered_set<const AIS_Shape*> unique;
-            for (std::size_t index = 0; redrawn && index < replacements.size(); ++index) {
+            for (std::size_t index = 0; index < replacements.size(); ++index) {
                 if (replacements[index].IsNull() || !unique.insert(replacements[index].get()).second) {
-                    redrawn = false;
-                } else {
-                    repaired.records[index].requested.presentation = replacements[index];
-                }
-            }
-            redrawn = redrawn && presentationMatches(repaired, candidate);
-            if (redrawn) {
-                for (std::size_t index = 0; index < replacements.size(); ++index) {
-                    ledger.records[index].requested.presentation = replacements[index];
-                }
-            } else {
-                if (!redrawOnlyForFaceLooks) { return OrdinaryEditResult::OutcomeUnknown; }
-                // Do not ask for this redraw again on a later retry of the same edit.
-                ledger.faceLooksCarried = false;
-                if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)) {
                     return OrdinaryEditResult::OutcomeUnknown;
                 }
+                repaired.records[index].requested.presentation = replacements[index];
+            }
+            if (!presentationMatches(repaired, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
+            for (std::size_t index = 0; index < replacements.size(); ++index) {
+                ledger.records[index].requested.presentation = replacements[index];
             }
         }
 

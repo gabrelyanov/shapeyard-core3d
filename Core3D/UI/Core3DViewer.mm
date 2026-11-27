@@ -12963,18 +12963,6 @@ bool Core3DViewer::rebuildTransform(const OrdinaryTransformLedger& ledger, bool 
         || ledger.records.empty() || ledger.records.size() > 1024) { return false; }
     AIS_ListOfInteractive previousPresentations;
     bool touchedDisplay = false;
-    // M14-1 part 1B2. This redraw shows every part of the project again, and since part 1B it
-    // runs on a normal route (a size change that carried colours of single faces), not only
-    // after a fault. Showing a part can change the Checked mark of its shapes and the Free flag
-    // of its root, and both are written into the saved bytes. Keep them as they are on entry
-    // and put them back on every exit, as the Undo redraw (HistoryRedrawCheckedBits) and
-    // redrawDocument (root Free flags) do, so parts nobody touched save the same bytes and
-    // Undo gives the project's bytes back. Declared before the try: the restore below is covered.
-    std::optional<HistoryRedrawCheckedBits> keepCheckedBits;
-    struct RebuildRootFreeFlags final {
-        std::vector<std::pair<TopoDS_Shape, Standard_Boolean>> roots;
-        ~RebuildRootFreeFlags() { for (auto& entry : roots) entry.first.Free(entry.second); }
-    } keepRootFree;
     try {
         OCC_CATCH_SIGNALS
         const auto document = myDoc->Document();
@@ -12986,16 +12974,6 @@ bool Core3DViewer::rebuildTransform(const OrdinaryTransformLedger& ledger, bool 
             OcctObjectTransformState actual;
             if (!myDoc->CaptureObjectTransformStateForLabel(saved.label, actual)
                 || !actual.IsEqual(saved)) { return false; }
-        }
-        keepCheckedBits.emplace(document);
-        {
-            const Handle(XCAFDoc_ShapeTool) partShapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
-            TDF_LabelSequence partRoots;
-            if (!partShapes.IsNull()) partShapes->GetFreeShapes(partRoots);
-            for (Standard_Integer index = 1; index <= partRoots.Length(); ++index) {
-                const TopoDS_Shape root = XCAFDoc_ShapeTool::GetShape(partRoots.Value(index));
-                if (!root.IsNull()) keepRootFree.roots.emplace_back(root, root.Free());
-            }
         }
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, previousPresentations);
         touchedDisplay = true;
