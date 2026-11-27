@@ -129,7 +129,12 @@ void main() {
     vec3 specular = distribution * geometry * fresnel / max(4.0 * nv * nl, 0.0001);
     vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * base / 3.14159265;
     vec3 direct = (diffuse + specular) * nl * 2.2;
-    vec3 ambient = base * (0.055 + 0.075 * (1.0 - metallic)) + f0 * (0.025 * (1.0 - roughness));
+    // A metal has no colour term, and this light has no surroundings for it to
+    // reflect, so without a stand-in a metal face read at about 7.5 % of its
+    // colour (a joined Silver face 46 on screen against the unjoined tile's 97,
+    // round 16, 26 Nov). 0.26 * metallic stands in for the missing surroundings.
+    // Authored/exported PBR values do not move.
+    vec3 ambient = base * (0.055 + 0.075 * (1.0 - metallic)) + f0 * (0.025 * (1.0 - roughness) + 0.26 * metallic);
     // GLView explicitly owns an ES2 RGBA8 drawable, and OCCT's ES2 path has
     // no sRGB framebuffer encoding. Texture color samples and PBR factors
     // are linear, so encode the final light sum once for that display target.
