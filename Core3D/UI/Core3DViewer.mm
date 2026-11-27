@@ -11895,7 +11895,8 @@ constexpr std::size_t kImportedSolidTriangleBudget = 20000;
 // over the per-part limit does, and both are counted so the app can say why (CTO 07:05: not a refusal).
 constexpr std::size_t kImportedSolidTotalTriangleBudget = 60000;
 // Step 3: a time cap across the whole file as a backstop (a slow device, many parts just inside the limits).
-constexpr double kImportedSolidDefaultTimeCapSeconds = 4.0;
+// Above the ~9 s the full 60000-triangle budget takes on the iPad simulator, so the budget alone decides there.
+constexpr double kImportedSolidDefaultTimeCapSeconds = 12.0;
 std::atomic<double> gImportedSolidTimeCapSeconds{kImportedSolidDefaultTimeCapSeconds};
 std::size_t ImportedMeshTriangleCount(const TopoDS_Shape& shape) noexcept {
     std::size_t count = 0;
@@ -12036,6 +12037,11 @@ std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDoc
         shapes->GetFreeShapes(roots);
         if (roots.IsEmpty() || roots.Length() > 256) return nullptr;
         std::size_t solidifiedTriangles = 0;  // stays <= kImportedSolidTotalTriangleBudget
+        // Step 3: the time cap is checked before each part after the first made solid; the part being made when
+        // it passes is finished (it is inside the per-part limit), the later ones stay meshes.
+        const auto solidifyStarted = std::chrono::steady_clock::now();
+        const double solidifyTimeCap = importSolidTimeCapSeconds();
+        bool solidifyAttempted = false;
         for (int index = 1; index <= roots.Length(); ++index) {
             const TDF_Label label = roots.Value(index);
             const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
@@ -12058,11 +12064,14 @@ std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDoc
             part.representation = representation;
             const std::size_t triangles = solidify && representation == OcctGeometryRepresentation::TriangleMesh
                 ? ImportedMeshTriangleCount(shape) : 0;
+            const bool pastTimeCap = solidifyAttempted && std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - solidifyStarted).count() > solidifyTimeCap;
             if (solidify && representation == OcctGeometryRepresentation::TriangleMesh
                 && (triangles > kImportedSolidTriangleBudget
-                    || triangles > kImportedSolidTotalTriangleBudget - solidifiedTriangles)) {
+                    || triangles > kImportedSolidTotalTriangleBudget - solidifiedTriangles || pastTimeCap)) {
                 ++prepared->partsTooLarge;
             } else if (solidify && representation == OcctGeometryRepresentation::TriangleMesh) {
+                solidifyAttempted = true;
                 solidifiedTriangles += triangles;
                 TopoDS_Shape solid;
                 const auto made = MakeImportedMeshSolid(shape, solid);

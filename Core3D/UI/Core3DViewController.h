@@ -2387,7 +2387,7 @@ typedef NS_ENUM(NSInteger, Core3DImportRefusal) { Core3DImportRefusalOpenSurface
 //! Authoritative OCAF history depth for migration/transaction assertions.
 - (NSInteger)debugDocumentUndoCount;
 //! CTO 27 Nov 04:10 item (1), step 3: the time cap (seconds) after which an import's remaining closed parts
-//! stay meshes. A negative value restores the default (4 s). Process-wide; tests restore what they read.
+//! stay meshes. A negative value restores the default (12 s). Process-wide; tests restore what they read.
 - (double)debugImportSolidTimeCapSeconds;
 - (void)debugSetImportSolidTimeCapSeconds:(double)seconds;
 //! Row279a K3: bounded read-only document-evidence inspection of one exact
