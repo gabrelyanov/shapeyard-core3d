@@ -11890,6 +11890,21 @@ namespace {
 // Its own budget: the editable-mesh capture stops at 4096 triangles, and the app's own Fine STLs pass that.
 enum class ImportedSolidResult { Made, Open, TooLarge, Failed };
 constexpr std::size_t kImportedSolidTriangleBudget = 20000;
+// CTO 27 Nov 04:10 item (1), step 1: a limit across the whole file too (3 parts at the per-part limit). Parts are
+// made solid in file order while the running total stays inside it; every later part comes in as a mesh, as a part
+// over the per-part limit does, and both are counted so the app can say why (CTO 07:05: not a refusal).
+constexpr std::size_t kImportedSolidTotalTriangleBudget = 60000;
+std::size_t ImportedMeshTriangleCount(const TopoDS_Shape& shape) noexcept {
+    std::size_t count = 0;
+    try {
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            TopLoc_Location location;
+            const Handle(Poly_Triangulation) mesh = BRep_Tool::Triangulation(TopoDS::Face(it.Current()), location);
+            if (!mesh.IsNull()) count += std::size_t(std::max(0, mesh->NbTriangles()));
+        }
+    } catch (...) {}
+    return count;
+}
 ImportedSolidResult MakeImportedMeshSolid(const TopoDS_Shape& shape, TopoDS_Shape& solidOut) noexcept {
     solidOut.Nullify();
     try {
@@ -11976,6 +11991,7 @@ struct PreparedImportedDocument {
     };
     std::vector<Part> parts;
     int partsWithGaps = 0;
+    int partsTooLarge = 0;  // over the per-part or the whole-file triangle limit: they stay meshes
     bool solidify = false;
     bool anySolidified = false;
 };
@@ -12016,6 +12032,7 @@ std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDoc
         TDF_LabelSequence roots;
         shapes->GetFreeShapes(roots);
         if (roots.IsEmpty() || roots.Length() > 256) return nullptr;
+        std::size_t solidifiedTriangles = 0;  // stays <= kImportedSolidTotalTriangleBudget
         for (int index = 1; index <= roots.Length(); ++index) {
             const TDF_Label label = roots.Value(index);
             const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
@@ -12036,12 +12053,20 @@ std::shared_ptr<const PreparedImportedDocument> Core3DViewer::prepareImportedDoc
             part.asBeforeRepresentation = representation;
             part.shape = part.asBeforeShape;
             part.representation = representation;
-            if (solidify && representation == OcctGeometryRepresentation::TriangleMesh) {
+            const std::size_t triangles = solidify && representation == OcctGeometryRepresentation::TriangleMesh
+                ? ImportedMeshTriangleCount(shape) : 0;
+            if (solidify && representation == OcctGeometryRepresentation::TriangleMesh
+                && (triangles > kImportedSolidTriangleBudget
+                    || triangles > kImportedSolidTotalTriangleBudget - solidifiedTriangles)) {
+                ++prepared->partsTooLarge;
+            } else if (solidify && representation == OcctGeometryRepresentation::TriangleMesh) {
+                solidifiedTriangles += triangles;
                 TopoDS_Shape solid;
                 const auto made = MakeImportedMeshSolid(shape, solid);
                 // CTO 27 Nov 04:10: a part whose surface has a gap comes in as a mesh, as it did before Job 4
                 // (it used to refuse the whole file); the closed parts of the same file still become solids.
                 if (made == ImportedSolidResult::Open) ++prepared->partsWithGaps;
+                if (made == ImportedSolidResult::TooLarge) ++prepared->partsTooLarge;
                 // Too many triangles, or several bodies in one part: it comes in as a mesh, as before.
                 if (made == ImportedSolidResult::Made) {
                     if (!scaled(solid, part.shape)) return nullptr;
@@ -12067,9 +12092,10 @@ double Core3DViewer::importTargetLengthMeters() const noexcept {
 }
 
 OrdinaryEditResult Core3DViewer::publishPreparedImport(const std::shared_ptr<const PreparedImportedDocument>& prepared,
-    int& inserted, int* partsWithGaps) noexcept {
+    int& inserted, int* partsWithGaps, int* partsTooLarge) noexcept {
     inserted = 0;
     if (partsWithGaps) *partsWithGaps = 0;
+    if (partsTooLarge) *partsTooLarge = 0;
     if (![NSThread isMainThread] || myDoc.IsNull() || !canBeginCommittedEdit()) return OrdinaryEditResult::Busy;
     if (!prepared || prepared->parts.empty()) return OrdinaryEditResult::Invalid;
     // Each request gets its own presentation: a refused first attempt must not leave anything shared behind.
@@ -12105,6 +12131,7 @@ OrdinaryEditResult Core3DViewer::publishPreparedImport(const std::shared_ptr<con
     if (result == OrdinaryEditResult::Committed) {
         inserted = int(requests.size());
         if (partsWithGaps) *partsWithGaps = prepared->partsWithGaps;
+        if (partsTooLarge) *partsTooLarge = prepared->partsTooLarge;
     }
     return result;
 }

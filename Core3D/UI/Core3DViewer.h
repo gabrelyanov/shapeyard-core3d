@@ -985,11 +985,13 @@ namespace core3d {
         //! document's unit to `targetMeters` (importTargetLengthMeters(), read on the main thread first).
         //! nullptr when the document cannot be read. publishPreparedImport (main thread) adds the parts as one
         //! creation (one Undo), with the same "as before Job 4" fallback; *partsWithGaps only on Committed.
+        //! Step 1: closed parts are made solid in file order up to 60000 triangles for the whole file (20000 per
+        //! part); the parts over either limit come in as meshes and are counted in *partsTooLarge (on Committed).
         static std::shared_ptr<const PreparedImportedDocument> prepareImportedDocument(const std::string& path,
             double targetMeters, bool solidify) noexcept;
         double importTargetLengthMeters() const noexcept;
         OrdinaryEditResult publishPreparedImport(const std::shared_ptr<const PreparedImportedDocument>& prepared,
-            int& inserted, int* partsWithGaps = nullptr) noexcept;
+            int& inserted, int* partsWithGaps = nullptr, int* partsTooLarge = nullptr) noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
         //! Change projection while retaining target, direction and apparent

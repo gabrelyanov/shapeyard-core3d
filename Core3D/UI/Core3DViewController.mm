@@ -5643,22 +5643,25 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
 // CTO 27 Nov 04:10 item (1): the slow half (reading the document and making closed parts solid) runs on a
 // background queue with no viewer state; the parts are added on the main thread as one creation.
 - (NSInteger)core3d_publishPreparedImport:(const std::shared_ptr<const core3d::PreparedImportedDocument> &)prepared
-                            partsWithGaps:(NSInteger *)partsWithGaps {
+                            partsWithGaps:(NSInteger *)partsWithGaps
+                            partsTooLarge:(NSInteger *)partsTooLarge {
     if (partsWithGaps) *partsWithGaps = 0;
+    if (partsTooLarge) *partsTooLarge = 0;
     if (!NSThread.isMainThread || !prepared || !GLController.viewer) return 0;
-    int inserted = 0, gaps = 0;
-    const auto result = GLController.viewer->publishPreparedImport(prepared, inserted, &gaps);
+    int inserted = 0, gaps = 0, tooLarge = 0;
+    const auto result = GLController.viewer->publishPreparedImport(prepared, inserted, &gaps, &tooLarge);
     if (result != core3d::OrdinaryEditResult::Committed || inserted <= 0) return 0;
     if (partsWithGaps) *partsWithGaps = gaps;
+    if (partsTooLarge) *partsTooLarge = tooLarge;
     [self sendNotifyUIState:UIStateChangingHistory];
     return inserted;
 }
 
 - (void)insertSolidPartsOffTheMainThreadFromImportedDocumentAtURL:(NSURL *)url
-                                                       completion:(void (^)(NSInteger, NSInteger))completion {
+                                                       completion:(void (^)(NSInteger, NSInteger, NSInteger))completion {
     if (!completion) return;
     if (!NSThread.isMainThread || !url.isFileURL || !url.path.UTF8String || !GLController.viewer) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(0, 0); });
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(0, 0, 0); });
         return;
     }
     const std::string path(url.path.UTF8String);
@@ -5668,10 +5671,10 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         const auto prepared = core3d::Core3DViewer::prepareImportedDocument(path, targetMeters, /*solidify*/ true);
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong __typeof(weakSelf) strongSelf = weakSelf;
-            NSInteger gaps = 0;
+            NSInteger gaps = 0, tooLarge = 0;
             const NSInteger inserted = strongSelf && prepared
-                ? [strongSelf core3d_publishPreparedImport:prepared partsWithGaps:&gaps] : 0;
-            completion(inserted, inserted > 0 ? gaps : 0);
+                ? [strongSelf core3d_publishPreparedImport:prepared partsWithGaps:&gaps partsTooLarge:&tooLarge] : 0;
+            completion(inserted, inserted > 0 ? gaps : 0, inserted > 0 ? tooLarge : 0);
         });
     });
 }

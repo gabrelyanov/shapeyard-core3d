@@ -1788,9 +1788,11 @@ typedef NS_ENUM(NSInteger, Core3DImportRefusal) { Core3DImportRefusalOpenSurface
 //! background queue, so a large STL or OBJ does not freeze the editor (19200 triangles held the main thread
 //! 2.94 s on iPad). The parts are then added on the main thread as one creation (one Undo). `completion` is
 //! called once, always later on the main queue, with how many parts were added (0: the model is unchanged)
-//! and how many of them stayed meshes because their surface has a gap.
+//! and how many of them stayed meshes because their surface has a gap, or because they were over the triangle
+//! limit (20000 per part, 60000 for the whole file: the later parts stay meshes, the file is not refused).
 - (void)insertSolidPartsOffTheMainThreadFromImportedDocumentAtURL:(NSURL *)url
-                                                       completion:(void (^)(NSInteger inserted, NSInteger partsWithGaps))completion
+                                                       completion:(void (^)(NSInteger inserted, NSInteger partsWithGaps,
+                                                                            NSInteger partsTooLarge))completion
     NS_SWIFT_NAME(insertSolidPartsOffTheMainThread(fromImportedDocumentAt:completion:));
 
 #ifdef DEBUG
