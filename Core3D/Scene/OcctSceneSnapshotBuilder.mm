@@ -4405,6 +4405,9 @@ bool BuildBoundedCurveStroke(
         double parameter = 0.0;
         Vector3 point{};
         Vector3 tangent{};
+        // False where the curve stands still (a doubled point, the tip of a
+        // cusp): there is no direction to compare there.
+        bool hasTangent = true;
     };
     const auto evaluate = [&](const double theParameter,
                               StrokeSample& theSample) {
@@ -4412,10 +4415,15 @@ bool BuildBoundedCurveStroke(
         ++anEvaluationCount;
         Evaluation aValue;
         if (Evaluate(anEvaluationCurve, theParameter, aValue)
-                != EvaluationRefusal::None
-            || !Normalize(aValue.derivative, 1.0e-12, theSample.tangent)) {
+                != EvaluationRefusal::None) {
             return false;
         }
+        // A point where the curve stands still has no direction. It used to
+        // refuse the whole stroke (and with it the whole scene snapshot); it is
+        // now a sample whose direction test cannot pass, so the piece round it is
+        // refined to the last depth and drawn as its chord there.
+        theSample.hasTangent = Normalize(aValue.derivative, 1.0e-12, theSample.tangent);
+        if (!theSample.hasTangent) theSample.tangent = Vector3{};
         theSample.parameter = theParameter;
         theSample.point = aValue.point;
         return true;
@@ -4444,6 +4452,7 @@ bool BuildBoundedCurveStroke(
             return false;
         }
         if (anError <= aChordTolerance
+            && theLeft.hasTangent && aMiddle.hasTangent && theRight.hasTangent
             && aLeftCosine >= aCosineLimit
             && aRightCosine >= aCosineLimit) {
             if (aSegmentCount >= kMaxCurveStrokeSegments) return false;
@@ -4451,7 +4460,24 @@ bool BuildBoundedCurveStroke(
             aSamples.push_back(theRight);
             return true;
         }
-        if (theDepth == 0) return false;
+        if (theDepth == 0) {
+            // Forms fix round 2 (28 Nov 2026). A hairpin (a path that doubles back
+            // inside a width far smaller than its length: points 0,0 / 5540,0 /
+            // 40,30 / 0,30) turns half a circle inside less than 1/4096 of its
+            // parameter range, so the 5 degree test could not pass at the last
+            // depth and the stroke was refused. A refused stroke fails the whole
+            // scene snapshot: the path was already committed, its publication could
+            // then not be proved, and the editor stayed fenced until the project
+            // was reopened. At the last depth the piece is 1/4096 of its span: it
+            // is drawn as the straight chord it nearly is when that chord is within
+            // the chord tolerance (the sharpness is real, and is drawn sharp).
+            // Every curve that passed before takes exactly the branches it took.
+            if (anError > aChordTolerance
+                || aSegmentCount >= kMaxCurveStrokeSegments) return false;
+            ++aSegmentCount;
+            aSamples.push_back(theRight);
+            return true;
+        }
         return refine(theLeft, aMiddle, theDepth - 1)
             && refine(aMiddle, theRight, theDepth - 1);
     };
@@ -4470,6 +4496,7 @@ bool BuildBoundedCurveStroke(
             if (!evaluate(std::nextafter(aRight.parameter, aSpanLeft.parameter),
                           aLeftLimit)) return false;
             aSpanRight.tangent = aLeftLimit.tangent;
+            aSpanRight.hasTangent = aLeftLimit.hasTangent;
         }
         if (!refine(aSpanLeft, aSpanRight, kMaxCurveStrokeDepth)) {
             return false;
@@ -4494,7 +4521,8 @@ bool BuildBoundedCurveStroke(
         const Vector3 aDirectionValue =
             Subtract(aSamples[aSegment + 1].point, aSamples[aSegment].point);
         Vector3 aDirection{}, aLateral{}, aNormal{};
-        if (!Normalize(aDirectionValue, Precision::Confusion(), aDirection)) return false;
+        // A piece with no length (two samples on one spot) has nothing to draw.
+        if (!Normalize(aDirectionValue, Precision::Confusion(), aDirection)) continue;
         for (const Vector3* aReference : {&theSavedCurve.frame.zAxis,
                                           &theSavedCurve.frame.yAxis,
                                           &theSavedCurve.frame.xAxis}) {
@@ -4520,7 +4548,8 @@ bool BuildBoundedCurveStroke(
         for (const std::uint32_t anOffset : {0U, 2U, 1U, 1U, 2U, 3U})
             theMesh.indices.push_back(aBase + anOffset);
     }
-    if (!IsValid(aRenderedBounds) || !FitsUInt32(theMesh.indices.size())) return false;
+    if (theMesh.indices.empty()
+        || !IsValid(aRenderedBounds) || !FitsUInt32(theMesh.indices.size())) return false;
     theMesh.localBounds = aRenderedBounds;
     theMesh.primitives.push_back(
         {0, static_cast<std::uint32_t>(theMesh.indices.size()), 0, false});
