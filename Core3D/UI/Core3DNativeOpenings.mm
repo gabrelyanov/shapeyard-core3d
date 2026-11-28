@@ -1494,11 +1494,17 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     }
     NSString *entity = result == Core3DProfileConstructionResultCommitted
         ? Text(core3d::retained_solid::UUIDText(receipt.authority.owner.entity)) : nil;
-    DeliverCreated(completion, result, result == Core3DProfileConstructionResultCommitted
+    NSString *detail = result == Core3DProfileConstructionResultCommitted
         ? @"Bounded curve created as one native history command."
         : result == Core3DProfileConstructionResultRecoveryRequired
             ? @"Bounded-curve creation close is unknown; native recovery ownership is retained."
-            : @"Bounded-curve creation refused without history.", entity);
+            : @"Bounded-curve creation refused without history.";
+#if DEBUG
+    // Which native step answered, for the lanes' checks (the forms never show this tail to people).
+    if (result != Core3DProfileConstructionResultCommitted)
+        detail = [detail stringByAppendingFormat:@" [DEBUG reason=%s]", receipt.reason.c_str()];
+#endif
+    DeliverCreated(completion, result, detail, entity);
 }
 - (BOOL)cancel {
     State value = _state.load();
