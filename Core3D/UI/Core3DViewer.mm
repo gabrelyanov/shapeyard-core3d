@@ -3538,6 +3538,10 @@ struct State final {
     // Row-265/N07 lifecycle probe: real closes at this viewer's lease boundary
     // that must be reported unproven after CommitCommand or AbortCommand ran.
     std::uint32_t debugUnprovenCloseResults = 0;
+    // Forms fix round 2: real closes that pass before the next ones are
+    // reported unproven (an on-screen check lets the first tools finish and
+    // asks the question of a later one).
+    std::uint32_t debugUnprovenCloseSkips = 0;
 #endif
 };
 } // namespace native_opening::detail
@@ -4367,7 +4371,9 @@ bool CommandLease::commit() noexcept {
         // caller maps a genuine outcome-unknown and the shared recovery fence
         // is armed through the same retainRecovery path as a real failure.
         if (const auto state = context_ ? context_->state_.lock() : nullptr) {
-            if (state->debugUnprovenCloseResults > 0) {
+            if (state->debugUnprovenCloseResults > 0 && state->debugUnprovenCloseSkips > 0) {
+                --state->debugUnprovenCloseSkips;
+            } else if (state->debugUnprovenCloseResults > 0) {
                 --state->debugUnprovenCloseResults;
                 if (context_->booleanFailure_ == 1) context_->booleanFailureHit_ = 1;
                 retainRecovery();
@@ -7201,10 +7207,16 @@ Core3DViewer::captureNativeOpeningContext(
         // closes of this viewer's native leases are reported unproven (the same
         // Row-265 boundary the lifecycle probes use), to see what the editor does
         // after a tool that could not prove its last step. DEBUG builds only.
+        // "N" or "K:N": after K real closes that pass, the next N are reported unproven.
         if (const char* asked = std::getenv("SHAPEYARD_UITEST_NATIVE_CLOSE_UNPROVEN")) {
-            const long count = std::strtol(asked, nullptr, 10);
-            if (count > 0 && count < 1000)
+            char* rest = nullptr;
+            long first = std::strtol(asked, &rest, 10);
+            long skips = 0, count = first;
+            if (rest != nullptr && *rest == ':') { skips = first; count = std::strtol(rest + 1, nullptr, 10); }
+            if (count > 0 && count < 1000 && skips >= 0 && skips < 1000) {
                 _nativeOpeningState->debugUnprovenCloseResults = std::uint32_t(count);
+                _nativeOpeningState->debugUnprovenCloseSkips = std::uint32_t(skips);
+            }
         }
 #endif
         _nativeOpeningState->owner = this;
