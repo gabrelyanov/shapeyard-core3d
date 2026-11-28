@@ -6523,6 +6523,15 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     if(!selectedContext.IsNull()&&selectedContext->NbSelected()==1){
         selectedContext->InitSelected();const auto doc=GLController.viewer->getDocument();
         if(!doc.IsNull())preserveLegacyStamping=doc->StoredGeometryRepresentationForLabel(doc->ShapeLabel(selectedContext->SelectedInteractive()))==OcctGeometryRepresentation::LegacyUnknown;
+        // A project made by 5.34 or earlier stores no length unit, and the prepared route below
+        // cannot be prepared without one (OcctDocument::CapturePBRScalarState). A Material-panel
+        // colour then did nothing, with no Undo step, on every part 5.35 itself made or rebuilt
+        // in such a project (a new part, a joined part), while its old untouched parts took the
+        // colour through the ordinary colour command below. In a project without a unit every
+        // part takes that command (build 14, 27 Nov 2026). Projects that store a unit go as before.
+        Standard_Real storedUnit=0;
+        if(!preserveLegacyStamping&&!doc.IsNull()&&!doc->Document().IsNull()
+            &&!XCAFDoc_DocumentTool::GetLengthUnit(doc->Document(),storedUnit))preserveLegacyStamping=true;
     }
     // The existing legacy-touch contract stamps BRep inside its ordinary color
     // command. Choose that contract before any prepared admission, never as a retry.

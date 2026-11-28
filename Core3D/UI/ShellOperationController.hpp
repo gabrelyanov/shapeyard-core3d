@@ -377,6 +377,72 @@ void DebugSetShellOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
 void NoteShellOffsetGuardRefusal() noexcept;
 Standard_Integer ShellOffsetGuardRefusalCount() noexcept;
 
+//! Second half of the guard below (27 Nov 2026; the real App Store 5.34.3 project
+//! "M5-03": a cube with a ball-shaped pocket that touches a side of the cube at one
+//! point, Shell 2 mm from that side closed the app in a preview). The same fault as
+//! the first half's, by the same line of the kernel, reached another way:
+//! for every corner point of an opening, the kernel (BRepOffset_Inter3d::
+//! ContextIntByArc, its loop over the opening's vertices) takes each face of the
+//! part that reaches that point and has not been paired with the opening along a
+//! shared edge, and gives ALL edges of that face's moved copy to
+//! BRepOffset_Tool::TryProject. TryProject asks each edge for its curve in space,
+//! tries to build one when there is none, and then uses the curve without looking
+//! whether it has one (OCCT 7.8.0: `new Geom_TrimmedCurve(C, f, l)` with a null C).
+//! A degenerated edge (the pole of a ball, the tip of a cone) never has a curve in
+//! space and none can be built for it, so that line reads through a null pointer
+//! and the app closes. A crash cannot be caught, so the kernel is not called when:
+//!   a face that is not an opening touches an opening at a corner point, shares no
+//!   edge with that opening, and has an edge without a curve in space.
+//! Such a shell closed the process every time it was tried, one process per case
+//! (a ball or cone pocket touching a side at one point; a ball or a pointed cone
+//! joined onto a cube of the same width, opened at a side), so nothing the kernel
+//! can make is held back. A face with such an edge that SHARES an edge with the
+//! opening (a cone opened at its base, half a ball opened at its flat side, a ball
+//! pocket that runs through the opening's rim) is paired with the opening along
+//! that edge before the loop above and is left to the kernel as before. It applies
+//! to a part made today exactly as to a part from an old project: the fault is in
+//! the shape, not in the file. Any doubt here is "not safe".
+inline Standard_Boolean ShellOpeningCornersAreSafe(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings) noexcept
+{
+    try {
+        if (source.IsNull() || openings.empty()) return Standard_False;
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfVertices;
+        TopExp::MapShapesAndAncestors(source, TopAbs_VERTEX, TopAbs_FACE, facesOfVertices);
+        const auto isOpening = [&openings](const TopoDS_Shape& face) -> bool {
+            for (const TopoDS_Face& opening : openings) if (opening.IsSame(face)) return true;
+            return false;
+        };
+        for (const TopoDS_Face& opening : openings) {
+            TopTools_IndexedMapOfShape openingEdges, judged;
+            TopExp::MapShapes(opening, TopAbs_EDGE, openingEdges);
+            for (TopExp_Explorer corner(opening, TopAbs_VERTEX); corner.More(); corner.Next()) {
+                // A corner of an opening is a corner of the solid it is cut from; one that
+                // is not means the opening is not a face of this shape: not judged safe.
+                if (!facesOfVertices.Contains(corner.Current())) return Standard_False;
+                for (TopTools_ListOfShape::Iterator touching(facesOfVertices.FindFromKey(corner.Current()));
+                     touching.More(); touching.Next()) {
+                    const TopoDS_Shape& face = touching.Value();
+                    if (isOpening(face) || judged.Contains(face)) continue;
+                    judged.Add(face);
+                    Standard_Boolean sharesEdge = Standard_False, hasEdgeWithoutCurve = Standard_False;
+                    for (TopExp_Explorer walk(face, TopAbs_EDGE); walk.More(); walk.Next()) {
+                        const TopoDS_Edge edge = TopoDS::Edge(walk.Current());
+                        if (openingEdges.Contains(edge)) sharesEdge = Standard_True;
+                        TopLoc_Location location;
+                        Standard_Real first = 0.0, last = 0.0;
+                        if (BRep_Tool::Degenerated(edge)
+                            || BRep_Tool::Curve(edge, location, first, last).IsNull())
+                            hasEdgeWithoutCurve = Standard_True;
+                    }
+                    if (hasEdgeWithoutCurve && !sharesEdge) return Standard_False;
+                }
+            }
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 //! Whether the offset kernel may be given this shell at all. The kernel does not
 //! always refuse what it cannot hollow: for a cube with Bevel 3 on every edge,
 //! opened at its bottom face, it reads through a null pointer and the app closes
@@ -443,7 +509,9 @@ inline Standard_Boolean ShellOffsetIsSafe(
                 if (!hasNeighbour) return Standard_False;
             }
         }
-        return Standard_True;
+        // Asked last, so that every shell the first half already held back is held back
+        // for the same reason as before.
+        return ShellOpeningCornersAreSafe(source, openings);
     } catch (...) { return Standard_False; }
 }
 
