@@ -3780,8 +3780,34 @@ Context::~Context() {
         // destruction, but never clear an active, recovery, or retained
         // publication owner (including one owned by a peer).
         if (state->activeContext == identifier_ && state->activeMarker == 0
-            && state->recoveryMarker == 0 && !state->pendingPublication)
+            && state->recoveryMarker == 0 && !state->pendingPublication) {
             state->activeContext = 0;
+        } else if (state->activeMarker == 0
+                   && (state->activeContext == identifier_
+                       || state->recoveryContext == identifier_
+                       || state->publicationContext == identifier_)) {
+            // Forms fix round 2 (28 Nov 2026): this issuer still holds the shared
+            // fence (a close or a publication it could not prove) and is going
+            // away with its tool. Only the issuer could settle its own fence
+            // exactly, so from here on nothing could: every later add, edit and
+            // tool was refused until the project was reopened (the cut captain's
+            // hand test of builds 15 and 16: New path > Create "close is unknown",
+            // Cancel, then + Cube did nothing). The owning viewer now settles a
+            // fence whose holder no longer exists the way R13P-4 settles one that
+            // cannot be recovered part by part: it draws the whole document again
+            // from OCAF, which shows what the document really holds, and clears
+            // the fence only if that drawing and an ordinary snapshot succeed. No
+            // OCAF command runs and no geometry is edited. It runs on the next
+            // turn of the main queue, after the tool has finished going away; a
+            // settlement that is refused then (an open command, another tool's own
+            // recovery) leaves the fence armed, exactly as before.
+            const std::weak_ptr<detail::State> weak = state;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                const auto live = weak.lock();
+                if (live && live->owner != nullptr)
+                    (void)live->owner->settleNativeOpeningFenceByDocumentRedraw(0);
+            });
+        }
     }
 }
 
@@ -7170,6 +7196,17 @@ Core3DViewer::captureNativeOpeningContext(
     }
     if (!_nativeOpeningState) {
         _nativeOpeningState = std::make_shared<native_opening::detail::State>();
+#if DEBUG
+        // Forms fix round 2: an on-screen check can ask that the first N real
+        // closes of this viewer's native leases are reported unproven (the same
+        // Row-265 boundary the lifecycle probes use), to see what the editor does
+        // after a tool that could not prove its last step. DEBUG builds only.
+        if (const char* asked = std::getenv("SHAPEYARD_UITEST_NATIVE_CLOSE_UNPROVEN")) {
+            const long count = std::strtol(asked, nullptr, 10);
+            if (count > 0 && count < 1000)
+                _nativeOpeningState->debugUnprovenCloseResults = std::uint32_t(count);
+        }
+#endif
         _nativeOpeningState->owner = this;
     }
     if (!nativeOpeningReady(0)
