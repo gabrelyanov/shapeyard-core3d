@@ -12,6 +12,9 @@
 #include <StdSelect_BRepOwner.hxx>
 #include <Select3D_SensitiveCylinder.hxx>
 #include <Select3D_SensitiveTriangulation.hxx>
+#include <StdSelect_BRepSelectionTool.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <BRep_Tool.hxx>
 #include <TopoDS.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
@@ -39,6 +42,28 @@ Core3DContext::Core3DContext(const Handle(V3d_Viewer)& MainViewer)
 // so reordering detected candidates cannot repair it. Use the face's existing
 // rendered triangulation, retaining the exact native owner and mode/filter
 // authority. Never mesh, manufacture owners, or change the selected set here.
+//
+// Object mode too (28 Nov 2026, the tester's joined cup): the whole part's
+// selection holds the same sensitives, one per wall, under the part's one
+// owner. OCCT 7.8.0 lays such a sensitive along the wrong direction when the
+// wall keeps both end circles and has a second boundary (a part joined to its
+// side): it then lies below the part, and a tap on the wall selects nothing.
+// The walls OCCT gives a cylinder sensitive, in the order the selection holds them.
+static std::vector<TopoDS_Face> WallsWithCylinderSensitives(const TopoDS_Shape& part)
+{
+    std::vector<TopoDS_Face> walls;
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(part, TopAbs_FACE, faces);
+    for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+        const TopoDS_Face face = TopoDS::Face(faces(index));
+        Select3D_EntitySequence own;
+        StdSelect_BRepSelectionTool::GetSensitiveForFace(face, new StdSelect_BRepOwner(face, 0), own, Standard_False);
+        if (own.Size() == 1 && !Handle(Select3D_SensitiveCylinder)::DownCast(own.First()).IsNull())
+            walls.push_back(face);
+    }
+    return walls;
+}
+
 static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
 {
     const auto selector = context.MainSelector();
@@ -48,7 +73,8 @@ static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
     context.DisplayedObjects(AIS_KOI_Shape, -1, displayed);
     if (displayed.Extent() > 256) return false;
     bool changed = false;
-    const int mode = AIS_Shape::SelectionMode(TopAbs_FACE);
+    const int faceMode = AIS_Shape::SelectionMode(TopAbs_FACE);
+    for (const int mode : {faceMode, AIS_Shape::SelectionMode(TopAbs_SHAPE)})
     for (AIS_ListIteratorOfListOfInteractive object(displayed); object.More(); object.Next()) {
         const auto shape = Handle(AIS_Shape)::DownCast(object.Value());
         if (shape.IsNull() || !selector->IsActive(shape, mode)) continue;
@@ -59,6 +85,9 @@ static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
             Handle(SelectMgr_SensitiveEntity) oldEntity, newEntity;
         };
         std::vector<Replacement> replacements;
+        std::vector<TopoDS_Face> walls;
+        std::size_t wall = 0;
+        bool wallsRead = false, wallsMatch = true;
         int index = 0;
         for (const auto& entity : selection->Entities()) {
             const int current = index++;
@@ -66,10 +95,20 @@ static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
             const auto cylinder = Handle(Select3D_SensitiveCylinder)::DownCast(entity->BaseSensitive());
             if (cylinder.IsNull()) continue;
             const auto owner = Handle(StdSelect_BRepOwner)::DownCast(cylinder->OwnerId());
-            if (owner.IsNull() || !owner->HasShape() || owner->Selectable() != shape
-                || owner->Shape().ShapeType() != TopAbs_FACE) continue;
+            if (owner.IsNull() || !owner->HasShape() || owner->Selectable() != shape) continue;
+            TopoDS_Face face;
+            if (mode == faceMode) {
+                if (owner->Shape().ShapeType() != TopAbs_FACE) continue;
+                face = TopoDS::Face(owner->Shape());
+            } else {
+                // A whole solid cylinder or cone has one sensitive of its own, and that one is right.
+                if (!cylinder->IsHollow()) continue;
+                if (!wallsRead) { walls = WallsWithCylinderSensitives(shape->Shape()); wallsRead = true; }
+                if (wall >= walls.size()) { wallsMatch = false; break; }
+                face = walls[wall++];
+            }
             TopLoc_Location location;
-            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(owner->Shape()), location);
+            const auto mesh = BRep_Tool::Triangulation(face, location);
             if (mesh.IsNull() || mesh->NbTriangles() == 0 || mesh->NbTriangles() > 100000) continue;
             Handle(Select3D_SensitiveTriangulation) triangles =
                 new Select3D_SensitiveTriangulation(owner, mesh, location, Standard_True);
@@ -78,6 +117,8 @@ static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
             if (entity->IsActiveForSelection()) replacement->SetActiveForSelection();
             replacements.push_back({current, entity, replacement});
         }
+        // Not one sensitive per wall: the order cannot be trusted, the part stays as OCCT made it.
+        if (!wallsMatch || wall != walls.size()) continue;
         if (replacements.empty()) continue;
         context.ClearDetected(Standard_False);
         manager->ClearSelectionStructures(shape, mode);
